@@ -9,6 +9,11 @@ import skgeom
 # common
 from common_types import conditional_decorator, timer_func
 
+# math
+import math
+
+# debugging
+import pdb
 
 # terrains, polygons
 from terrain    import Terrain
@@ -45,27 +50,21 @@ def terrain_demo(
     decoded_seq -= 1
     decoded_seq = np.unique(decoded_seq)
    
-    # covert to approriate indices optimal solution
+    # covert to appropriate indices optimal solution
     sol = sol.flatten().numpy()   
     sol = np.array(sorted(list(set(sol[(sol>0)]))))    
     sol -= 1
         
-    # predicted vs opt guards    
+    # points
     points = points.reshape(points.shape[0],points.shape[2])[1:]
+    # predicted vs opt guards        
     guards = points[decoded_seq][:,[0,1]].numpy()   
     opt_guards = points[sol][:,[0,1]].numpy()
-
+    
     # remove 3rd dimension of points
     points = points[:,[0,1]].numpy()
                
-    # define bounding box
-    l,r = np.min(points[:,0]), np.max(points[:,0])
-    b,t = np.min(points[:,1]), np.max(points[:,1])
-
-    eps = 0.01
-    points = np.insert(points,0,[[l-eps,t+eps]],axis=0)
-    points = np.append(points,[[r+eps,t+eps]],axis=0)           
-   
+       
     # define polygon
     poly = skgeom.Polygon(points) 
 
@@ -129,7 +128,7 @@ def polygon_demo(
     
     # predict solution
     model_result = model(points.cuda(), lens, beam_width=beam_width, alpha=alpha)
-    decoded_seq = np.vectorize(int)(model_result.to_seq(),cpu()).squeeze()
+    decoded_seq = np.vectorize(int)(model_result[0].to_seq().cpu()).squeeze()
 
     for i, d in enumerate(decoded_seq):
         if d == 0:
@@ -148,15 +147,19 @@ def polygon_demo(
     guards = points[decoded_seq][:,[0,1]].numpy()   
     opt_guards = points[sol][:,[0,1]].numpy()
 
+
     # remove 3rd dimension of points
     points = points[:,[0,1]].numpy()
     
     # draw polygon
     poly = skgeom.Polygon(points)
     
-    # predicted guards
+    # predicted guards vs opt guards
     predicted = [ skgeom.Point2(g[0],g[1]) for g in guards.tolist()]
     opt       = [ skgeom.Point2(g[0],g[1]) for g in opt_guards.tolist()]
+
+    
+    
     
     # return predicted and ground_truth
     # compute coverage
@@ -171,18 +174,37 @@ def polygon_demo(
                         
     # compute visibility
     vs = skgeom.RotationalSweepVisibility(arr)
-
         
+    # region area
     region_area = 0
+
     # visibility polygon
     poly_area = float(poly.area())
     views = []
-    for p in predicted:        
-        q = skgeom.Point2(p.x(),p.y()+eps)  # take y-close point as approximation of p
-        face = arr.find(q)
-        vx = vs.compute_visibility(q,face)        
-        verts = sorted([v.point() for v  in vx.vertices],key = lambda p : p.x())             
-        views.append(skgeom.Polygon(verts))
+
+    edges = list(poly.edges)
+
+    
+    for i in decoded_seq:        
+        v_prev, v, v_next = edges[(i-1) % len(poly)].source(), edges[i].source(), edges[i].target() 
+       
+        # affine combination of adjacent vertices
+        p = skgeom.Vector2(v,v_prev)
+        p = 1.0/math.sqrt(p.squared_length()) * p
+        r = skgeom.Vector2(v,v_next) 
+        r = 1.0/math.sqrt(r.squared_length()) * r
+
+        q = v+eps*(p+r)
+        # change orientation if point outside of polygon
+        q = v-eps*(p+r) if poly.oriented_side(q) == skgeom.Sign.NEGATIVE else q 
+
+        # find q in polygon
+        face = arr.find(q)      
+        # compute visibility
+        vx = vs.compute_visibility(q,face)                
+        
+        # add views        
+        views.append(skgeom.Polygon([v.point() for v  in vx.vertices]))
         
     region = skgeom.PolygonSet(views)
 
@@ -193,7 +215,7 @@ def polygon_demo(
         ]
         )        
     
-    coverage    = region_area/poly_area    
+    coverage    = float(region_area/poly_area)
     
     return (poly, region, predicted, opt, coverage) 
 
@@ -343,7 +365,7 @@ class TGreedy:
             
             self.predicted.append(p)
         
-        self.coverage = coverage        
+        self.coverage = float(coverage)
         return self.predicted
 
     def show(self):
@@ -367,3 +389,11 @@ class TGreedy:
         skgeom.draw.draw(region,line_width=1,alpha=0.2,aspect_ratio = 'auto',facecolor = 'red')     
         skgeom.draw.draw(points,color = 'red')
         plt.show()
+
+
+class AGNetSearch(TGNetSearch):
+    @conditional_decorator(timer_func,False)
+    def predict(self,instance,beam_width=4,alpha=1,beta=0.2):        
+        sample = VisSample.read_samples(path=instance,sol_sample=1)[0]
+        self.poly, self.region, self.predicted, self.opt, self.coverage = polygon_demo(self.model, sample, beam_width=beam_width,alpha=alpha)
+        return self.predicted

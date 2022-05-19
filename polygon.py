@@ -29,16 +29,17 @@ def compose(*fs):
 
 
 class Polygon:
-    def __init__(self : Type["Polygon"], filename : Optional[str] = None):
+    def __init__(self : Type["Polygon"], filename : Optional[str] = None, poly : Optional[skgeom.Polygon] = None):
         """
         construct polygon from .pol file or make empty polygon.
         """
 
-        if filename : self.read_pol(filename) 
-        else: 
+        if filename : poly = self.read_pol(filename) 
+        else:
             self.no_vertices = 0
             self.poly = skgeom.Polygon()
-        
+
+        self.poly = poly
         # vertices        
         self.Vertices           = list(self.poly.vertices) # geometric objects        
         self.no_vertices        = len(self.Vertices)
@@ -125,7 +126,7 @@ class Polygon:
             
             verts = [skgeom.Point2(scale(p[0],l,r),scale(p[1],b,t)) for p in _points]            
                         
-        self.poly = skgeom.Polygon(verts)
+        return skgeom.Polygon(verts)
         
         
 
