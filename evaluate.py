@@ -227,7 +227,8 @@ def sample_coverage(
     samples: List[VisSample], 
     beam_width: int = None, 
     alpha: float = None, 
-    beta: float = None) -> float:
+    vis_compute = terrain_demo
+    ) -> float:
 
     """
         compute sample average of coverage
@@ -239,7 +240,7 @@ def sample_coverage(
     for i,sample in enumerate(samples):
         try:
             print(f'\rProcessing instance {sample.name}', end = ' ')
-            _,_,predicted,opt, cover = terrain_demo(model, sample, beam_width, alpha, beta)
+            _,_,predicted,opt, cover = vis_compute(model, sample, beam_width, alpha)
             coverage[i] = cover
             approx[i]   = np.float(len(predicted))/np.float(len(opt)) if len(opt) > 0 else 0
         except Exception as e:
