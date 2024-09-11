@@ -22,6 +22,7 @@ from polygon import Polygon, AGSolver
 
 # types
 from dataclasses import dataclass
+from torch.utils.data import DataLoader
 
 
 # -----------------------------------------------
@@ -65,7 +66,7 @@ class VisSample:
         files = [path] if os.path.isfile(path) else [os.path.join(path,f) for f in os.listdir(path) if os.path.isfile(os.path.join(path,f))]
         
                   
-        # read TGPIL instances from file
+        # read TGPIL/AG instances from file
         instances = sorted([f for f in files if f.endswith('.terrain') or f.endswith('.pol')])
                
         for filename in instances:          

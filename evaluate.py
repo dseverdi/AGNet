@@ -1,223 +1,63 @@
-from matplotlib import pyplot as plt
-
 # pytorch utils
 from torch.utils.data import DataLoader
-
-# CGAL wrappers
-import skgeom
-
 # common
 from common_types import conditional_decorator, timer_func
-
-# math
-import math
-
-# debugging
-import pdb
 
 # terrains, polygons
 from terrain    import Terrain
 from polygon    import Polygon
+# NNs
+import PtrNet
+import covnet
+
+# math
+import math
+# debugging
+import pdb
 
 
-# data types for pytorch
-from data_types import *
+from demo import *
 
 
-# terrain demonstration
-def terrain_demo(
-    model: Any,    
+# specify CUDA device
+device = torch.device('cuda:0')
+
+
+def vis_predict(
+    model: Any, 
     sample: VisSample, 
     beam_width: int = None, 
     alpha: float = None, 
     beta: float = None) -> Tuple:
     """
-        terrain generator with computed optimal and predicted guards
+        returns seqs of predicted pointers for polygon
     """
     
-    points_generator = DataLoader(VisDataset([sample]), batch_size=1, collate_fn=vis_collate_fn)
-    points, lens, sol = next(iter(points_generator))
-
+    points_generator = DataLoader(VisDataset([sample]), batch_size=1, collate_fn=collate_fn)
+    points, lens, sol = next(iter(points_generator))      
+    
+    # Move the model to the same device as the input tensor    
+    model.to(device)
     
     # predict solution
     model_result = model(points.cuda(), lens, beam_width=beam_width, alpha=alpha, beta=beta)
-    decoded_seq = np.vectorize(int)(model_result[0].cpu()).squeeze()
+    
+    # define list of possible solutions
+    num_sols = len(model_result)
+    decoded_seq = [None] * num_sols
+     
+    for j in range(num_sols):
+        decoded_seq[j] = np.vectorize(int)(model_result[j][0].cpu()).squeeze()
 
-    for i, d in enumerate(decoded_seq):
-        if d == 0:
-            decoded_seq = decoded_seq[:i]
-            break  
-    decoded_seq -= 1
-    decoded_seq = np.unique(decoded_seq)
+        for i, d in enumerate(decoded_seq[j]):
+            if d == 0:
+                decoded_seq[j] = decoded_seq[j][:i]
+                break   
+        decoded_seq[j] -= 1
+        decoded_seq[j] = np.unique(decoded_seq[j])
    
-    # covert to appropriate indices optimal solution
-    sol = sol.flatten().numpy()   
-    sol = np.array(sorted(list(set(sol[(sol>0)]))))    
-    sol -= 1
-        
-    # points
-    points = points.reshape(points.shape[0],points.shape[2])[1:]
-    # predicted vs opt guards        
-    guards = points[decoded_seq][:,[0,1]].numpy()   
-    opt_guards = points[sol][:,[0,1]].numpy()
-    
-    # remove 3rd dimension of points
-    points = points[:,[0,1]].numpy()
-               
-       
-    # define polygon
-    poly = skgeom.Polygon(points) 
-
-    # predicted guards
-    predicted = [ skgeom.Point2(g[0],g[1]) for g in guards.tolist()]
-    opt       = [ skgeom.Point2(g[0],g[1]) for g in opt_guards.tolist()]
-    
-    # return predicted and ground_truth
-    # compute coverage
-    # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
-    eps = 0.000001
    
-           
-    # arrangments
-    arr = skgeom.arrangement.Arrangement()
-    # add edges to arr
-    for e in poly.edges : arr.insert(e)
-                        
-    # compute visibility
-    vs = skgeom.RotationalSweepVisibility(arr)
-
-        
-    region_area = 0
-    # visibility polygon
-    poly_area = float(poly.area())
-    views = []
-    for p in predicted:        
-        q = skgeom.Point2(p.x(),p.y()+eps)  # take y-close point as approximation of p
-        face = arr.find(q)
-        vx = vs.compute_visibility(q,face)        
-        verts = sorted([v.point() for v  in vx.vertices],key = lambda p : p.x())             
-        views.append(Polygon(verts))
-        
-    region = skgeom.PolygonSet(views)
-
-    
-    region_area = np.sum(
-        [abs(float(_poly.outer_boundary().area()))-np.sum([h.area() for h in _poly.holes]) for _poly in region.polygons]
-        )        
-    
-    coverage    = region_area/poly_area    
-    
-    return (poly, region, predicted, opt, coverage) 
-
-
-# polygon demonstration
-def polygon_demo(
-    model : Any, 
-    sample: VisSample, 
-    beam_width: int = None, 
-    alpha: float = None) -> Tuple:
-    
-    """
-        polygon demo:
-            assume VisSample to be PolygonSample...
-            
-    """
-    points_generator = DataLoader(VisDataset([sample]), batch_size=1, collate_fn=collate_fn)
-    points, lens, sol = next(iter(points_generator))
-
-    
-    # predict solution
-    model_result = model(points.cuda(), lens, beam_width=beam_width, alpha=alpha)
-    decoded_seq = np.vectorize(int)(model_result[0].to_seq().cpu()).squeeze()
-
-    for i, d in enumerate(decoded_seq):
-        if d == 0:
-            decoded_seq = decoded_seq[:i]
-            break   
-    decoded_seq -= 1
-    decoded_seq = np.unique(decoded_seq)
-   
-    # covert to approriate indices optimal solution
-    sol = sol.flatten().numpy()   
-    sol = np.array(sorted(list(set(sol[(sol>0)]))))    
-    sol -= 1
-        
-    # predicted vs opt guards    
-    points = points.reshape(points.shape[0],points.shape[2])[1:]
-    guards = points[decoded_seq][:,[0,1]].numpy()   
-    opt_guards = points[sol][:,[0,1]].numpy()
-
-
-    # remove 3rd dimension of points
-    points = points[:,[0,1]].numpy()
-    
-    # draw polygon
-    poly = skgeom.Polygon(points)
-    
-    # predicted guards vs opt guards
-    predicted = [ skgeom.Point2(g[0],g[1]) for g in guards.tolist()]
-    opt       = [ skgeom.Point2(g[0],g[1]) for g in opt_guards.tolist()]
-
-    
-    
-    
-    # return predicted and ground_truth
-    # compute coverage
-    # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
-    eps = 0.000001
-   
-           
-    # arrangments
-    arr = skgeom.arrangement.Arrangement()
-    # add edges to arr
-    for e in poly.edges : arr.insert(e)
-                        
-    # compute visibility
-    vs = skgeom.RotationalSweepVisibility(arr)
-        
-    # region area
-    region_area = 0
-
-    # visibility polygon
-    poly_area = float(poly.area())
-    views = []
-
-    edges = list(poly.edges)
-
-    
-    for i in decoded_seq:        
-        v_prev, v, v_next = edges[(i-1) % len(poly)].source(), edges[i].source(), edges[i].target() 
-       
-        # affine combination of adjacent vertices
-        p = skgeom.Vector2(v,v_prev)
-        p = 1.0/math.sqrt(p.squared_length()) * p
-        r = skgeom.Vector2(v,v_next) 
-        r = 1.0/math.sqrt(r.squared_length()) * r
-
-        q = v+eps*(p+r)
-        # change orientation if point outside of polygon
-        q = v-eps*(p+r) if poly.oriented_side(q) == skgeom.Sign.NEGATIVE else q 
-
-        # find q in polygon
-        face = arr.find(q)      
-        # compute visibility
-        vx = vs.compute_visibility(q,face)                
-        
-        # add views        
-        views.append(skgeom.Polygon([v.point() for v  in vx.vertices]))
-        
-    region = skgeom.PolygonSet(views)
-
-    
-    region_area = np.sum(
-        [
-            abs(float(_poly.outer_boundary().area()))-np.sum([h.area() for h in _poly.holes]) for _poly in region.polygons
-        ]
-        )        
-    
-    coverage    = float(region_area/poly_area)
-    
-    return (poly, region, predicted, opt, coverage) 
+    return decoded_seq
 
 
 
@@ -254,38 +94,6 @@ def sample_coverage(
 
 
 
-def vis_predict(
-    model: Any, 
-    sample: VisSample, 
-    beam_width: int = None, 
-    alpha: float = None, 
-    beta: float = None) -> Tuple:
-    """
-        returns seqs of predicted and opt values
-    """
-    
-    points_generator = DataLoader(VisDataset([sample]), batch_size=1, collate_fn=vis_collate_fn)
-    points, lens, sol = next(iter(points_generator))
-
-    
-    # predict solution
-    model_result = model(points.cuda(), lens, beam_width=beam_width, alpha=alpha, beta=beta)
-    decoded_seq = np.vectorize(int)(model_result[0].cpu()).squeeze()
-
-    for i, d in enumerate(decoded_seq):
-        if d == 0:
-            decoded_seq = decoded_seq[:i]
-            break   
-    decoded_seq -= 1
-    decoded_seq = np.unique(decoded_seq)
-   
-    # covert to approriate indices optimal solution
-    sol = sol.flatten().numpy()   
-    sol = np.array(sorted(list(set(sol[(sol>0)]))))    
-    sol -= 1
-    return decoded_seq
-
-
 
 # opt, heuristics and nn predictors
 class Opt:   
@@ -312,9 +120,12 @@ class Opt:
 
 
 class TGNetSearch:
-    def __init__(self,model):
-        self.model = torch.load(model)        
-        
+    def __init__(self, model):
+        try:
+            self.model = torch.load(model)
+            print("Model loaded successfully.")            
+        except Exception as e:
+            print(f"Failed to load model: {e}")
     @conditional_decorator(timer_func,False)
     def predict(self,instance,beam_width=4,alpha=1,beta=0.2):        
         sample = VisSample.read_samples(path=instance,sol_sample=1)[0]
@@ -398,3 +209,32 @@ class AGNetSearch(TGNetSearch):
         sample = VisSample.read_samples(path=instance,sol_sample=1)[0]
         self.poly, self.region, self.predicted, self.opt, self.coverage = polygon_demo(self.model, sample, beam_width=beam_width,alpha=alpha)
         return self.predicted
+    
+    
+
+class AGMNetSearch:
+    """
+    uses predictor to predict multiple solutions, and evaluator to return best possible solution
+    """
+    def __init__(self,predictor : PtrNet.PointerNetwork, evaluator : covnet.CovNet ):
+        self.predictor = predictor
+        self.evaluator = evaluator        
+        
+        
+    def predict(self,instance,beam_width=4,alpha=1,beta=0.2):        
+        sample = VisSample.read_samples(path=instance,sol_sample=1)[0] if not isinstance(instance,VisSample) else instance       
+        seqs = vis_predict(self.predictor,sample)
+        
+        # data loader for finding solutions
+        instance = torch.tensor([x.tolist() for x in sample.points])
+        data = [[instance, torch.tensor(seqs[i]), torch.tensor(0.0)] for i in range(len(seqs))]
+        data_loader  = DataLoader(data,  shuffle=False,batch_size=1,collate_fn=covnet.collate_fn_packed)
+        best = np.argmax([ covnet.predict(self.evaluator,sample).cpu().item() for sample in data_loader ])        
+        
+        self.predicted  = data[best][1].numpy()
+        return self.predicted
+    
+
+
+    
+    

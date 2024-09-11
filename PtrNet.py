@@ -86,22 +86,25 @@ class PointerNetwork(nn.Module):
         self.decoder_hidden_size = 2 * self.encoder_hidden_size if self.bidirectional else self.encoder_hidden_size 
         self.teacher_forcing_ratio = model_args['teacher_forcing_ratio']
         self.max_decoded_length = model_args['max_decoded_length']
+        self.num_sols = model_args['num_sols']
 
-        self.encoder = Encoder(self.encoder_hidden_size, self.bidirectional)
-        self.decoder_rnn = nn.LSTMCell(self.decoder_hidden_size, self.decoder_hidden_size)
-        self.pointer = Pointer(self.decoder_hidden_size)
+        self.encoders = nn.ModuleList([Encoder(self.encoder_hidden_size, self.bidirectional) for _ in range(self.num_sols)])
+        self.decoder_rnns = nn.ModuleList([nn.LSTMCell(self.decoder_hidden_size, self.decoder_hidden_size) for _ in range(self.num_sols)])
+        self.pointers = nn.ModuleList([Pointer(self.decoder_hidden_size) for _ in range(self.num_sols)])
 
     def forward(self, seq, seq_lens, target=None, beam_width=None, alpha=None, beta=None):
-        if beam_width is None:
-            return self.greedy_decode(seq, seq_lens, target)
-        else:
-            return self.beam_search_decode(seq, seq_lens, target, beam_width, alpha, beta)
+        sols = []
+        for i in range(self.num_sols):
+            if beam_width is None:
+                sols.append(self.greedy_decode(seq, seq_lens, target, i))
+            else:
+                sols.append(self.beam_search_decode(seq, seq_lens, target, i, beam_width, alpha, beta))
+        return sols
 
-
-    def greedy_decode(self, seq, seq_lens, target):
+    def greedy_decode(self, seq, seq_lens, target, model_idx):
         batch_size = seq.shape[1]
 
-        (h, c), encoder_states = self.encoder(seq, seq_lens)
+        (h, c), encoder_states = self.encoders[model_idx](seq, seq_lens)
         x = torch.zeros_like(h)
 
         pointer_log_scores = []
@@ -111,28 +114,28 @@ class PointerNetwork(nn.Module):
         mask = create_mask(seq_lens, device=seq.device)
 
         for i in range(target.shape[0] if target is not None else self.max_decoded_length):
-            h, c = self.decoder_rnn(x, (h, c))
+            h, c = self.decoder_rnns[model_idx](x, (h, c))
 
-            pointer_log_score = self.pointer(h, encoder_states, mask) # (seq_len, batch_size)
+            pointer_log_score = self.pointers[model_idx](h, encoder_states, mask) # (seq_len, batch_size)
             pointer_log_scores.append(pointer_log_score)
 
             _, pointer_index = masked_max(pointer_log_score, mask, dim=0) # (batch_size)
             pointer_indices.append(pointer_index)
 
             if use_teacher_forcing and target is not None:
-                idx = torch.where(target[i] == -1, 0, target[i]).reshape(1, -1, 1).expand(1, -1, self.decoder_hidden_size)
+                idx = torch.where(target[i, :, model_idx] == -1, 0, target[i, :, model_idx]).reshape(1, -1, 1).expand(1, -1, self.decoder_hidden_size)
             else:
                 idx = pointer_index.reshape(1, -1, 1).expand(1, -1, self.decoder_hidden_size)
             x = torch.gather(encoder_states, dim=0, index=idx).squeeze(0)
 
         return torch.stack(pointer_indices, dim=0), torch.stack(pointer_log_scores, dim=0)
 
-    def beam_search_decode(self, seq, seq_lens, target, beam_width, alpha, beta):
+    def beam_search_decode(self, seq, seq_lens, target, model_idx, beam_width, alpha, beta):
         batch_size = seq.shape[1]
         mask = create_mask(seq_lens, device=seq.device)
         best_nodes = []
 
-        (h_encoder, c_encoder), encoder_states = self.encoder(seq, seq_lens)
+        (h_encoder, c_encoder), encoder_states = self.encoders[model_idx](seq, seq_lens)
 
         for batch_idx in range(batch_size):
             x = torch.zeros_like(h_encoder[batch_idx]).unsqueeze(0)
@@ -149,8 +152,8 @@ class PointerNetwork(nn.Module):
                 next_nodes = []
                 for node in nodes:
                     x, h, c = node.state
-                    h, c = self.decoder_rnn(x, (h, c))
-                    pointer_log_score = self.pointer(h, encoder_states[:, batch_idx, :], submask)[:seq_lens[batch_idx]]
+                    h, c = self.decoder_rnns[model_idx](x, (h, c))
+                    pointer_log_score = self.pointers[model_idx](h, encoder_states[:, batch_idx, :], submask)[:seq_lens[batch_idx]]
                     pointer_log_score = torch.topk(pointer_log_score, k=beam_width)
                     for j in range(beam_width):
                         pointer_index = pointer_log_score.indices[j]
