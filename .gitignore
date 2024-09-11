@@ -2,6 +2,7 @@ logs/
 .ipynb_checkpoints/
 __pycache__/
 models/
+trained_models/
 results/
 pretrained/
 dataset/
