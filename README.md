@@ -34,17 +34,4 @@ The training scripts (`train.py`, `retrain.py`) use `argparse` to handle various
 
 ## Example Usage
 
-Here is an example of how to load and display the dataset information using a custom function:
-
-```python
-dataset_dir = './dataset/AG/development/'
-samples = {s : [f for f in os.listdir(dataset_dir+s) if f.endswith('.pol')] for s in ['train','dev','test']}
-df = pd.DataFrame.from_dict(samples, orient='index').transpose()
-# Custom function to count the number of samples in each dataset
-df.loc['total'] = df.count()
-df.loc['total'].sum()
-df.loc['ratio'] = df.loc['total'] / df.loc['total'].sum()
-df.loc['total'].sum()
-
-# Display the dataframe
-df.head()
+Detailed examples can be found in `ArtGallery.ipnb` notebook.
