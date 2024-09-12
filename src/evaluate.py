@@ -207,8 +207,8 @@ class AGNetSearch(TGNetSearch):
     @conditional_decorator(timer_func,False)
     def predict(self,instance,beam_width=4,alpha=1,beta=0.2):        
         sample = VisSample.read_samples(path=instance,sol_sample=1)[0]
-        self.poly, self.region, self.predicted, self.opt, self.coverage = polygon_demo(self.model, sample, beam_width=beam_width,alpha=alpha)
-        return self.predicted
+        self.predicted = vis_predict(self.model,sample)
+        return self.predicted[0]
     
     
 

@@ -238,8 +238,6 @@ def polygon_demo(
     # predicted guards vs opt guards
     predicted = [ skgeom.Point2(g[0],g[1]) for g in guards.tolist()]
     opt       = [ skgeom.Point2(g[0],g[1]) for g in opt_guards.tolist()]
-
-    
     
     
     # return predicted and ground_truth
@@ -319,7 +317,6 @@ def polygon_demo3(sample : VisSample, solution : np.array):
        
      # draw polygon
     poly = skgeom.Polygon(points)
-        
     
     # predicted guards vs opt guards 
     predicted = [ skgeom.Point2(g[0],g[1]) for g in guards.tolist()]
