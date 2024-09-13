@@ -4,6 +4,4 @@ __pycache__/
 trained_models/
 results/
 pretrained/
-dataset/
-data/
 models/trained_models/
