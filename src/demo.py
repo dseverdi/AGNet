@@ -301,14 +301,21 @@ def polygon_demo(
 
     
 
-def polygon_demo3(sample : VisSample, solution : np.array):
+def evaluate_polygon_visibility(sample : VisSample, solution : np.array):    
+    """
+    Demonstrates polygon visibility and guard placement.
+    Args:
+        sample (VisSample): A sample containing polygon points and guard positions.
+        solution (np.array): An array of indices representing the predicted guard positions.
+    Returns:
+        tuple: A tuple containing:
+            - poly (skgeom.Polygon): The polygon created from the sample points.
+            - region (skgeom.PolygonSet): The set of visibility polygons for the guards.
+            - predicted (list of skgeom.Point2): The list of predicted guard positions.
+            - opt (list of skgeom.Point2): The list of optimal guard positions.
+            - coverage (float): The coverage ratio of the visibility region to the polygon area.
     """
     
-        returns:
-            poly : skgeom.Polygon
-
-        
-    """    
     points =  np.array([x.tolist() for x in sample.points])[:,[0,1]]
     guards = points[solution]
     opt_guards = points[sample.guards]
