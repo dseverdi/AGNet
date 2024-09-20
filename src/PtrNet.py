@@ -4,10 +4,10 @@ from   torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
 
-from skgeom import Point2
-from skgeom import Polygon, PolygonSet
-from skgeom import arrangement, RotationalSweepVisibility, TriangularExpansionVisibility
-from typing import Optional, Type
+from skgeom import Point2 # type: ignore
+from skgeom import Polygon, PolygonSet # type: ignore
+from skgeom import arrangement, RotationalSweepVisibility, TriangularExpansionVisibility # type: ignore
+from typing import Optional, Type # type: ignore
 
 from data_types import VisSequence
 from beam_search import BeamNode
@@ -36,7 +36,7 @@ class Encoder(nn.Module):
 
     def forward(self, seq, seq_lens):
         """ Forward call for PtrNet encoder
-        :param seq: torch.tensor of dimension (seq_len, batch_size, RNASequence.input_size)
+        :param seq: torch.tensor of dimension (seq_len, batch_size, VisSequence.input_size)
         :param seq_lens: list of length batch_size, contains lengths of unpadded sequences
         :returns: tuple (h_n, c_n), concatenated fwd/bkd hidden and cell states, and tensor *output* of all hidden states
         """                
@@ -102,9 +102,18 @@ class PointerNetwork(nn.Module):
         return sols
 
     def greedy_decode(self, seq, seq_lens, target, model_idx):
+        
+        
+        
         batch_size = seq.shape[1]
 
         (h, c), encoder_states = self.encoders[model_idx](seq, seq_lens)
+        
+        print(seq.size())
+        print(encoder_states.size())
+        print(h.size())
+        print(c.size())
+        exit()
         x = torch.zeros_like(h)
 
         pointer_log_scores = []
