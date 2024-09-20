@@ -222,6 +222,7 @@ def collate_fn(batch):
 
     :param batch: batch of sequence and position pairs
     """
+    
     sequences, positions = zip(*batch)
     sequences = tuple(torch.cat((VisSequence.eos.unsqueeze(0), seq)) for seq in sequences)
     positions = tuple(torch.cat((pos + 1, torch.tensor([0]))) for seq, pos in zip(sequences, positions))

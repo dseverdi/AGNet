@@ -317,6 +317,95 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.array):
     """
     
     points =  np.array([x.tolist() for x in sample.points])[:,[0,1]]
+    print(points.shape)
+    guards = points[solution]
+    opt_guards = points[sample.guards]
+    
+    opt_guards = opt_guards.reshape(1,-1) if len(opt_guards.shape)==1 else opt_guards
+       
+     # draw polygon
+    poly = skgeom.Polygon(points)
+    
+    # predicted guards vs opt guards 
+    predicted = [ skgeom.Point2(g[0],g[1]) for g in guards.tolist()]
+    opt       = [ skgeom.Point2(g[0],g[1]) for g in opt_guards.tolist()]
+        
+        
+    # return predicted and ground_truth
+    # compute coverage
+    # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
+    eps = 0.000001
+          
+    # arrangments
+    arr = skgeom.arrangement.Arrangement()
+    # add edges to arr
+    for e in poly.edges : arr.insert(e)
+                        
+    # compute visibility
+    vs = skgeom.RotationalSweepVisibility(arr)
+        
+    # region area
+    region_area = 0
+
+    # visibility polygon
+    poly_area = float(poly.area())
+    views = []
+
+    edges = list(poly.edges)
+
+    
+    for i in solution:        
+        v_prev, v, v_next = edges[(i-1) % len(poly)].source(), edges[i].source(), edges[i].target() 
+       
+        # affine combination of adjacent vertices
+        p = skgeom.Vector2(v,v_prev)
+        p = 1.0/math.sqrt(p.squared_length()) * p
+        r = skgeom.Vector2(v,v_next) 
+        r = 1.0/math.sqrt(r.squared_length()) * r
+
+        q = v+eps*(p+r)
+        # change orientation if point outside of polygon
+        q = v-eps*(p+r) if poly.oriented_side(q) == skgeom.Sign.NEGATIVE else q 
+
+        # find q in polygon
+        face = arr.find(q)      
+        # compute visibility
+        vx = vs.compute_visibility(q,face)                
+        
+        # add views        
+        views.append(skgeom.Polygon([v.point() for v  in vx.vertices]))
+        
+    region = skgeom.PolygonSet(views)
+
+    
+    region_area = np.sum(
+        [
+            abs(float(_poly.outer_boundary().area()))-np.sum([h.area() for h in _poly.holes]) for _poly in region.polygons
+        ]
+        )        
+    
+    coverage    = float(region_area/poly_area)
+    
+    return (poly, region, predicted, opt, coverage) 
+    
+
+def evaluate_polygon_visibility_numpy(points: np.ndarray, guards: np.ndarray, opt_guards: np.ndarray):    
+    """
+    Demonstrates polygon visibility and guard placement.
+    Args:
+        sample (VisSample): A sample containing polygon points and guard positions.
+        solution (np.array): An array of indices representing the predicted guard positions.
+    Returns:
+        tuple: A tuple containing:
+            - poly (skgeom.Polygon): The polygon created from the sample points.
+            - region (skgeom.PolygonSet): The set of visibility polygons for the guards.
+            - predicted (list of skgeom.Point2): The list of predicted guard positions.
+            - opt (list of skgeom.Point2): The list of optimal guard positions.
+            - coverage (float): The coverage ratio of the visibility region to the polygon area.
+    """
+    
+    points =  np.array([x.tolist() for x in sample.points])[:,[0,1]]
+    print(points.shape)
     guards = points[solution]
     opt_guards = points[sample.guards]
     

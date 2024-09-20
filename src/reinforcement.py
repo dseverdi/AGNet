@@ -15,7 +15,8 @@ import PtrNet
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pointer network for Terrain guarding predictions.')
-    parser.add_argument('--batch-size', type=int, default=128, help='training batch size')
+    #parser.add_argument('--batch-size', type=int, default=128, help='training batch size')
+    parser.add_argument('--batch-size', type=int, default=2, help='training batch size')
     parser.add_argument('--normalize', action='store_true', help='normalize inputs to unit square')
     parser.add_argument('--bidirectional', action='store_true', help='Bidirectional encoder LSTM')
     parser.add_argument('--hidden-size', type=int, default=256, help='LSTM hidden dimension size')
@@ -73,7 +74,7 @@ if __name__ == '__main__':
     paths = [f"{train_path}/{filename}" for filename in df["train"].tolist()][0:200]
     #print(paths)
     #exit()
-    training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths])     
+    training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths])  
     training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)    
         
         

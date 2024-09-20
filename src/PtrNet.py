@@ -102,18 +102,10 @@ class PointerNetwork(nn.Module):
         return sols
 
     def greedy_decode(self, seq, seq_lens, target, model_idx):
-        
-        
-        
         batch_size = seq.shape[1]
 
         (h, c), encoder_states = self.encoders[model_idx](seq, seq_lens)
         
-        print(seq.size())
-        print(encoder_states.size())
-        print(h.size())
-        print(c.size())
-        exit()
         x = torch.zeros_like(h)
 
         pointer_log_scores = []

@@ -3,6 +3,8 @@ import pandas as pd
 import os
 from data_types import VisSample
 
+from demo import evaluate_polygon_visibility
+
 if __name__ == "__main__":
     dataset_dir = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development/'
     samples = {s : [f for f in os.listdir(dataset_dir+s) if f.endswith('.pol')] for s in ['train','dev','test']}
@@ -20,7 +22,9 @@ if __name__ == "__main__":
     instance_path = os.path.join(dataset_dir, f"{instance_type}/{instance_name}")
     samples = VisSample.read_samples(path=instance_path, sol_sample=0)[0:2]
     for sample in samples:
-        print(sample)
+        solution = sample.guards.numpy().copy()
+        res = evaluate_polygon_visibility(sample, solution)
+        print(res[4])
         print()
     
     
