@@ -317,10 +317,9 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.array):
     """
     
     points =  np.array([x.tolist() for x in sample.points])[:,[0,1]]
-    print(points.shape)
+    
     guards = points[solution]
     opt_guards = points[sample.guards]
-    
     opt_guards = opt_guards.reshape(1,-1) if len(opt_guards.shape)==1 else opt_guards
        
      # draw polygon
@@ -389,7 +388,7 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.array):
     return (poly, region, predicted, opt, coverage) 
     
 
-def evaluate_polygon_visibility_numpy(points: np.ndarray, guards: np.ndarray, opt_guards: np.ndarray):    
+def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, solution: np.ndarray):    
     """
     Demonstrates polygon visibility and guard placement.
     Args:
@@ -403,21 +402,11 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, guards: np.ndarray, op
             - opt (list of skgeom.Point2): The list of optimal guard positions.
             - coverage (float): The coverage ratio of the visibility region to the polygon area.
     """
-    
-    points =  np.array([x.tolist() for x in sample.points])[:,[0,1]]
-    print(points.shape)
-    guards = points[solution]
-    opt_guards = points[sample.guards]
-    
+    opt_guards = points[gt]
     opt_guards = opt_guards.reshape(1,-1) if len(opt_guards.shape)==1 else opt_guards
        
      # draw polygon
     poly = skgeom.Polygon(points)
-    
-    # predicted guards vs opt guards 
-    predicted = [ skgeom.Point2(g[0],g[1]) for g in guards.tolist()]
-    opt       = [ skgeom.Point2(g[0],g[1]) for g in opt_guards.tolist()]
-        
         
     # return predicted and ground_truth
     # compute coverage
@@ -474,7 +463,7 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, guards: np.ndarray, op
     
     coverage    = float(region_area/poly_area)
     
-    return (poly, region, predicted, opt, coverage) 
+    return coverage
     
 
     

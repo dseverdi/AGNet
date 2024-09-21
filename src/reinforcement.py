@@ -9,7 +9,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from data_types import VisSample, VisDataset, collate_fn
 
-dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+#dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+dataset_dir = "/home/jurica/Desktop/AGNet/dataset/development"
 
 import PtrNet
 
@@ -61,9 +62,8 @@ if __name__ == '__main__':
     training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths])     
     training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)
     """
-    
-    dataset_dir = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development/'
-    samples = {s : [f for f in os.listdir(dataset_dir+s) if f.endswith('.pol')] for s in ['train','dev','test']}
+
+    samples = {s : [f for f in os.listdir(f"{dataset_dir}/{s}") if f.endswith('.pol')] for s in ['train','dev','test']}
     df = pd.DataFrame.from_dict(samples, orient='index').transpose()
     # Add a row with the total count per column
     # df.loc['Total # Instances'] = df.count()    

@@ -1,5 +1,6 @@
 import torch
 from torch.nn import LSTMCell, LSTM
+import numpy as np
 
 def lstm_cell_example():
     sequence_length = 10
@@ -39,5 +40,7 @@ def lstm_example():
     
     
 if __name__ == "__main__":
-    # lstm_cell_example()
-    lstm_example()
+    a = torch.tensor([1, 7, 8, 0, -1, 11, 13, 15, 23], dtype=torch.float32).numpy()
+    n = np.random.randint(1, 5)
+    subset = np.random.choice(a, n)
+    print(subset)
