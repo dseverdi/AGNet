@@ -9,10 +9,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from data_types import VisSample, VisDataset, collate_fn
 
-#dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
-dataset_dir = "/home/jurica/Desktop/AGNet/dataset/development"
+
 
 import PtrNet
+
+
+def get_model_name_and_create_paths(args):
+    0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pointer network for Terrain guarding predictions.')
@@ -30,6 +33,9 @@ if __name__ == '__main__':
     parser.add_argument('--train-data', type=str, default='train', help='path to training samples')
     parser.add_argument('--valid-data', type=str, default='dev', help='path to validation samples')
     args = parser.parse_args()
+
+    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+    #dataset_dir = "/home/jurica/Desktop/AGNet/dataset/development"
 
     train_path = os.path.join(dataset_dir,f'{args.train_data}')
     valid_path = os.path.join(dataset_dir,f'{args.valid_data}')
@@ -53,21 +59,8 @@ if __name__ == '__main__':
                          'shuffle': False,
                          'num_workers' : 6}
     
-    # training set
-    """
-    sizes = ['5','10','15','20','30','40','50']
-    sample_size = 10000
-    training_set = VisDataset()
-    paths = [os.path.join(train_path,size) for size in sizes] if sizes else [os.path.join(root,dir) for root,dirs,files in os.walk(train_path) for dir in dirs]
-    training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths])     
-    training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)
-    """
-
     samples = {s : [f for f in os.listdir(f"{dataset_dir}/{s}") if f.endswith('.pol')] for s in ['train','dev','test']}
-    df = pd.DataFrame.from_dict(samples, orient='index').transpose()
-    # Add a row with the total count per column
-    # df.loc['Total # Instances'] = df.count()    
-    
+    df = pd.DataFrame.from_dict(samples, orient='index').transpose()    
         
     sample_size = 10000
     training_set = VisDataset()

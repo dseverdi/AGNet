@@ -301,7 +301,7 @@ def polygon_demo(
 
     
 
-def evaluate_polygon_visibility(sample : VisSample, solution : np.array):    
+def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray):    
     """
     Demonstrates polygon visibility and guard placement.
     Args:
@@ -412,6 +412,7 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
     # compute coverage
     # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
     eps = 0.000001
+    #eps = 1e-10
           
     # arrangments
     arr = skgeom.arrangement.Arrangement()
@@ -466,7 +467,11 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
     return coverage
     
 
-    
+class CustomError(Exception):
+    def __init__(self, message):
+        self.message = message
+        super().__init__(self.message)
+        
 
 def show(*demo_solution):
     poly, region, predicted, opt, coverage = demo_solution[0], demo_solution[1], demo_solution[2], demo_solution[3],demo_solution[4]
