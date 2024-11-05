@@ -52,25 +52,38 @@ def example_eval_all_vis_samples_and_report_errors(dataset_dir):
     
     for i in tqdm(range(len(vis_samples))):
         
-        if i < 4000:
+        
+        # test only rand-172-166.pol
+
+        if vis_samples[i][0].name != "rand-172-166":
             continue
         
+        print('\nEvaluating:', vis_samples[i][0].name)
         vis_sample = vis_samples[i][0]
+        
         try:
             valid_positions = vis_sample.guards
+            
             #suboptimal_positions = np.random.choice(valid_positions, np.random.randint(1, len(valid_positions)))
             all_positions = np.arange(len(vis_sample.points))
+            # print(f"all positions: {all_positions}")
         except Exception as e:
             print("Error getting all_positions", len(vis_sample.points))
         
         try:
             try:
-                _, _, _, _, coverage_1 = evaluate_polygon_visibility(vis_sample, valid_positions)
-            except:
+                print(' * Evaluating with solution ...', end='')
+                # poly, region, predicted, opt, coverage = evaluate_polygon_visibility(vis_sample, valid_positions)
+                print('done')
+            except Exception as e:
+                print(f"Error evaluating coverage_1: {e}")
+                print(f"Tested with guards: {valid_positions}")
                 raise CustomError("Ground-truth coverage error (type 1)")
                 
-            try:
-                _, _, _, _, coverage_2 = evaluate_polygon_visibility(vis_sample, all_positions)
+            try:                
+                print(' * Evaluating with all points ...', end=' ')
+                poly, region, predicted, opt, coverage = evaluate_polygon_visibility(vis_sample, all_positions) # problem: rand-172-166.pol
+                print('done')
             except:
                 raise CustomError("All points coverage error (type 2)")
             
@@ -110,11 +123,13 @@ def example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_di
             all_positions = np.arange(seq_len)
             
             try:
+                # test for optimal solution
                 coverage_1 = evaluate_polygon_visibility_numpy(points, valid_positions, valid_positions)
             except:
                 raise CustomError("Ground-truth coverage error (type 1)")
 
             try:
+                # test for all points
                 coverage_2 = evaluate_polygon_visibility_numpy(points, valid_positions, all_positions)
             except:
                 raise CustomError("All points coverage error (type 2)")
@@ -130,19 +145,24 @@ def example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_di
     i = 0
     #for (seq, seq_lens, positions) in tqdm(training_generator):
     for (seq, seq_lens, positions) in training_generator:
-        try:
+        try:            
             batch_eval_visibility(seq, seq_lens, positions)
         except CustomError as e:
             vis_sample = vis_samples[i][0]
             print(f"{e}: {vis_sample.name}")
+        except Exception as e:
+            print(f"Error: {e}")
+            vis_sample = vis_samples[i][0]
+            print(f"Error in {vis_sample.name}")
             
         i += 1
 
 if __name__ == "__main__":
     dataset_dir = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development'
     #dataset_dir = "/home/jurica/Desktop/AGNet/dataset/development"
+
     example_eval_all_vis_samples_and_report_errors(dataset_dir)    
     #example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_dir)
         
     
-    
+    # ToDo: segmention error (core dumped) for some instances

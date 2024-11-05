@@ -28,7 +28,7 @@ def vis_predict(
     sample: VisSample, 
     beam_width: int = None, 
     alpha: float = None, 
-    beta: float = None) -> Tuple:
+    beta: float = None) -> np.ndarray:
     """
         returns seqs of predicted pointers for polygon
     """
@@ -54,8 +54,8 @@ def vis_predict(
                 decoded_seq[j] = decoded_seq[j][:i]
                 break   
         decoded_seq[j] -= 1
-        decoded_seq[j] = np.unique(decoded_seq[j])
-   
+        decoded_seq[j] = np.unique(decoded_seq[j])  
+        
    
     return decoded_seq
 
@@ -108,7 +108,7 @@ class Opt:
         
         self.poly = P.poly            
         sample      = VisSample.read_samples(path=instance,sol_sample=1)[0]
-        self.opt    = sample.guards.numpy().tolist()
+        self.opt    = sample.guards.numpy()
         self.solution = [P.Vertices[v] for v in self.opt]        
         
         return self.opt
@@ -128,7 +128,7 @@ class TGNetSearch:
             print(f"Failed to load model: {e}")
     @conditional_decorator(timer_func,False)
     def predict(self,instance,beam_width=4,alpha=1,beta=0.2):        
-        sample = VisSample.read_samples(path=instance,sol_sample=1)[0]
+        sample = VisSample.read_samples(path=instance,sol_sample=1)
         self.poly, self.region, self.predicted, self.opt, self.coverage = terrain_demo(self.model, sample, beam_width=beam_width,alpha=alpha,beta=beta)
         return self.predicted
 
@@ -208,7 +208,7 @@ class AGNetSearch(TGNetSearch):
     def predict(self,instance,beam_width=4,alpha=1,beta=0.2):        
         sample = VisSample.read_samples(path=instance,sol_sample=1)[0]
         self.predicted = vis_predict(self.model,sample)
-        return self.predicted[0]
+        return self.predicted
     
     
 

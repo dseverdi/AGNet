@@ -77,42 +77,7 @@ class VisSample:
             
             if not os.path.exists(sol_file):
                 continue
-                print(f'\rFinding solution for {filename}',end='\r',flush=True)   
-                # check which VisSample to solve
-                if filename.endswith('.terrain'):                    
-                    Visibility,Solver = Terrain,TerrainSolver
-                elif filename.endswith('.pol'):                    
-                    Visibility, Solver = Polygon, AGSolver                
-                
-                else:
-                    continue
-
-                # define problem
-                P = Visibility(filename)
-                
-
-                # compute points (add padding to the right)                
-                data = P.Vertices
-                _points = np.pad(np.array([ [p.x(),p.y()]  for p in data],dtype=float),[(0,0),(0,1)])
-
-                # if solution needed, compute solution               
-                if solve: 
-                    solver = Solver(P)
-                    solver.solve()    
-                    num_sols = solver.sol_count()
-                    _sols   = [ tensor(solver.get_solution(i),dtype=torch.long) for i in range(num_sols) ] # more than one solution!     
-                else:
-                    _sols    = []
-                    num_sols = 0
-
-              
-                # store solution                
-                with open(f"{instance_root}/{instance_name}.solution",'w') as f:                    
-                    f.write(f'# solutions {num_sols}\n')
-                    
-                    for _guards in _sols: 
-                        for g in _guards : f.write(f"{g } ")
-                        f.write('\n')          
+                       
             
             else:   # if already solved  
                 # read datapoints       
