@@ -50,20 +50,15 @@ def example_load_sample(dataset_dir):
 def example_eval_all_vis_samples_and_report_errors(dataset_dir):
     training_set, vis_samples = load_vis_dataset(dataset_dir)
     
-    for i in tqdm(range(len(vis_samples))):
-        
-        
-        # test only rand-172-166.pol
-
-        if vis_samples[i][0].name != "rand-172-166":
-            continue
+    for i in tqdm(range(len(vis_samples))):        
         
         print('\nEvaluating:', vis_samples[i][0].name)
         vis_sample = vis_samples[i][0]
+
+        #if vis_sample.name != "min-8-1.pol": continue
         
         try:
-            valid_positions = vis_sample.guards
-            
+            valid_positions = vis_sample.guards            
             #suboptimal_positions = np.random.choice(valid_positions, np.random.randint(1, len(valid_positions)))
             all_positions = np.arange(len(vis_sample.points))
             # print(f"all positions: {all_positions}")
@@ -73,8 +68,12 @@ def example_eval_all_vis_samples_and_report_errors(dataset_dir):
         try:
             try:
                 print(' * Evaluating with solution ...', end='')
-                # poly, region, predicted, opt, coverage = evaluate_polygon_visibility(vis_sample, valid_positions)
+                poly, region, predicted, opt, coverage = evaluate_polygon_visibility(vis_sample, valid_positions)                
                 print('done')
+                if coverage < 0.9:
+                    with open('debug/output.txt', 'a') as f:
+                        f.write(f"{vis_sample.name}: {coverage}\n")
+                
             except Exception as e:
                 print(f"Error evaluating coverage_1: {e}")
                 print(f"Tested with guards: {valid_positions}")
@@ -158,11 +157,11 @@ def example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_di
         i += 1
 
 if __name__ == "__main__":
-    dataset_dir = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development'
+    dataset_dir = 'dataset/development'
     #dataset_dir = "/home/jurica/Desktop/AGNet/dataset/development"
 
     example_eval_all_vis_samples_and_report_errors(dataset_dir)    
     #example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_dir)
         
     
-    # ToDo: segmention error (core dumped) for some instances
+    

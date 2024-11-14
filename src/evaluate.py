@@ -20,7 +20,7 @@ from demo import *
 
 
 # specify CUDA device
-device = torch.device('cuda:0')
+device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
 
 def vis_predict(
@@ -122,7 +122,7 @@ class Opt:
 class TGNetSearch:
     def __init__(self, model):
         try:
-            self.model = torch.load(model)
+            self.model = torch.load(model,map_location=torch.device(device))
             print("Model loaded successfully.")            
         except Exception as e:
             print(f"Failed to load model: {e}")

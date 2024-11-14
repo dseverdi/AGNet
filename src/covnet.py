@@ -42,7 +42,7 @@ from torcheval.metrics.functional import r2_score
 
 # define device
 use_cuda = torch.cuda.is_available()
-device = torch.device("cuda:1" if use_cuda else "cpu") 
+device = torch.device("cuda:0" if use_cuda else "cpu") 
 
 verbose = True
 

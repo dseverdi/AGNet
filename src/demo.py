@@ -10,11 +10,14 @@ import numpy as np
 import math
 
 
-import pdb # for debugging
+import faulthandler
+faulthandler.enable()
 
 
 # specify CUDA device
 device = torch.device('cuda:0')
+
+DEBUG = False
 
 
 # debug plot
@@ -68,7 +71,7 @@ def _plot_debugger(
         # Save the plot to a file
         plt.savefig(f'debug/{log}.png')
         
-        plt.show()
+        #plt.show()
 
 
 # terrain demonstration
@@ -383,17 +386,13 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
     if solution.shape == (1,):
         guards = guards.reshape(1, -1)
         opt_guards = opt_guards.reshape(1, -1)
-
         
     # Draw polygon
     poly = skgeom.Polygon(points)    
 
-
     # Predicted and optimal guards
     predicted = [skgeom.Point2(g[0], g[1]) for g in guards.tolist()]
-    opt = [skgeom.Point2(g[0], g[1]) for g in opt_guards.tolist()]
-
-    
+    opt       = [skgeom.Point2(g[0], g[1]) for g in opt_guards.tolist()]
     
     # Create 2D arrangement of the polygon
     arr = skgeom.arrangement.Arrangement()
@@ -405,16 +404,15 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
 
     # Compute coverage
     region_area = 0
-    poly_area = abs(float(poly.area()))
-    views = []
+    poly_area   = abs(float(poly.area()))
+    views       = []
 
+    # extract edges as list
     edges = list(poly.edges)
 
- 
-    print('OK thus far 1')
-
     # distance to move point q inside the polygon
-    eps = 1e-3  # Small epsilon to adjust point position
+    eps = 1e-5  # Small epsilon to adjust point position
+    
 
     for i in solution:
         # Get adjacent vertices
@@ -435,15 +433,9 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
         if poly.oriented_side(q) != skgeom.Sign.POSITIVE:             
             q = skgeom.Point2(v.x() - eps * (p.x() + r.x()), v.y() - eps * (p.y() + r.y()))
 
-        # Find the face containing q
-        print(f'OK thus far {i}')
-
-        print('Finding face ...')
-        face = arr.find(q)
-        print('... ok')
-
-
-
+        # Find the face containing q        
+        face = arr.find(q)        
+        # check if face is valid
         if face is None or face.is_unbounded():
             # Skip if face is invalid
             print(f"Error: cannot find face for guard {i}")
@@ -456,24 +448,35 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
             continue
 
         # Compute visibility polygon
-        try:
-            vx = vs.compute_visibility(q, face)
+        try:            
+            vx = vs.compute_visibility(q, face)            
         except RuntimeError as e:
             # Handle exceptions from CGAL
             print(f"Error computing visibility at guard {i}: {e}")            
             log = f"{sample.name}_no_vis_{i}" 
             try:
-                _plot_debugger(points, i, q, log=log)            
+                _plot_debugger(points, i, q, log=log)
             except:
-                print(f"Error plotting visibility at guard")                
+                print(f"Error plotting visibility at guard")
             continue
 
-        # Add visibility polygon to views
-        visibility_polygon = skgeom.Polygon([v.point() for v in vx.vertices])
+        # Add visibility polygon to views        
+        visibility_polygon = skgeom.Polygon([v.point() for v in vx.vertices])        
         views.append(visibility_polygon)
+    
 
     # Create a polygon set from the visibility polygons
-    region = skgeom.PolygonSet(views)
+    region = skgeom.PolygonSet()  
+    try:
+        # here is the problem ...
+        for i,v in enumerate(views):
+            ps = skgeom.PolygonSet([v])            
+            region = region.union(ps)
+            
+        # region = skgeom.PolygonSet(views) # for some reason this makes a problem
+    except Exception as e:
+        print(f"Error creating polygon set: {e}")
+        
 
     # Calculate total visible area
     for vis_poly in region.polygons:
@@ -481,8 +484,7 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
         holes_area = sum(abs(float(hole.area())) for hole in vis_poly.holes)
         region_area += outer_area - holes_area
 
-    coverage = region_area / poly_area if poly_area > 0 else 0.0
-    
+    coverage = region_area / poly_area if poly_area > 0 else 0.0    
     
 
     return (poly, region, predicted, opt, coverage)
@@ -574,6 +576,8 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
         # Add visibility polygon to views
         visibility_polygon = skgeom.Polygon([v.point() for v in vx.vertices])
         views.append(visibility_polygon)
+
+
 
     # Create a polygon set from the visibility polygons
     region = skgeom.PolygonSet(views)
