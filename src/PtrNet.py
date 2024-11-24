@@ -64,6 +64,7 @@ class Pointer(nn.Module):
         self.W_d = nn.Linear(hidden_size, hidden_size, bias=False)
         self.hidden_size = hidden_size
         self.tanh = nn.Tanh()
+        0
 
     def forward(self, decoder_state, encoder_states, mask):
         """ Forward call for Pointer

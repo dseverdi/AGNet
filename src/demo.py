@@ -580,7 +580,19 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
 
 
     # Create a polygon set from the visibility polygons
-    region = skgeom.PolygonSet(views)
+    #region = skgeom.PolygonSet(views)
+    
+    # Create a polygon set from the visibility polygons
+    region = skgeom.PolygonSet()  
+    try:
+        # here is the problem ...
+        for i,v in enumerate(views):
+            ps = skgeom.PolygonSet([v])            
+            region = region.union(ps)
+            
+        # region = skgeom.PolygonSet(views) # for some reason this makes a problem
+    except Exception as e:
+        print(f"Error creating polygon set: {e}")    
 
     # Calculate total visible area
     for vis_poly in region.polygons:

@@ -68,17 +68,7 @@ if __name__ == '__main__':
     #print(paths)
     #exit()
     training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths])  
-    training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)    
-        
-        
-    encoder_args = {'hidden_size': args.hidden_size,
-                    'bidirectional': args.bidirectional,
-                    'device': device}
-
-    decoder_args = {'hidden_size': args.hidden_size if not args.bidirectional else 2 * args.hidden_size,
-                    'hidden_v': args.hidden_v,
-                    'max_length': args.max_decoded_length,
-                    'device': device}        
+    training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)   
     
     model_args = {'hidden_size': args.hidden_size,
                   'bidirectional': args.bidirectional,

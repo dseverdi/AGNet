@@ -9,6 +9,8 @@ from data_types import VisSample, VisDataset, collate_fn
 
 from demo import evaluate_polygon_visibility, evaluate_polygon_visibility_numpy, CustomError
 
+from PtrNet import PointerNetwork
+
 def get_key_by_value(d, target_string):
     for key, value_list in d.items():
         if target_string in value_list:
@@ -157,11 +159,12 @@ def example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_di
         i += 1
 
 if __name__ == "__main__":
-    dataset_dir = 'dataset/development'
+    #dataset_dir = 'dataset/development'
+    dataset_dir = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development'
     #dataset_dir = "/home/jurica/Desktop/AGNet/dataset/development"
 
-    example_eval_all_vis_samples_and_report_errors(dataset_dir)    
-    #example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_dir)
+    #example_eval_all_vis_samples_and_report_errors(dataset_dir)    
+    example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_dir)
         
     
     
