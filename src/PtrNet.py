@@ -64,7 +64,6 @@ class Pointer(nn.Module):
         self.W_d = nn.Linear(hidden_size, hidden_size, bias=False)
         self.hidden_size = hidden_size
         self.tanh = nn.Tanh()
-        0
 
     def forward(self, decoder_state, encoder_states, mask):
         """ Forward call for Pointer
@@ -72,12 +71,51 @@ class Pointer(nn.Module):
         :param encoder_states: tensor of all encoder states
         :param mask: bool tensor for softmax masking
         :returns: log-softmax scores for every input sequence
-        """
+        """        
         encoder_transform = self.W_e(encoder_states)
         decoder_transform = self.W_d(decoder_state)
         u = self.v(self.tanh(encoder_transform + decoder_transform)).squeeze(-1)
         return masked_log_softmax(u, mask, dim=0)
 
+
+class PointerExclusive(Pointer):
+    def __init__(self, hidden_size):
+        super().__init__(hidden_size)
+        self._chosen = None
+        self._indices_j = None
+        self._first_iteration = None
+    
+    def init_chosen(self, n, batch_size, device, dtype):
+        self._chosen = torch.zeros((n, batch_size), dtype=dtype, device=device)
+        self._indices_j = torch.arange(batch_size)
+        self._first_iteration = True
+        
+    def set_chosen(self, indices_i):
+        self._chosen[indices_i.cpu(), self._indices_j] = 1
+        
+    def is_chosen(self, indices_i=None):
+        if indices_i is None:
+            return self._chosen
+        else:
+            return self._chosen[indices_i.cpu(), self._indices_j]
+        
+    def forward(self, decoder_state, encoder_states, mask):
+        """ Forward call for Pointer
+        :param decoder_state: last state from decoder
+        :param encoder_states: tensor of all encoder states
+        :param mask: bool tensor for softmax masking
+        :returns: log-softmax scores for every input sequence
+        """        
+        encoder_transform = self.W_e(encoder_states)
+        decoder_transform = self.W_d(decoder_state)
+        u = self.v(self.tanh(encoder_transform + decoder_transform)).squeeze(-1)        
+        c = self.is_chosen()
+        u = c * torch.finfo(u.dtype).min + (1 - c) * u
+        if self._first_iteration:
+            self._first_iteration = False
+            u[0, :] = torch.finfo(u.dtype).min
+        
+        return masked_log_softmax(u, mask, dim=0)        
 
 class PointerNetwork(nn.Module):
     def __init__(self, model_args):
@@ -91,7 +129,8 @@ class PointerNetwork(nn.Module):
 
         self.encoders = nn.ModuleList([Encoder(self.encoder_hidden_size, self.bidirectional) for _ in range(self.num_sols)])
         self.decoder_rnns = nn.ModuleList([nn.LSTMCell(self.decoder_hidden_size, self.decoder_hidden_size) for _ in range(self.num_sols)])
-        self.pointers = nn.ModuleList([Pointer(self.decoder_hidden_size) for _ in range(self.num_sols)])
+        #self.pointers = nn.ModuleList([Pointer(self.decoder_hidden_size) for _ in range(self.num_sols)])
+        self.pointers = nn.ModuleList([PointerExclusive(self.decoder_hidden_size) for _ in range(self.num_sols)])
 
     def forward(self, seq, seq_lens, target=None, beam_width=None, alpha=None, beta=None):
         sols = []
@@ -103,10 +142,8 @@ class PointerNetwork(nn.Module):
         return sols
 
     def greedy_decode(self, seq, seq_lens, target, model_idx):
-        batch_size = seq.shape[1]
-
         (h, c), encoder_states = self.encoders[model_idx](seq, seq_lens)
-        
+
         x = torch.zeros_like(h)
 
         pointer_log_scores = []
@@ -114,7 +151,9 @@ class PointerNetwork(nn.Module):
 
         use_teacher_forcing = torch.rand(1) <= self.teacher_forcing_ratio
         mask = create_mask(seq_lens, device=seq.device)
-
+        
+        self.pointers[model_idx].init_chosen(seq.size(0), seq.size(1), h.device, h.dtype)
+        
         for i in range(target.shape[0] if target is not None else self.max_decoded_length):
             h, c = self.decoder_rnns[model_idx](x, (h, c))
 
@@ -122,6 +161,7 @@ class PointerNetwork(nn.Module):
             pointer_log_scores.append(pointer_log_score)
 
             _, pointer_index = masked_max(pointer_log_score, mask, dim=0) # (batch_size)
+            self.pointers[model_idx].set_chosen(pointer_index)
             pointer_indices.append(pointer_index)
 
             if use_teacher_forcing and target is not None:
@@ -135,6 +175,7 @@ class PointerNetwork(nn.Module):
     def beam_search_decode(self, seq, seq_lens, target, model_idx, beam_width, alpha, beta):
         batch_size = seq.shape[1]
         mask = create_mask(seq_lens, device=seq.device)
+        
         best_nodes = []
 
         (h_encoder, c_encoder), encoder_states = self.encoders[model_idx](seq, seq_lens)

@@ -67,7 +67,7 @@ if __name__ == '__main__':
     paths = [f"{train_path}/{filename}" for filename in df["train"].tolist()][0:200]
     #print(paths)
     #exit()
-    training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths])  
+    training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths]) 
     training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)   
     
     model_args = {'hidden_size': args.hidden_size,
@@ -83,6 +83,7 @@ if __name__ == '__main__':
     
     for batch_idx, (seq, seq_lens, positions) in enumerate(training_generator):
         seq, positions = seq.to(device), positions.to(device)
-        model(seq, seq_lens, positions)
+        o = model(seq, seq_lens, positions)
+        print(o[0][1].size())
         exit()
     

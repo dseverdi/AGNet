@@ -69,36 +69,16 @@ def padded_sequence_example():
     print(a_)
     
 if __name__ == "__main__":
-    sequence_length = 5
+    n = 7
     batch_size = 2
-    input_size = 3
-    hidden_size = 5
-    
-    a = torch.rand((sequence_length, batch_size, input_size))
-    a_ = a.clone()
-    
-    def append_eos(a: torch.Tensor, what=torch.tensor([0, 0, -1], dtype=torch.float)):
-        a.transpose_(0, 1)
-        mo = what.unsqueeze_(0).unsqueeze_(0).repeat((batch_size, 1, 1))
-        a = torch.cat((mo, a), dim=1)
-        a.transpose_(0, 1)
-        return a
-    
-    a = append_eos(a)
 
+    x = torch.rand((n, batch_size))
+    print(x.device)
+    print(x.dtype)
     
-    lstm = LSTM(input_size=input_size, hidden_size=hidden_size)
     
-    lstm.eval()
     
-    output, (hn, cn) = lstm(a)
-    output_, (hn_, cn_) = lstm(a_)
     
-    print(output.size())
-    print(output_.size())
-    
-    print(torch.all(a[1:, :, :] == a_))
-    print(torch.all(output[1:, :, :] == output_))
     
     
     
