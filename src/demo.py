@@ -604,6 +604,116 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
     
     return coverage
     
+def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.ndarray):    
+    """
+    Demonstrates polygon visibility and guard placement.
+    Args:
+        sample (VisSample): A sample containing polygon points and guard positions.
+        solution (np.array): An array of indices representing the predicted guard positions.
+    Returns:
+        tuple: A tuple containing:
+            - poly (skgeom.Polygon): The polygon created from the sample points.
+            - region (skgeom.PolygonSet): The set of visibility polygons for the guards.
+            - predicted (list of skgeom.Point2): The list of predicted guard positions.
+            - opt (list of skgeom.Point2): The list of optimal guard positions.
+            - coverage (float): The coverage ratio of the visibility region to the polygon area.
+    """       
+     # draw polygon
+    poly = skgeom.Polygon(points)
+        
+    # return predicted and ground_truth
+    # compute coverage
+    # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
+    eps = 1e-3
+    #eps = 1e-10
+          
+    # arrangments
+    arr = skgeom.arrangement.Arrangement()
+    # add edges to arr
+    for e in poly.edges : arr.insert(e)
+                        
+    # compute visibility using triangular expansion
+    vs = skgeom.TriangularExpansionVisibility(arr)
+        
+    # region area
+    region_area = 0
+
+    # visibility polygon
+    poly_area = float(poly.area())
+    views = []
+
+    edges = list(poly.edges)
+
+    
+    for i in solution:        
+        # Get adjacent vertices
+        v_prev = edges[(i - 1) % len(edges)].source()
+        v = edges[i % len(edges)].source()
+        v_next = edges[i % len(edges)].target()
+
+        # Create vectors
+        p = skgeom.Vector2(v, v_prev)
+        p = p / math.sqrt(p.squared_length())
+        r = skgeom.Vector2(v, v_next)
+        r = r / math.sqrt(r.squared_length())
+
+        # Adjust point q slightly towards the inside of the polygon
+        q = skgeom.Point2(v.x() + eps * (p.x() + r.x()), v.y() + eps * (p.y() + r.y()))
+
+        # If q is not inside the polygon, adjust it
+        if poly.oriented_side(q) != skgeom.Sign.POSITIVE:             
+            q = skgeom.Point2(v.x() - eps * (p.x() + r.x()), v.y() - eps * (p.y() + r.y()))
+
+        # Find the face containing q
+        face = arr.find(q)
+        if face is None or face.is_unbounded():
+            # Skip if face is invalid
+            print(f"Error: cannot find face for guard {i}")
+            # plot image
+            log = f"{sample.name}_no_face_at_{i}" if face is None else f"{sample.name}_unbounded_face_at_{i}"
+            _plot_debugger(points, i, q, log=log)            
+            continue
+
+        # Compute visibility polygon
+        try:
+            vx = vs.compute_visibility(q, face)
+        except RuntimeError as e:
+            # Handle exceptions from CGAL
+            print(f"Error computing visibility at guard {i}: {e}")            
+            log = f"{sample.name}_no_vis_{i}" 
+            _plot_debugger(points, i, q, log=log)            
+            continue
+
+        # Add visibility polygon to views
+        visibility_polygon = skgeom.Polygon([v.point() for v in vx.vertices])
+        views.append(visibility_polygon)
+
+
+
+    # Create a polygon set from the visibility polygons
+    #region = skgeom.PolygonSet(views)
+    
+    # Create a polygon set from the visibility polygons
+    region = skgeom.PolygonSet()  
+    try:
+        # here is the problem ...
+        for i,v in enumerate(views):
+            ps = skgeom.PolygonSet([v])            
+            region = region.union(ps)
+            
+        # region = skgeom.PolygonSet(views) # for some reason this makes a problem
+    except Exception as e:
+        print(f"Error creating polygon set: {e}")    
+
+    # Calculate total visible area
+    for vis_poly in region.polygons:
+        outer_area = abs(float(vis_poly.outer_boundary().area()))
+        holes_area = sum(abs(float(hole.area())) for hole in vis_poly.holes)
+        region_area += outer_area - holes_area
+
+    coverage = region_area / poly_area if poly_area > 0 else 0.0    
+    
+    return coverage
 
 class CustomError(Exception):
     def __init__(self, message):

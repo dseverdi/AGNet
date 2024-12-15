@@ -129,8 +129,12 @@ class PointerNetwork(nn.Module):
 
         self.encoders = nn.ModuleList([Encoder(self.encoder_hidden_size, self.bidirectional) for _ in range(self.num_sols)])
         self.decoder_rnns = nn.ModuleList([nn.LSTMCell(self.decoder_hidden_size, self.decoder_hidden_size) for _ in range(self.num_sols)])
-        #self.pointers = nn.ModuleList([Pointer(self.decoder_hidden_size) for _ in range(self.num_sols)])
-        self.pointers = nn.ModuleList([PointerExclusive(self.decoder_hidden_size) for _ in range(self.num_sols)])
+        
+        self.bello_et_all = True
+        if self.bello_et_all:
+            self.pointers = nn.ModuleList([PointerExclusive(self.decoder_hidden_size) for _ in range(self.num_sols)])
+        else:
+            self.pointers = nn.ModuleList([Pointer(self.decoder_hidden_size) for _ in range(self.num_sols)])
 
     def forward(self, seq, seq_lens, target=None, beam_width=None, alpha=None, beta=None):
         sols = []
@@ -152,7 +156,8 @@ class PointerNetwork(nn.Module):
         use_teacher_forcing = torch.rand(1) <= self.teacher_forcing_ratio
         mask = create_mask(seq_lens, device=seq.device)
         
-        self.pointers[model_idx].init_chosen(seq.size(0), seq.size(1), h.device, h.dtype)
+        if self.bello_et_all:
+            self.pointers[model_idx].init_chosen(seq.size(0), seq.size(1), h.device, h.dtype)
         
         for i in range(target.shape[0] if target is not None else self.max_decoded_length):
             h, c = self.decoder_rnns[model_idx](x, (h, c))
@@ -161,7 +166,10 @@ class PointerNetwork(nn.Module):
             pointer_log_scores.append(pointer_log_score)
 
             _, pointer_index = masked_max(pointer_log_score, mask, dim=0) # (batch_size)
-            self.pointers[model_idx].set_chosen(pointer_index)
+            
+            if self.bello_et_all:
+                self.pointers[model_idx].set_chosen(pointer_index)
+            
             pointer_indices.append(pointer_index)
 
             if use_teacher_forcing and target is not None:

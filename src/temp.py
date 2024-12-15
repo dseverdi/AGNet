@@ -2,6 +2,7 @@ import torch
 from torch.nn import LSTMCell, LSTM
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import numpy as np
+import random
 
 def lstm_cell_example():
     sequence_length = 10
@@ -69,22 +70,42 @@ def padded_sequence_example():
     print(a_)
     
 if __name__ == "__main__":
-    n = 7
+    
+    
+    pointer_indices = torch.tensor([
+        [1, 5, 0, 7, 0],
+        [2, 5, 4, 3, 0],
+        [7, 1, 1, 1, 1]
+    ])
+    
+    pointer_indices_list = []
+    for p in pointer_indices:
+        zero_indices = (p == 0).nonzero()
+        has_zero = zero_indices.size(0) > 0
+        if has_zero:
+            first_zero_index = zero_indices[0, 0].item()
+            p = p[:first_zero_index]
+        p -= 1
+        pointer_indices_list.append(p)
+    
+    
+    exit()
+    
+    # pointer_indices.size(): out_seq_len x batch_size        
+    # pointer_log_scores.size(): out_seq_len x in_seq_len x batch_size
     batch_size = 2
+    out_seq_len = 24
+    in_seq_len = 151
+    
+    pointer_indices = torch.empty((out_seq_len, batch_size), dtype=torch.long)
+    pointer_indices[:, 0] = torch.from_numpy(np.random.choice(range(1, in_seq_len), out_seq_len))
+    pointer_indices[:, 1] = torch.from_numpy(np.random.choice(range(1, in_seq_len), out_seq_len))
 
-    x = torch.rand((n, batch_size))
-    print(x.device)
-    print(x.dtype)
+    for i in range(batch_size):
+        put_eos_earlier_prob = 0.5 
+        put_eos_earlier = random.random() < put_eos_earlier_prob
+        if put_eos_earlier:
+            pointer_indices[random.randint(1, out_seq_len), i] = 0
     
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-
-    
+    print(pointer_indices.transpose(0, 1))
+            

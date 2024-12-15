@@ -9,13 +9,46 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from data_types import VisSample, VisDataset, collate_fn
 
-
+import numpy as np
 
 import PtrNet
 
-
 def get_model_name_and_create_paths(args):
     0
+
+from demo import evaluate_polygon_visibility_numpy_wo_gt, CustomError
+
+
+def batch_eval_coverage(seq, seq_lens, pointer_indices):
+        
+    points_batch = seq[1:, :, :2].numpy()
+    batch_size = points_batch.shape[1]
+    
+    coverages = torch.zeros(batch_size, dtype=torch.float)
+    relative_lengths = torch.ones(batch_size, dtype=torch.float)
+    fine = torch.zeros(batch_size, dtype=torch.float)
+    
+    for i in range(batch_size):
+        seq_len = seq_lens[i] - 1
+        points = points_batch[:seq_len, i]
+        
+        pointers_i = pointer_indices[:, i]
+        zero_indices = (pointers_i == 0).nonzero()
+        has_zero = zero_indices.size(0) > 0
+        if has_zero:
+            first_zero_index = zero_indices[0, 0].item()
+            pointers_i = pointers_i[:first_zero_index]
+                
+        try:
+            coverage = evaluate_polygon_visibility_numpy_wo_gt(points, (pointers_i - 1).cpu().numpy())
+            coverages[i] = coverage
+            relative_lengths[i] = pointers_i.size(0) / seq_len
+            fine[i] = 1.0
+        except:
+            raise CustomError("evaluate_polygon_visibility_numpy_wo_gt")
+    
+    return coverages, relative_lengths, fine
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pointer network for Terrain guarding predictions.')
@@ -74,16 +107,78 @@ if __name__ == '__main__':
                   'bidirectional': args.bidirectional,
                   'device': device,
                   'teacher_forcing_ratio': 0.0,
-                  'max_decoded_length': 200,
+                  'max_decoded_length': args.max_decoded_length,
                   'num_sols': 1}
     
-    #model = PtrNet.PointerNetwork(encoder_args, decoder_args).to(device)    
     model = PtrNet.PointerNetwork(model_args).to(device)
+    #optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)    
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    
     model.train()
-    
-    for batch_idx, (seq, seq_lens, positions) in enumerate(training_generator):
-        seq, positions = seq.to(device), positions.to(device)
-        o = model(seq, seq_lens, positions)
-        print(o[0][1].size())
-        exit()
-    
+    max_grad_norm = 2
+
+    for epoch_i in range(args.num_epochs):
+            
+        critic_exp_mvg_avg = torch.zeros(1).to(device)
+        
+        for batch_idx, (seq, seq_lens, positions) in enumerate(training_generator):
+            seq, positions = seq.to(device), positions.to(device)
+            
+            # In RL setup, we dont have labeled data, therefore, we don't use positions
+            #pointer_indices, pointer_log_scores = model(seq, seq_lens, positions)[0]
+            pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
+            
+            # pointer_indices.size(): out_seq_len x batch_size        
+            # pointer_log_scores.size(): out_seq_len x in_seq_len x batch_size
+            # print(pointer_indices.size(), pointer_log_scores.size())
+
+            coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
+            coverages = coverages.to(device)
+            relative_lengths = relative_lengths.to(device)
+            fine = fine.to(device)
+            
+            gamma_1 = 1.0
+            gamma_2 = 1.0
+            
+            rewards = gamma_1 * (1 - coverages) + gamma_2 * relative_lengths
+            
+            # by following
+            # https://github.com/higgsfield/np-hard-deep-reinforcement-learning/blob/master/Neural%20Combinatorial%20Optimization.ipynb
+            beta = 0.9
+            
+            if batch_idx == 0:
+                critic_exp_mvg_avg = rewards.mean()
+            else:    
+                critic_exp_mvg_avg = (critic_exp_mvg_avg * beta) + ((1. - beta) * rewards.mean())                    
+            
+            advantage = rewards - critic_exp_mvg_avg
+            
+            batch_size = seq.size(1)
+            log_probs = torch.empty(batch_size, dtype=advantage.dtype, device=device)
+            for b_i in range(batch_size):
+                pointers_i = pointer_indices[:, b_i]
+                zero_indices = (pointers_i == 0).nonzero()
+                has_zero = zero_indices.size(0) > 0
+                if has_zero:
+                    first_zero_index = zero_indices[0, 0].item()
+                    pointers_i = pointers_i[:first_zero_index]
+                
+                pointers_i_y = pointers_i
+                pointers_i_x = torch.arange(pointers_i.size(0))
+                log_probs_sum_i = pointer_log_scores[pointers_i_x, pointers_i_y, b_i].sum()
+                log_probs[b_i] = log_probs_sum_i
+            
+            reinforce = advantage * log_probs            
+            loss = reinforce.mean()
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm), norm_type=2)
+
+            optimizer.step()
+
+            critic_exp_mvg_avg = critic_exp_mvg_avg.detach()
+
+            if batch_idx % 10 == 0:
+                print(f"epoch: {epoch_i},", f"batch_idx: {batch_idx},", f"avg. coverage: {coverages.mean()},", f"avg. rel. length: {relative_lengths.mean()}")
+        
