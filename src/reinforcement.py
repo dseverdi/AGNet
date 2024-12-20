@@ -5,6 +5,7 @@ import pandas as pd
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from tqdm import tqdm
 from data_types import VisSample, VisDataset, collate_fn
@@ -53,21 +54,21 @@ def batch_eval_coverage(seq, seq_lens, pointer_indices):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pointer network for Terrain guarding predictions.')
     #parser.add_argument('--batch-size', type=int, default=128, help='training batch size')
-    parser.add_argument('--batch-size', type=int, default=2, help='training batch size')
+    parser.add_argument('--batch-size', type=int, default=64, help='training batch size')
     parser.add_argument('--normalize', action='store_true', help='normalize inputs to unit square')
     parser.add_argument('--bidirectional', action='store_true', help='Bidirectional encoder LSTM')
     parser.add_argument('--hidden-size', type=int, default=256, help='LSTM hidden dimension size')
     parser.add_argument('--hidden-v', type=int, default=256, help='Attention layer hidden size')
     parser.add_argument('--wd', type=float, default=0.01, help='Weight decay for Adam optimizer')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate for Adam optimizer')
-    parser.add_argument('--max-decoded-length', type=int, default=20, help='Maximum allowed sequence length for decoder')
-    parser.add_argument('--num-epochs', type=int, default=30, help='Number of epochs for training')
+    parser.add_argument('--max-decoded-length', type=int, default=200, help='Maximum allowed sequence length for decoder')
+    parser.add_argument('--num-epochs', type=int, default=10, help='Number of epochs for training')
     parser.add_argument('--log-interval', type=int, default=200, help='Print epoch state every log-interval interval mini batches')
     parser.add_argument('--train-data', type=str, default='train', help='path to training samples')
     parser.add_argument('--valid-data', type=str, default='dev', help='path to validation samples')
     args = parser.parse_args()
 
-    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+    dataset_dir = "dataset/development"
     #dataset_dir = "/home/jurica/Desktop/AGNet/dataset/development"
 
     train_path = os.path.join(dataset_dir,f'{args.train_data}')
@@ -84,7 +85,6 @@ if __name__ == '__main__':
     if not os.path.exists(model_path):
         os.makedirs(model_path)    
     
-    
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if use_cuda else "cpu")
     
@@ -95,9 +95,9 @@ if __name__ == '__main__':
     samples = {s : [f for f in os.listdir(f"{dataset_dir}/{s}") if f.endswith('.pol')] for s in ['train','dev','test']}
     df = pd.DataFrame.from_dict(samples, orient='index').transpose()    
         
-    sample_size = 10000
+    sample_size = 100
     training_set = VisDataset()
-    paths = [f"{train_path}/{filename}" for filename in df["train"].tolist()][0:200]
+    paths = [f"{train_path}/{filename}" for filename in df["train"].tolist()]
     #print(paths)
     #exit()
     training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths]) 
@@ -117,11 +117,14 @@ if __name__ == '__main__':
     model.train()
     max_grad_norm = 2
 
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir=f'./logs/{model_name}')
+
     for epoch_i in range(args.num_epochs):
             
         critic_exp_mvg_avg = torch.zeros(1).to(device)
         
-        for batch_idx, (seq, seq_lens, positions) in enumerate(training_generator):
+        for batch_idx, (seq, seq_lens, positions) in enumerate(tqdm(training_generator, desc=f"Epoch {epoch_i+1}/{args.num_epochs}")):
             seq, positions = seq.to(device), positions.to(device)
             
             # In RL setup, we dont have labeled data, therefore, we don't use positions
@@ -137,8 +140,8 @@ if __name__ == '__main__':
             relative_lengths = relative_lengths.to(device)
             fine = fine.to(device)
             
-            gamma_1 = 1.0
-            gamma_2 = 1.0
+            gamma_1 = 0.5
+            gamma_2 = 0.5
             
             rewards = gamma_1 * (1 - coverages) + gamma_2 * relative_lengths
             
@@ -173,12 +176,22 @@ if __name__ == '__main__':
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm), norm_type=2)
+            #torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm), norm_type=2)
 
             optimizer.step()
 
             critic_exp_mvg_avg = critic_exp_mvg_avg.detach()
 
             if batch_idx % 10 == 0:
-                print(f"epoch: {epoch_i},", f"batch_idx: {batch_idx},", f"avg. coverage: {coverages.mean()},", f"avg. rel. length: {relative_lengths.mean()}")
-        
+                avg_coverage = coverages.mean().item()
+                avg_rel_length = relative_lengths.mean().item()
+                avg_reward = rewards.mean().item()
+                #print(f"epoch: {epoch_i}, batch_idx: {batch_idx}, avg. coverage: {avg_coverage}, avg. rel. length: {avg_rel_length}, avg. reward: {avg_reward}")
+
+                # Log statistics to TensorBoard
+                writer.add_scalar('Loss/train', loss.item(), epoch_i * len(training_generator) + batch_idx)
+                writer.add_scalar('Coverage/train', avg_coverage, epoch_i * len(training_generator) + batch_idx)
+                writer.add_scalar('Relative Length/train', avg_rel_length, epoch_i * len(training_generator) + batch_idx)
+                writer.add_scalar('Reward/train', avg_reward, epoch_i * len(training_generator) + batch_idx)
+
+    writer.close()
