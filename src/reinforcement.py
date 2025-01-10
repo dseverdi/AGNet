@@ -90,7 +90,17 @@ def evaluate_model(model, data_loader, device, writer, epoch_i, mode='Validation
 
     model.train()
 
-def train_model(model, training_generator, validation_generator, optimizer, device, writer, num_epochs):
+def train_model(
+        model : PtrNet.PointerNetwork, 
+        training_generator : DataLoader, 
+        validation_generator : DataLoader, 
+        optimizer : optim.Optimizer, 
+        device : torch.device, 
+        writer : SummaryWriter, 
+        num_epochs: int,
+        use_critic: bool = False,
+        ):
+
     max_grad_norm = 2
     best_coverage = 0
     best_epoch = 0
@@ -113,16 +123,21 @@ def train_model(model, training_generator, validation_generator, optimizer, devi
             gamma_1 = 0.5
             gamma_2 = 0.5
             
-            rewards = gamma_1 * (1 - coverages) + gamma_2 * relative_lengths
+            rewards = gamma_1 * (1 - coverages) + gamma_2 * (1 - relative_lengths)
             
             beta = 0.9
             
             if batch_idx == 0:
                 critic_exp_mvg_avg = rewards.mean()
             else:    
-                critic_exp_mvg_avg = (critic_exp_mvg_avg * beta) + ((1. - beta) * rewards.mean())                    
+                critic_exp_mvg_avg = (critic_exp_mvg_avg * beta) + ((1. - beta) * rewards.mean())                
             
-            advantage = rewards - critic_exp_mvg_avg
+            if use_critic:
+                critic_bello_et_all = critic(seq, seq_lens)            
+                advantage = rewards - critic_bello_et_all
+            else:
+                advantage = rewards - critic_exp_mvg_avg            
+            
             
             batch_size = seq.size(1)
             log_probs = torch.empty(batch_size, dtype=advantage.dtype, device=device)
@@ -139,10 +154,13 @@ def train_model(model, training_generator, validation_generator, optimizer, devi
                 log_probs_sum_i = pointer_log_scores[pointers_i_x, pointers_i_y, b_i].sum()
                 log_probs[b_i] = log_probs_sum_i
             
-            reinforce = advantage * log_probs            
-            loss = reinforce.mean()
-
+            reinforce = torch.mean(advantage * log_probs)  # p. 5, Algorithm 1, line 9
+            critic_loss = torch.mean(advantage ** 2)  # p. 5, Algorithm 1, line 9
+            
+            loss = reinforce + critic_loss
+            
             optimizer.zero_grad()
+            
             loss.backward()
             #torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm), norm_type=2)
 
@@ -195,6 +213,7 @@ if __name__ == '__main__':
     parser.add_argument('--valid-data', type=str, default='dev', help='path to validation samples')
     parser.add_argument('--test-data', type=str, default='test', help='path to test samples')
     parser.add_argument('--sample-size', type=int, default=100, help='Number of samples to use')
+    parser.add_argument('--use-critic', action='store_true', help='Use Bello critic instead of exp_mvg_avg')
     args = parser.parse_args()
 
     dataset_dir = "dataset/development"
@@ -204,6 +223,8 @@ if __name__ == '__main__':
     test_path = os.path.join(dataset_dir,f'{args.test_data}')
     
     model_name = f'ne-{args.num_epochs}_bs-{args.batch_size}_hs-{args.hidden_size}_hv-{args.hidden_v}_wd-{args.wd}_lr-{args.lr}_ss-{args.sample_size}'
+    if args.use_critic:
+        model_name += '_critic'
     if args.bidirectional:
         model_name += '_bidirectional'
     
@@ -246,13 +267,16 @@ if __name__ == '__main__':
                   'num_sols': 1}
     
     model = PtrNet.PointerNetwork(model_args).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    
+    critic = PtrNet.Critic(model_args).to(device)
+    #optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)    
+    optimizer = optim.Adam([ {"params": model.parameters()}, { "params": critic.parameters() }], lr=1e-4)
+    #optimizer_critic = optim.Adam(critic.parameters(), lr=1e-4)
+
     # Initialize TensorBoard writer
     writer = SummaryWriter(log_dir=f'./logs/{model_name}')
 
     # Train the model
-    train_model(model, training_generator, validation_generator, optimizer, device, writer, args.num_epochs)
+    train_model(model, training_generator, validation_generator, optimizer, device, writer, args.num_epochs, args.use_critic)
 
     writer.close()
 

@@ -559,8 +559,8 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
             # Skip if face is invalid
             print(f"Error: cannot find face for guard {i}")
             # plot image
-            log = f"{sample.name}_no_face_at_{i}" if face is None else f"{sample.name}_unbounded_face_at_{i}"
-            _plot_debugger(points, i, q, log=log)            
+            #log = f"{sample.name}_no_face_at_{i}" if face is None else f"{sample.name}_unbounded_face_at_{i}"
+            #_plot_debugger(points, i, q, log=log)            
             continue
 
         # Compute visibility polygon
@@ -569,8 +569,8 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
         except RuntimeError as e:
             # Handle exceptions from CGAL
             print(f"Error computing visibility at guard {i}: {e}")            
-            log = f"{sample.name}_no_vis_{i}" 
-            _plot_debugger(points, i, q, log=log)            
+            #log = f"{sample.name}_no_vis_{i}" 
+            #_plot_debugger(points, i, q, log=log)            
             continue
 
         # Add visibility polygon to views
