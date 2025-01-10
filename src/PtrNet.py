@@ -21,6 +21,10 @@ def create_mask(seq_lens, device):
 def masked_log_softmax(vector, mask, dim):
     return nn.functional.log_softmax(vector + (mask.float() + 1e-45).log(), dim=dim)
 
+def masked_softmax(vector, mask, dim):
+    masked_vector = vector * mask.float()
+    return nn.functional.softmax(masked_vector, dim=dim)
+
 def masked_max(vector, mask, dim, keepdim=False, min_val=-1e7):
     one_minus_mask = ~mask
     replaced_vector = vector.masked_fill(one_minus_mask, min_val)
@@ -57,8 +61,11 @@ class Encoder(nn.Module):
 
     
 class Pointer(nn.Module):
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, softmax_only=False):
         super().__init__()
+        
+        self.softmax_only = softmax_only
+        
         self.v = nn.Linear(hidden_size, 1, bias=False)
         self.W_e = nn.Linear(hidden_size, hidden_size, bias=False)
         self.W_d = nn.Linear(hidden_size, hidden_size, bias=False)
@@ -75,7 +82,11 @@ class Pointer(nn.Module):
         encoder_transform = self.W_e(encoder_states)
         decoder_transform = self.W_d(decoder_state)
         u = self.v(self.tanh(encoder_transform + decoder_transform)).squeeze(-1)
-        return masked_log_softmax(u, mask, dim=0)
+        
+        if self.softmax_only:
+            return masked_softmax(u, mask, dim=0)
+        else:
+            return masked_log_softmax(u, mask, dim=0)
 
 
 class PointerExclusive(Pointer):
@@ -147,7 +158,7 @@ class PointerNetwork(nn.Module):
 
     def greedy_decode(self, seq, seq_lens, target, model_idx):
         (h, c), encoder_states = self.encoders[model_idx](seq, seq_lens)
-
+        
         x = torch.zeros_like(h)
 
         pointer_log_scores = []
@@ -224,3 +235,42 @@ class PointerNetwork(nn.Module):
                 nodes = sorted(next_nodes, key=lambda x : x.score)[:beam_width]
             best_nodes.append(sorted(finished_nodes, key=lambda x : x.score)[0])
         return best_nodes
+
+
+class Critic(nn.Module):
+    def __init__(self, model_args):
+        super().__init__()
+        # hyperparams
+        self.n_glimpses = 2 # also called P in the paper
+        self.bidirectional = model_args['bidirectional']
+        self.hidden_size = model_args["hidden_size"]    
+        self.encoder_hidden_size = model_args['hidden_size']
+        self.decoder_hidden_size = 2 * self.encoder_hidden_size if self.bidirectional else self.encoder_hidden_size         
+        self.max_decoded_length = model_args['max_decoded_length']
+        
+        self.decoder_projection_size = self.decoder_hidden_size # also called d in the paper
+        
+        self.encoder = Encoder(self.hidden_size, self.bidirectional)
+        
+        self.pointer = Pointer(self.decoder_hidden_size, softmax_only=True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(in_features=self.hidden_size, out_features=self.decoder_projection_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(in_features=self.decoder_projection_size, out_features=1)
+        )
+    
+    def forward(self, seq, seq_lens):
+
+        (h, c), encoder_states = self.encoder(seq, seq_lens)    
+        mask = create_mask(seq_lens, device=seq.device)
+        
+        g = q = h
+        
+        for l in range(self.n_glimpses):
+            pointer_score = self.pointer(g, encoder_states, mask)
+            g = torch.sum(encoder_states * pointer_score.unsqueeze(2), dim=0)
+
+        scalars = self.decoder(g).squeeze(1)
+        
+        return scalars

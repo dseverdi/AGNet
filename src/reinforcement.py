@@ -53,7 +53,7 @@ def batch_eval_coverage(seq, seq_lens, pointer_indices):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pointer network for Terrain guarding predictions.')
     #parser.add_argument('--batch-size', type=int, default=128, help='training batch size')
-    parser.add_argument('--batch-size', type=int, default=2, help='training batch size')
+    parser.add_argument('--batch-size', type=int, default=10, help='training batch size')
     parser.add_argument('--normalize', action='store_true', help='normalize inputs to unit square')
     parser.add_argument('--bidirectional', action='store_true', help='Bidirectional encoder LSTM')
     parser.add_argument('--hidden-size', type=int, default=256, help='LSTM hidden dimension size')
@@ -111,8 +111,10 @@ if __name__ == '__main__':
                   'num_sols': 1}
     
     model = PtrNet.PointerNetwork(model_args).to(device)
+    critic = PtrNet.Critic(model_args).to(device)
     #optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)    
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.Adam([ {"params": model.parameters()}, { "params": critic.parameters() }], lr=1e-4)
+    #optimizer_critic = optim.Adam(critic.parameters(), lr=1e-4)
     
     model.train()
     max_grad_norm = 2
@@ -127,20 +129,20 @@ if __name__ == '__main__':
             # In RL setup, we dont have labeled data, therefore, we don't use positions
             #pointer_indices, pointer_log_scores = model(seq, seq_lens, positions)[0]
             pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
-            
             # pointer_indices.size(): out_seq_len x batch_size        
             # pointer_log_scores.size(): out_seq_len x in_seq_len x batch_size
             # print(pointer_indices.size(), pointer_log_scores.size())
-
+        
             coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
             coverages = coverages.to(device)
             relative_lengths = relative_lengths.to(device)
             fine = fine.to(device)
             
-            gamma_1 = 1.0
+            
+            gamma_1 = 0.0
             gamma_2 = 1.0
             
-            rewards = gamma_1 * (1 - coverages) + gamma_2 * relative_lengths
+            rewards = gamma_1 * (1 - coverages) + gamma_2 * (1 - relative_lengths)
             
             # by following
             # https://github.com/higgsfield/np-hard-deep-reinforcement-learning/blob/master/Neural%20Combinatorial%20Optimization.ipynb
@@ -149,9 +151,12 @@ if __name__ == '__main__':
             if batch_idx == 0:
                 critic_exp_mvg_avg = rewards.mean()
             else:    
-                critic_exp_mvg_avg = (critic_exp_mvg_avg * beta) + ((1. - beta) * rewards.mean())                    
+                critic_exp_mvg_avg = (critic_exp_mvg_avg * beta) + ((1. - beta) * rewards.mean())                
             
-            advantage = rewards - critic_exp_mvg_avg
+            critic_bello_et_all = critic(seq, seq_lens)            
+            
+            #advantage = rewards - critic_exp_mvg_avg
+            advantage = rewards - critic_bello_et_all
             
             batch_size = seq.size(1)
             log_probs = torch.empty(batch_size, dtype=advantage.dtype, device=device)
@@ -168,13 +173,16 @@ if __name__ == '__main__':
                 log_probs_sum_i = pointer_log_scores[pointers_i_x, pointers_i_y, b_i].sum()
                 log_probs[b_i] = log_probs_sum_i
             
-            reinforce = advantage * log_probs            
-            loss = reinforce.mean()
-
+            reinforce = torch.mean(advantage * log_probs)  # p. 5, Algorithm 1, line 9
+            critic_loss = torch.mean(torch.abs(advantage))  # p. 5, Algorithm 1, line 9
+            
+            loss = reinforce + critic_loss
+            
             optimizer.zero_grad()
+            
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm), norm_type=2)
-
+            #torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_grad_norm), norm_type=2)
+            
             optimizer.step()
 
             critic_exp_mvg_avg = critic_exp_mvg_avg.detach()
