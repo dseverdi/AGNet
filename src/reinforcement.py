@@ -168,17 +168,14 @@ def train_model(
                 log_probs_sum_i = pointer_log_scores[pointers_i_x, pointers_i_y, b_i].sum()
                 log_probs[b_i] = log_probs_sum_i
                 
-                # Calculate entropy
-                entropy[b_i] = -torch.sum(pointer_log_scores[pointers_i_x, pointers_i_y, b_i] * torch.exp(pointer_log_scores[pointers_i_x, pointers_i_y, b_i]))
+                
             
             reinforce = torch.mean(advantage * log_probs)  # p. 5, Algorithm 1, line 9
             critic_loss = torch.mean(advantage ** 2)  # p. 5, Algorithm 1, line 9
-            entropy_loss = torch.mean(entropy)  # Calculate mean entropy
             
-            # minimize the negative of the loss
-            loss = reinforce + critic_loss if use_critic else reinforce
-            loss -= entropy_weight * entropy_loss  # Subtract entropy regularization term
-            
+            # Define loss without entropy regularization
+            loss = reinforce + critic_loss if use_critic else reinforce  # Removed entropy from loss
+
             optimizer.zero_grad()
             
             loss.backward()
@@ -191,8 +188,7 @@ def train_model(
             if batch_idx % 10 == 0:
                 avg_coverage = coverages.mean().item()
                 avg_rel_length = relative_lengths.mean().item()
-                avg_reward = rewards.mean().item()
-                avg_entropy = entropy.mean().item()  # Calculate average entropy
+                avg_reward = rewards.mean().item()                
                 #print(f"epoch: {epoch_i}, batch_idx: {batch_idx}, avg. coverage: {avg_coverage}, avg. rel. length: {avg_rel_length}, avg. reward: {avg_reward}")
 
                 # Log statistics to TensorBoard
@@ -200,7 +196,7 @@ def train_model(
                 writer.add_scalar('Train/Coverage', avg_coverage, epoch_i * len(training_generator) + batch_idx)
                 writer.add_scalar('Train/Relative Length', avg_rel_length, epoch_i * len(training_generator) + batch_idx)
                 writer.add_scalar('Train/Reward', avg_reward, epoch_i * len(training_generator) + batch_idx)
-                writer.add_scalar('Train/Entropy', avg_entropy, epoch_i * len(training_generator) + batch_idx)  # Log entropy
+                # writer.add_scalar('Train/Entropy', avg_entropy, epoch_i * len(training_generator) + batch_idx)  # Remove entropy logging
 
         # Evaluate the model on the validation set
         evaluate_model(model, validation_generator, device, writer, epoch_i, mode='Validation')
