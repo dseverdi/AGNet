@@ -14,10 +14,6 @@ import PtrNet
 
 from demo import evaluate_polygon_visibility_numpy_wo_gt, CustomError
 
-# weights
-cov_wt = 0.6
-opt_wt = 1-cov_wt
-
 
 def get_model_name_and_create_paths(args):
     0
@@ -234,7 +230,8 @@ if __name__ == '__main__':
     cov_wt = args.cov_wt
     opt_wt = 1 - cov_wt
 
-    dataset_dir = "dataset/development"
+    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+    #dataset_dir = "dataset/development"
 
     train_path = os.path.join(dataset_dir,f'{args.train_data}')
     valid_path = os.path.join(dataset_dir,f'{args.valid_data}')
