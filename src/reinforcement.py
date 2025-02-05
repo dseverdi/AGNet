@@ -218,7 +218,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden-size', type=int, default=256, help='LSTM hidden dimension size')
     parser.add_argument('--hidden-v', type=int, default=256, help='Attention layer hidden size')
     parser.add_argument('--wd', type=float, default=0.01, help='Weight decay for Adam optimizer')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate for Adam optimizer')
+    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate for Adam optimizer')
     parser.add_argument('--max-decoded-length', type=int, default=200, help='Maximum allowed sequence length for decoder')
     parser.add_argument('--num-epochs', type=int, default=10, help='Number of epochs for training')
     parser.add_argument('--log-interval', type=int, default=200, help='Print epoch state every log-interval interval mini batches')
