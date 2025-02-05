@@ -19,3 +19,12 @@ class RewardLH(torch.nn.Module):
     def forward(self, coverages, relative_lengths):
         beta = torch.special.expit(self.alpha) * 0.9 + 0.1
         return beta * coverages + (1 - beta) * relative_lengths
+    
+    
+if __name__ == "__main__":
+    r = RewardLH(alpha_initial=0.77)
+    torch.save(r, "./temp.pt")
+    r2 = torch.load("./temp.pt")
+    print(r2.alpha)
+    
+    

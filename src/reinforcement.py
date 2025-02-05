@@ -14,6 +14,7 @@ import PtrNet
 
 from demo import evaluate_polygon_visibility_numpy_wo_gt, CustomError
 
+from losses import Reward, RewardLH
 
 def get_model_name_and_create_paths(args):
     0
@@ -81,7 +82,8 @@ def train_model(
             coverages, relative_lengths, fine = coverages.to(device), relative_lengths.to(device), fine.to(device)
 
             # Define rewards
-            rewards = cov_wt * (1 - coverages) + opt_wt * relative_lengths
+            rewards = reward_function(coverages, relative_lengths)
+            #rewards = cov_wt * (1 - coverages) + opt_wt * relative_lengths
 
             # Exponential moving average for baseline
             if batch_idx == 0:
@@ -154,6 +156,10 @@ def train_model(
             best_coverage = avg_coverage
             best_epoch = epoch_i
             torch.save(model.state_dict(), os.path.join(model_path, 'best_model.pth'))
+            
+            if args.reward_function == "reward_learnable":
+                torch.save(reward_function, os.path.join(alpha_path, 'best_model.pt'))
+                
             print(f"New best model saved at epoch {epoch_i} with coverage {avg_coverage}")
 
     print(f"Best model found at epoch {best_epoch} with coverage {best_coverage}")
@@ -183,7 +189,8 @@ def evaluate_model(
             relative_lengths = relative_lengths.to(device)
             fine = fine.to(device)            
 
-            rewards = cov_wt * (1 - coverages) + opt_wt * relative_lengths
+            #rewards = cov_wt * (1 - coverages) + opt_wt * relative_lengths
+            rewards = reward_function(coverages, relative_lengths)
 
             total_coverage += coverages.sum().item()
             total_relative_length += relative_lengths.sum().item()
@@ -225,11 +232,16 @@ if __name__ == '__main__':
     parser.add_argument('--use-critic', action='store_true', help='Use Bello critic instead of exp_mvg_avg')
     parser.add_argument('--comment', type=str, default='', help='Additional comment for the model name')
     parser.add_argument('--cov-wt', type=float, default=0.6, help='Coverage weight')
+    parser.add_argument('--reward-function', type=str, default='reward_manual', help='Set a defined reward function (e.g. manual hyperparams reward (reward_manual) or learnable hyperparams reward (reward_learnable))')
     args = parser.parse_args()
-
-    cov_wt = args.cov_wt
-    opt_wt = 1 - cov_wt
-
+    
+    if args.reward_function == "reward_manual":
+        reward_function = Reward(args.cov_wt)
+    elif args.reward_function == "reward_learnable":
+        reward_function = RewardLH()
+    else:
+        raise ValueError("No reward function is set")
+    
     dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
     #dataset_dir = "dataset/development"
 
@@ -250,8 +262,12 @@ if __name__ == '__main__':
         model_name += f'_{args.comment}'
 
     model_path = f'./trained_models/{model_name}/'
+    alpha_path = f'./trained_models/alpha/{model_name}/'
     if not os.path.exists(model_path):
-        os.makedirs(model_path)    
+        os.makedirs(model_path)
+    
+    if not os.path.exists(alpha_path):
+        os.makedirs(alpha_path)    
     
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if use_cuda else "cpu")
@@ -289,6 +305,8 @@ if __name__ == '__main__':
     #optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)    
     optimizer = optim.Adam([ {"params": model.parameters()}, { "params": critic.parameters() }], lr=1e-3)
     #optimizer_critic = optim.Adam(critic.parameters(), lr=1e-4)
+    
+
 
     # Initialize TensorBoard writer
     writer = SummaryWriter(log_dir=f'./logs/{model_name}')
