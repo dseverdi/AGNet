@@ -1,12 +1,8 @@
 import torch
+from losses import RewardTwoParams
+
 
 if __name__ == "__main__":
-    drl_moa_steps = 11
-    betas_list = torch.stack([
-        torch.linspace(0, 1, drl_moa_steps),
-        torch.linspace(1, 0, drl_moa_steps)
-    ], dim=1)
-    
-    
-    for betas in betas_list:
-        print(betas)
+    epoch_avg_coverages = [0.1, 0.05, 0.005, 0.75, 0.99]
+    x = torch.tensor(epoch_avg_coverages).mean()
+    print(x)

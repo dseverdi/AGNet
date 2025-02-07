@@ -1,6 +1,7 @@
 import argparse
 import pandas as pd
 import os
+import copy
 
 import torch
 import torch.optim                as optim
@@ -67,120 +68,126 @@ def train_model(
     best_epoch = 0
 
     print(f"Using critic: {use_critic}")
+    
     betas_list = torch.stack([
         torch.linspace(0, 1, args.drl_moa_steps),
         torch.linspace(1, 0, args.drl_moa_steps)
     ], dim=1)
     
-    for betas in betas_list:
-        print(betas)
+    best_model = model
+    current_model = copy.deepcopy(best_model)
+    best_reward_function = None
     
-    exit()
+    optimizer = optim.Adam([ {"params": current_model.parameters()}, { "params": critic.parameters() }], lr=1e-3)
+    
+    for betas in betas_list:
+        reward_function = RewardTwoParams(*betas)
+        avg_coverage_list = []
+        for epoch_i in range(num_epochs):
+            critic_exp_mvg_avg = torch.zeros(1).to(device)
 
-    for epoch_i in range(num_epochs):
-        critic_exp_mvg_avg = torch.zeros(1).to(device)
+            for batch_idx, (seq, seq_lens, positions) in enumerate(tqdm(training_generator, desc=f"Epoch {epoch_i+1}/{num_epochs}")):
+                seq, positions = seq.to(device), positions.to(device)
 
-        for batch_idx, (seq, seq_lens, positions) in enumerate(tqdm(training_generator, desc=f"Epoch {epoch_i+1}/{num_epochs}")):
-            seq, positions = seq.to(device), positions.to(device)
+                # Sample solution from model
+                pointer_indices, pointer_log_scores = current_model(seq, seq_lens)[0]
 
-            # Sample solution from model
-            pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
+                # Compute coverage and relative length
+                coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
+                coverages, relative_lengths, fine = coverages.to(device), relative_lengths.to(device), fine.to(device)
 
-            # Compute coverage and relative length
-            coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
-            coverages, relative_lengths, fine = coverages.to(device), relative_lengths.to(device), fine.to(device)
+                # Define rewards
+                rewards = reward_function(coverages, relative_lengths)
+                #rewards = cov_wt * (1 - coverages) + opt_wt * relative_lengths
 
-            # Define rewards
-            rewards = reward_function(coverages, relative_lengths)
-            #rewards = cov_wt * (1 - coverages) + opt_wt * relative_lengths
+                # Exponential moving average for baseline
+                if batch_idx == 0:
+                    critic_exp_mvg_avg = rewards.mean()
+                else:
+                    beta = 0.9
+                    critic_exp_mvg_avg = (critic_exp_mvg_avg * beta) + ((1. - beta) * rewards.mean())
 
-            # Exponential moving average for baseline
-            if batch_idx == 0:
-                critic_exp_mvg_avg = rewards.mean()
-            else:
-                beta = 0.9
-                critic_exp_mvg_avg = (critic_exp_mvg_avg * beta) + ((1. - beta) * rewards.mean())
+                # Compute advantage
+                if use_critic:
+                    critic_values = critic(seq, seq_lens)
+                    advantage = (rewards - critic_values).detach()
+                else:
+                    advantage = (rewards - critic_exp_mvg_avg).detach()
 
-            # Compute advantage
-            if use_critic:
-                critic_values = critic(seq, seq_lens)
-                advantage = (rewards - critic_values).detach()
-            else:
-                advantage = (rewards - critic_exp_mvg_avg).detach()
+                # Compute log probabilities and entropy
+                batch_size = seq.size(1)
+                log_probs = torch.empty(batch_size, dtype=advantage.dtype, device=device)
+                entropy = torch.empty(batch_size, dtype=advantage.dtype, device=device)
 
-            # Compute log probabilities and entropy
-            batch_size = seq.size(1)
-            log_probs = torch.empty(batch_size, dtype=advantage.dtype, device=device)
-            entropy = torch.empty(batch_size, dtype=advantage.dtype, device=device)
+                for b_i in range(batch_size):
+                    pointers_i = pointer_indices[:, b_i]
+                    zero_indices = (pointers_i == 0).nonzero()
+                    has_zero = zero_indices.size(0) > 0
+                    if has_zero:
+                        first_zero_index = zero_indices[0, 0].item()
+                        pointers_i = pointers_i[:first_zero_index]
 
-            for b_i in range(batch_size):
-                pointers_i = pointer_indices[:, b_i]
-                zero_indices = (pointers_i == 0).nonzero()
-                has_zero = zero_indices.size(0) > 0
-                if has_zero:
-                    first_zero_index = zero_indices[0, 0].item()
-                    pointers_i = pointers_i[:first_zero_index]
+                    pointers_i_y = pointers_i
+                    pointers_i_x = torch.arange(pointers_i.size(0))
 
-                pointers_i_y = pointers_i
-                pointers_i_x = torch.arange(pointers_i.size(0))
+                    # Compute log probability sum
+                    log_probs[b_i] = pointer_log_scores[pointers_i_x, pointers_i_y, b_i].sum()
 
-                # Compute log probability sum
-                log_probs[b_i] = pointer_log_scores[pointers_i_x, pointers_i_y, b_i].sum()
+                    # Compute entropy 
+                    probs = torch.exp(pointer_log_scores[pointers_i_x, pointers_i_y, b_i])  # Convert log-prob to prob
+                    entropy[b_i] = -torch.sum(probs * pointer_log_scores[pointers_i_x, pointers_i_y, b_i])
 
-                # Compute entropy 
-                probs = torch.exp(pointer_log_scores[pointers_i_x, pointers_i_y, b_i])  # Convert log-prob to prob
-                entropy[b_i] = -torch.sum(probs * pointer_log_scores[pointers_i_x, pointers_i_y, b_i])
+                # Compute loss with entropy regularization
+                reinforce = torch.mean(advantage * log_probs)
+                critic_loss = torch.mean(advantage ** 2)
+                loss = reinforce + (critic_loss if use_critic else 0) - entropy_weight * entropy.mean()
 
-            # Compute loss with entropy regularization
-            reinforce = torch.mean(advantage * log_probs)
-            critic_loss = torch.mean(advantage ** 2)
-            loss = reinforce + (critic_loss if use_critic else 0) - entropy_weight * entropy.mean()
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(current_model.parameters(), max_grad_norm, norm_type=2)
+                optimizer.step()
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, norm_type=2)
-            optimizer.step()
+                critic_exp_mvg_avg = critic_exp_mvg_avg.detach()
 
-            critic_exp_mvg_avg = critic_exp_mvg_avg.detach()
+                if batch_idx % 10 == 0:
+                    avg_coverage = coverages.mean().item()
+                    avg_rel_length = relative_lengths.mean().item()
+                    avg_reward = rewards.mean().item()
+                    avg_entropy = entropy.mean().item()
 
-            if batch_idx % 10 == 0:
-                avg_coverage = coverages.mean().item()
-                avg_rel_length = relative_lengths.mean().item()
-                avg_reward = rewards.mean().item()
-                avg_entropy = entropy.mean().item()
+                    # Log statistics to TensorBoard
+                    writer.add_scalar('Train/Loss', loss.item(), epoch_i * len(training_generator) + batch_idx)
+                    writer.add_scalar('Train/Coverage', avg_coverage, epoch_i * len(training_generator) + batch_idx)
+                    writer.add_scalar('Train/Relative Length', avg_rel_length, epoch_i * len(training_generator) + batch_idx)
+                    writer.add_scalar('Train/Reward', avg_reward, epoch_i * len(training_generator) + batch_idx)
+                    writer.add_scalar('Train/Entropy', avg_entropy, epoch_i * len(training_generator) + batch_idx)
 
-                # Log statistics to TensorBoard
-                writer.add_scalar('Train/Loss', loss.item(), epoch_i * len(training_generator) + batch_idx)
-                writer.add_scalar('Train/Coverage', avg_coverage, epoch_i * len(training_generator) + batch_idx)
-                writer.add_scalar('Train/Relative Length', avg_rel_length, epoch_i * len(training_generator) + batch_idx)
-                writer.add_scalar('Train/Reward', avg_reward, epoch_i * len(training_generator) + batch_idx)
-                writer.add_scalar('Train/Entropy', avg_entropy, epoch_i * len(training_generator) + batch_idx)
-
-        # Evaluate the model on the validation set
-        evaluate_model(model, validation_generator, device, writer, epoch_i, mode='Validation')
-         # save checkpoint
-        #torch.save(model, os.path.join(model_path, f'model_epoch_{epoch_i}.pt'))
-        # Save the best model based on coverage
-        if avg_coverage > best_coverage:
-            best_coverage = avg_coverage
-            best_epoch = epoch_i
-            torch.save(model.state_dict(), os.path.join(model_path, 'best_model.pth'))
-            
-            if args.reward_function == "reward_learnable":
-                torch.save(reward_function, os.path.join(alpha_path, 'best_model.pt'))
-                
-            print(f"New best model saved at epoch {epoch_i} with coverage {avg_coverage}")
-
-    print(f"Best model found at epoch {best_epoch} with coverage {best_coverage}")
+            # Evaluate the model on the validation set
+            avg_coverage, avg_relative_length, avg_reward = evaluate_model(current_model, validation_generator, device, reward_function, writer, epoch_i, mode='Validation')
+            avg_coverage_list.append(avg_coverage)
+            current_model.train()
+        
+        
+        avg_coverage_all_epochs = torch.tensor(avg_coverage_list).mean().item()
+        if avg_coverage_all_epochs > best_coverage:
+            best_coverage = avg_coverage_all_epochs
+            best_reward_function = reward_function
+            best_model = copy.deepcopy(current_model)
+        else:
+            current_model = copy.deepcopy(best_model)
+            optimizer = optim.Adam([ {"params": current_model.parameters()}, { "params": critic.parameters() }], lr=1e-3)
+        
+    return best_reward_function, best_model
 
 
 def evaluate_model(
         model: PtrNet.PointerNetwork, 
         data_loader : DataLoader, 
         device : torch.device, 
+        reward_function : RewardTwoParams,
         writer : SummaryWriter, 
         epoch_i : int, 
-        mode : str ='Validation'
+        mode : str ='Validation',
     ):
     model.eval()
     total_coverage = 0
@@ -217,7 +224,7 @@ def evaluate_model(
     writer.add_scalar(f'{mode}/Relative Length', avg_relative_length, epoch_i)
     writer.add_scalar(f'{mode}/Reward', avg_reward, epoch_i)
 
-    model.train()
+    return avg_coverage, avg_relative_length, avg_reward
 
    
 if __name__ == '__main__':
@@ -230,7 +237,7 @@ if __name__ == '__main__':
     parser.add_argument('--wd', type=float, default=0.01, help='Weight decay for Adam optimizer')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate for Adam optimizer')
     parser.add_argument('--max-decoded-length', type=int, default=200, help='Maximum allowed sequence length for decoder')
-    parser.add_argument('--num-epochs', type=int, default=10, help='Number of epochs for training')
+    parser.add_argument('--num-epochs', type=int, default=3, help='Number of epochs for training')
     parser.add_argument('--log-interval', type=int, default=200, help='Print epoch state every log-interval interval mini batches')
     parser.add_argument('--drl-moa-steps', type=int, default=11, help='Number of DRL-MOA steps')
     parser.add_argument('--train-data', type=str, default='train', help='path to training samples')
@@ -325,7 +332,7 @@ if __name__ == '__main__':
     writer = SummaryWriter(log_dir=f'./logs/{model_name}')
 
     # Train the model
-    train_model(model, training_generator, validation_generator, optimizer, device, writer, args.num_epochs, args.use_critic)
+    best_reward_function, best_model = train_model(model, training_generator, validation_generator, optimizer, device, writer, args.num_epochs, args.use_critic)
 
     writer.close()
 
@@ -335,4 +342,4 @@ if __name__ == '__main__':
     test_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)[:sample_size]) for path in test_paths])
     test_generator = DataLoader(test_set, **dataloader_params, collate_fn=collate_fn)
 
-    evaluate_model(model, test_generator, device, writer, args.num_epochs, mode='Test')
+    evaluate_model(best_model, test_generator, device, best_reward_function, writer, args.num_epochs, mode='Test')
