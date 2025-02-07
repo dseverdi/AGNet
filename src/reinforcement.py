@@ -7,14 +7,14 @@ import torch.optim                as optim
 from   torch.utils.data           import DataLoader
 from   torch.utils.tensorboard    import SummaryWriter
 
-from tqdm       import tqdm
-from data_types import VisSample, VisDataset, collate_fn
-import numpy as np
+
+from   data_types   import VisSample, VisDataset, collate_fn
 import PtrNet
+from   demo         import evaluate_polygon_visibility_numpy_wo_gt, CustomError
+from   losses       import Reward, RewardLH
 
-from demo import evaluate_polygon_visibility_numpy_wo_gt, CustomError
-
-from losses import Reward, RewardLH
+# visualization
+from tqdm import tqdm
 
 def get_model_name_and_create_paths(args):
     0
@@ -59,7 +59,7 @@ def train_model(
         writer: SummaryWriter,
         num_epochs: int,
         use_critic: bool = False,
-        entropy_weight: float = 0.01  # Entropy weight
+        entropy_weight: float = 0.1  # Entropy weight
     ):
 
     max_grad_norm = 2
@@ -233,6 +233,8 @@ if __name__ == '__main__':
     parser.add_argument('--comment', type=str, default='', help='Additional comment for the model name')
     parser.add_argument('--cov-wt', type=float, default=0.6, help='Coverage weight')
     parser.add_argument('--reward-function', type=str, default='reward_manual', help='Set a defined reward function (e.g. manual hyperparams reward (reward_manual) or learnable hyperparams reward (reward_learnable))')
+    
+    # parse arguments
     args = parser.parse_args()
     
     if args.reward_function == "reward_manual":
@@ -242,8 +244,8 @@ if __name__ == '__main__':
     else:
         raise ValueError("No reward function is set")
     
-    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
-    #dataset_dir = "dataset/development"
+    #dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+    dataset_dir = "dataset/development"
 
     train_path = os.path.join(dataset_dir,f'{args.train_data}')
     valid_path = os.path.join(dataset_dir,f'{args.valid_data}')
@@ -278,21 +280,32 @@ if __name__ == '__main__':
     
     samples = {s : [f for f in os.listdir(f"{dataset_dir}/{s}") if f.endswith('.pol')] for s in ['train','dev','test']}
     
-    df = pd.DataFrame.from_dict(samples, orient='index').transpose()
-    
+    df = pd.DataFrame.from_dict(samples, orient='index').transpose()    
          
-    sample_size = 100
+    # use specific number of samples
+    sample_size = args.sample_size if args.sample_size > 0 else None
+
+    # Load training data
     training_set = VisDataset()
     paths = [f"{train_path}/{filename}" for filename in df["train"].tolist() if filename is not None]
     training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths]) 
     training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)   
     
+    # load validation data
     validation_set = VisDataset()
     valid_paths = [f"{valid_path}/{filename}" for filename in df["dev"].tolist() if filename is not None]
     
     validation_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)[:sample_size]) for path in valid_paths])
     validation_generator = DataLoader(validation_set, **dataloader_params, collate_fn=collate_fn)
 
+    # load test data
+    test_set = VisDataset()
+    test_paths = [f"{test_path}/{filename}" for filename in df["test"].tolist() if filename is not None]
+    test_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)[:sample_size]) for path in test_paths])
+    test_generator = DataLoader(test_set, **dataloader_params, collate_fn=collate_fn)    
+
+
+    # Initialize model and optimizer
     model_args = {'hidden_size': args.hidden_size,
                   'bidirectional': args.bidirectional,
                   'device': device,
@@ -304,22 +317,21 @@ if __name__ == '__main__':
     critic = PtrNet.Critic(model_args).to(device)
     #optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)    
     optimizer = optim.Adam([ {"params": model.parameters()}, { "params": critic.parameters() }], lr=1e-3)
-    #optimizer_critic = optim.Adam(critic.parameters(), lr=1e-4)
-    
+    #optimizer_critic = optim.Adam(critic.parameters(), lr=1e-4)   
 
 
     # Initialize TensorBoard writer
-    writer = SummaryWriter(log_dir=f'./logs/{model_name}')
+    writer = SummaryWriter(log_dir=f'./logs/{model_name}') 
 
+    print(f"Training regime: {args.num_epochs} epochs, batch size {args.batch_size}, learning rate {args.lr}")
+    print(f"Training samples: {len(training_set)}")
+    print(f"Validation samples: {len(validation_set)}")
+    print(f"Test samples: {len(test_set)}")    
+    
     # Train the model
     train_model(model, training_generator, validation_generator, optimizer, device, writer, args.num_epochs, args.use_critic)
+    # evaluate on test set
+    evaluate_model(model, test_generator, device, writer, args.num_epochs, mode='Test')
 
     writer.close()
 
-    # Evaluate the model on the test set
-    test_set = VisDataset()
-    test_paths = [f"{test_path}/{filename}" for filename in df["test"].tolist() if filename is not None]
-    test_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)[:sample_size]) for path in test_paths])
-    test_generator = DataLoader(test_set, **dataloader_params, collate_fn=collate_fn)
-
-    evaluate_model(model, test_generator, device, writer, args.num_epochs, mode='Test')
