@@ -9,6 +9,15 @@ class Reward(torch.nn.Module):
     
     def forward(self, coverages, relative_lengths):
         return self.cov_wt * (1 - coverages) + self.opt_wt * relative_lengths
+
+class RewardTwoParams(torch.nn.Module):
+    def __init__(self, beta_1, beta_2):
+        super().__init__()
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+    
+    def forward(self, coverages, relative_lengths):
+        return self.beta_1 * (1 - coverages) + self.beta_2 * relative_lengths
     
 # LH - learnable hyperparameter
 class RewardLH(torch.nn.Module):
