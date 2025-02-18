@@ -78,7 +78,7 @@ def train_model(
     for epoch_i in range(num_epochs):
         critic_exp_mvg_avg = torch.zeros(1).to(device)
 
-        for batch_idx, (seq, seq_lens, positions) in enumerate(tqdm(training_generator, desc=f"Epoch {epoch_i+1}/{num_epochs}")):
+        for batch_idx, (seq, seq_lens, positions, sample_names) in enumerate(tqdm(training_generator, desc=f"Epoch {epoch_i+1}/{num_epochs}")):
             seq, positions = seq.to(device), positions.to(device)
 
             # Sample solution from model
@@ -194,7 +194,7 @@ def evaluate_model(
     total_samples = 0
 
     with torch.no_grad():
-        for seq, seq_lens, positions in tqdm(data_loader, desc=f"Evaluating {mode}"):
+        for seq, seq_lens, positions, sample_names in tqdm(data_loader, desc=f"Evaluating {mode}"):
             seq, positions = seq.to(device), positions.to(device)
             pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
 
@@ -258,8 +258,8 @@ if __name__ == '__main__':
     else:
         raise ValueError("No reward function is set")
     
-    #dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
-    dataset_dir = "dataset/development"
+    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+    #dataset_dir = "dataset/development"
 
     train_path = os.path.join(dataset_dir,f'{args.train_data}')
     valid_path = os.path.join(dataset_dir,f'{args.valid_data}')

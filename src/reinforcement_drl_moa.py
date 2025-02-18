@@ -23,7 +23,7 @@ def get_model_name_and_create_paths(args):
     0
 
 
-def batch_eval_coverage(seq, seq_lens, pointer_indices):
+def batch_eval_coverage(seq, seq_lens, pointer_indices, sample_names):
     points_batch = seq[1:, :, :2].numpy()
     batch_size = points_batch.shape[1]
 
@@ -43,7 +43,7 @@ def batch_eval_coverage(seq, seq_lens, pointer_indices):
             pointers_i = pointers_i[:first_zero_index]
 
         try:
-            coverage = evaluate_polygon_visibility_numpy_wo_gt(points, (pointers_i - 1).cpu().numpy())
+            coverage = evaluate_polygon_visibility_numpy_wo_gt(points, (pointers_i - 1).cpu().numpy(), sample_names[i])
             coverages[i] = coverage
             relative_lengths[i] = pointers_i.size(0) / seq_len
             fine[i] = 1.0
@@ -72,8 +72,8 @@ def train_model(
     print(f"Using critic: {use_critic}")
     
     betas_list = torch.stack([
-        torch.linspace(1, 0, args.drl_moa_steps),
-        torch.linspace(0, 1, args.drl_moa_steps)
+        torch.linspace(0, 1, args.drl_moa_steps),
+        torch.linspace(1, 0, args.drl_moa_steps)
     ], dim=1)
     
     best_model_state_dict = model.state_dict()
@@ -86,14 +86,14 @@ def train_model(
         for epoch_i in range(num_epochs):
             critic_exp_mvg_avg = torch.zeros(1).to(device)
 
-            for batch_idx, (seq, seq_lens, positions) in enumerate(tqdm(training_generator, desc=f"Epoch {epoch_i+1}/{num_epochs}")):
+            for batch_idx, (seq, seq_lens, positions, sample_names) in enumerate(tqdm(training_generator, desc=f"Epoch {epoch_i+1}/{num_epochs}")):
                 seq, positions = seq.to(device), positions.to(device)
 
                 # Sample solution from model
                 pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
 
                 # Compute coverage and relative length
-                coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
+                coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices, sample_names)
                 coverages, relative_lengths, fine = coverages.to(device), relative_lengths.to(device), fine.to(device)
 
                 # Define rewards
@@ -196,11 +196,11 @@ def evaluate_model(
     total_samples = 0
 
     with torch.no_grad():
-        for seq, seq_lens, positions in tqdm(data_loader, desc=f"Evaluating {mode}"):
+        for seq, seq_lens, positions, sample_names in tqdm(data_loader, desc=f"Evaluating {mode}"):
             seq, positions = seq.to(device), positions.to(device)
             pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
 
-            coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
+            coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices, sample_names)
             coverages = coverages.to(device)
             relative_lengths = relative_lengths.to(device)
             fine = fine.to(device)            
@@ -259,8 +259,8 @@ if __name__ == '__main__':
         raise ValueError("No reward function is set")
     """
     
-    #dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
-    dataset_dir = "dataset/development"
+    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+    #dataset_dir = "dataset/development"
 
     train_path = os.path.join(dataset_dir,f'{args.train_data}')
     valid_path = os.path.join(dataset_dir,f'{args.valid_data}')
@@ -279,7 +279,7 @@ if __name__ == '__main__':
         model_name += f'_{args.comment}'
 
     if args.drl_moa_steps:
-        model_name += f'_{args.drl_moa_steps}'
+        model_name += f'_steps_{args.drl_moa_steps}'
 
     model_path = f'./trained_models/{model_name}/'    
     if not os.path.exists(model_path):
@@ -299,9 +299,7 @@ if __name__ == '__main__':
     
          
     # use specific number of samples
-    sample_size = args.sample_size if args.sample_size > 0 else 1
-
-    print('sample size:', sample_size)  
+    sample_size = args.sample_size if args.sample_size > 0 else 1    
 
     # Define training, validation and test datasets    
     train_paths = [f"{train_path}/{filename}" for filename in df["train"].tolist() if filename is not None]

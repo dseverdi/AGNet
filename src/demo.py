@@ -513,8 +513,8 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
     # return predicted and ground_truth
     # compute coverage
     # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
-    eps = 1e-3
-    #eps = 1e-10
+    #eps = 1e-3
+    eps = 1e-8
           
     # arrangments
     arr = skgeom.arrangement.Arrangement()
@@ -624,8 +624,8 @@ def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.nda
     # return predicted and ground_truth
     # compute coverage
     # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
-    eps = 1e-3
-    #eps = 1e-10
+    #eps = 1e-3
+    eps = 1e-10
           
     # arrangments
     arr = skgeom.arrangement.Arrangement()
@@ -748,7 +748,9 @@ def show(*demo_solution):
 
 if __name__ == '__main__':
        # test instance directory
-    dataset_dir = 'dataset/development/'
+    #dataset_dir = 'dataset/development/'
+    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+
     instance_name = 'large/rand-800-7.pol'
     #instance_name = 'train/rand-14-10.pol'
 

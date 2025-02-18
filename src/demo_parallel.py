@@ -71,6 +71,7 @@ def _plot_debugger(
         
         # Save the plot to a file
         plt.savefig(f'debug/{log}.png')
+        plt.close()
         
         #plt.show()
 
@@ -553,7 +554,7 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
     
     return coverage
     
-def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.ndarray):    
+def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.ndarray, name: str):    
     """
     Demonstrates polygon visibility and guard placement.
     Args:
@@ -561,14 +562,14 @@ def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.nda
         solution (np.array): An array of indices representing the predicted guard positions.
     Returns:
         float: The coverage ratio of the visibility region to the polygon area.
-    """       
+    """ 
     # draw polygon
     poly = skgeom.Polygon(points)
         
     # return predicted and ground_truth
     # compute coverage
     # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
-    eps = 1e-3
+    eps = 1e-8
           
     # arrangments
     arr = skgeom.arrangement.Arrangement()
@@ -595,9 +596,9 @@ def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.nda
                 views.append(skgeom.PolygonSet([visibility_polygon]))
             else:
                 print(f"Error: cannot find face for guard {error_idx}", file=sys.stderr)
-                log = f"no_face_at_{error_idx}" if error_idx is not None else f"unbounded_face_at_{error_idx}"
+                log = f"{name}_no_face_at_{error_idx}" if error_idx is not None else f"{name}_unbounded_face_at_{error_idx}"
                 try:
-                    _plot_debugger(points, error_idx, error_q, log=log)            
+                    _plot_debugger(points, error_idx, error_q, log=log)
                 except:
                     print(f"Error plotting face at guard {error_idx}")
 
@@ -674,7 +675,7 @@ if __name__ == '__main__':
 
     # Test evaluate_polygon_visibility_numpy_wo_gt
     points = np.array([x.tolist() for x in sample.points])[:, [0, 1]]
-    coverage_numpy = evaluate_polygon_visibility_numpy_wo_gt(points, solution)
+    coverage_numpy = evaluate_polygon_visibility_numpy_wo_gt(points, solution, sample.name)
     print(f'Coverage (numpy): {coverage_numpy:2.8f}')
 
 

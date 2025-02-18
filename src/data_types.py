@@ -128,32 +128,31 @@ class VisSample:
 
 
 
-class VisDataset(list,Dataset):
-    def __init__(self, samples : Optional[List[VisSample]] = []):  
-        
-        self.samples = samples   if samples else []           
+class VisDataset(list, Dataset):
+    def __init__(self, samples: Optional[List[VisSample]] = []):
+        self.samples = samples if samples else []
         self.points = ([torch.tensor([x.tolist() for x in t.points]) for t in self.samples])
 
     def __repr__(self):
-        return (self.samples.__repr__())
-        
+        return self.samples.__repr__()
+
     def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx):        
+    def __getitem__(self, idx):
         seq = self.points[idx]
         pos = self.samples[idx].guards
-        
-        return seq, pos
-    
-    def __add__(self,other):        
-        return super(list,self).__add__(other)
+        name = self.samples[idx].name
+        return seq, pos, name
 
-    def extend(self,other):
-        if isinstance(other,list): 
+    def __add__(self, other):
+        return super(list, self).__add__(other)
+
+    def extend(self, other):
+        if isinstance(other, list):
             for l in other:
                 self.samples.extend(l.samples)
-                
+
         self.points = ([torch.tensor([x.tolist() for x in t.points]) for t in self.samples])
 
 
@@ -188,7 +187,7 @@ def collate_fn(batch):
     :param batch: batch of sequence and position pairs
     """
     
-    sequences, positions = zip(*batch)
+    sequences, positions, names = zip(*batch)
     sequences = tuple(torch.cat((VisSequence.eos.unsqueeze(0), seq)) for seq in sequences)
     positions = tuple(torch.cat((pos + 1, torch.tensor([0]))) for seq, pos in zip(sequences, positions))
 
@@ -199,7 +198,7 @@ def collate_fn(batch):
     sequences_padded = nn.utils.rnn.pad_sequence(sequences, padding_value=-1)
     positions_padded = nn.utils.rnn.pad_sequence(positions, padding_value=-1)
 
-    return sequences_padded, sequences_lens, positions_padded
+    return sequences_padded, sequences_lens, positions_padded, names
 
 
 
