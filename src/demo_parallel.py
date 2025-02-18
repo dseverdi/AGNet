@@ -13,6 +13,7 @@ import sys
 import faulthandler
 faulthandler.enable()
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # specify CUDA device
 device = torch.device('cuda:0')
@@ -364,6 +365,38 @@ def polygon_demo(
 
     
 
+def compute_visibility(vs, arr, poly, eps, edges, i):
+    v_prev = edges[(i - 1) % len(edges)].source()
+    v = edges[i % len(edges)].source()
+    v_next = edges[i % len(edges)].target()
+
+    p = skgeom.Vector2(v, v_prev)
+    p = p / math.sqrt(p.squared_length())
+    r = skgeom.Vector2(v, v_next)
+    r = r / math.sqrt(r.squared_length())
+
+    q = skgeom.Point2(v.x() + eps * (p.x() + r.x()), v.y() + eps * (p.y() + r.y()))
+
+    if poly.oriented_side(q) != skgeom.Sign.POSITIVE:
+        q = skgeom.Point2(v.x() - eps * (p.x() + r.x()), v.y() - eps * (p.y() + r.y()))
+
+    face = arr.find(q)
+    if face is None or face.is_unbounded():
+        return None, i, q
+
+    try:
+        vx = vs.compute_visibility(q, face)
+        visibility_polygon = skgeom.Polygon([v.point() for v in vx.vertices])
+        return visibility_polygon, None, None
+    except RuntimeError:
+        return None, i, q
+
+def merge_polygon_sets(polygon_sets):
+    merged_region = skgeom.PolygonSet()
+    for ps in polygon_sets:
+        merged_region = merged_region.union(ps)
+    return merged_region
+
 def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tuple:
     """
     Evaluates polygon visibility and guard placement.
@@ -412,71 +445,29 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
 
     # distance to move point q inside the polygon
     eps = 1e-5  # Small epsilon to adjust point position
-    
 
-    for i in solution:
-        # Get adjacent vertices
-        v_prev = edges[(i - 1) % len(edges)].source()
-        v = edges[i % len(edges)].source()
-        v_next = edges[i % len(edges)].target()
+    with ThreadPoolExecutor() as executor:
+        futures = [executor.submit(compute_visibility, vs, arr, poly, eps, edges, i) for i in solution]
+        for future in futures:
+            visibility_polygon, error_idx, error_q = future.result()
+            if visibility_polygon:
+                views.append(skgeom.PolygonSet([visibility_polygon]))
+            else:
+                print(f"Error: cannot find face for guard {error_idx}", file=sys.stderr)
+                log = f"{sample.name}_no_face_at_{error_idx}" if error_idx is not None else f"{sample.name}_unbounded_face_at_{error_idx}"
+                try:
+                    _plot_debugger(points, error_idx, error_q, log=log)            
+                except:
+                    print(f"Error plotting face at guard {error_idx}")
 
-        # Create vectors
-        p = skgeom.Vector2(v, v_prev)
-        p = p / math.sqrt(p.squared_length())
-        r = skgeom.Vector2(v, v_next)
-        r = r / math.sqrt(r.squared_length())
+    # Parallel reduction to merge polygon sets
+    with ThreadPoolExecutor() as executor:
+        chunk_size = max(1, len(views) // executor._max_workers)
+        chunks = [views[i:i + chunk_size] for i in range(0, len(views), chunk_size)]
+        futures = [executor.submit(merge_polygon_sets, chunk) for chunk in chunks]
+        merged_views = [future.result() for future in as_completed(futures)]
 
-        # Adjust point q slightly towards the inside of the polygon
-        q = skgeom.Point2(v.x() + eps * (p.x() + r.x()), v.y() + eps * (p.y() + r.y()))
-
-        # If q is not inside the polygon, adjust it
-        if poly.oriented_side(q) != skgeom.Sign.POSITIVE:             
-            q = skgeom.Point2(v.x() - eps * (p.x() + r.x()), v.y() - eps * (p.y() + r.y()))
-
-        # Find the face containing q        
-        face = arr.find(q)        
-        # check if face is valid
-        if face is None or face.is_unbounded():
-            # Skip if face is invalid
-            print(f"Error: cannot find face for guard {i}", file=sys.stderr)
-            # plot image
-            log = f"{sample.name}_no_face_at_{i}" if face is None else f"{sample.name}_unbounded_face_at_{i}"
-            try:
-                _plot_debugger(points, i, q, log=log)            
-            except:
-                print(f"Error plotting face at guard {i}")
-            continue
-
-        # Compute visibility polygon
-        try:            
-            vx = vs.compute_visibility(q, face)            
-        except RuntimeError as e:
-            # Handle exceptions from CGAL
-            print(f"Error computing visibility at guard {i}: {e}")            
-            log = f"{sample.name}_no_vis_{i}" 
-            try:
-                _plot_debugger(points, i, q, log=log)
-            except:
-                print(f"Error plotting visibility at guard")
-            continue
-
-        # Add visibility polygon to views        
-        visibility_polygon = skgeom.Polygon([v.point() for v in vx.vertices])        
-        views.append(visibility_polygon)
-    
-
-    # Create a polygon set from the visibility polygons
-    region = skgeom.PolygonSet()  
-    try:
-        # here is the problem ...
-        for i,v in enumerate(views):
-            ps = skgeom.PolygonSet([v])            
-            region = region.union(ps)
-            
-        # region = skgeom.PolygonSet(views) # for some reason this makes a problem
-    except Exception as e:
-        print(f"Error creating polygon set: {e}")
-        
+    region = merge_polygon_sets(merged_views)
 
     # Calculate total visible area
     for vis_poly in region.polygons:
@@ -494,32 +485,28 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
     """
     Demonstrates polygon visibility and guard placement.
     Args:
-        sample (VisSample): A sample containing polygon points and guard positions.
+        points (np.ndarray): A numpy array containing polygon points.
+        gt (np.ndarray): Ground truth guard positions.
         solution (np.array): An array of indices representing the predicted guard positions.
     Returns:
-        tuple: A tuple containing:
-            - poly (skgeom.Polygon): The polygon created from the sample points.
-            - region (skgeom.PolygonSet): The set of visibility polygons for the guards.
-            - predicted (list of skgeom.Point2): The list of predicted guard positions.
-            - opt (list of skgeom.Point2): The list of optimal guard positions.
-            - coverage (float): The coverage ratio of the visibility region to the polygon area.
+        float: The coverage ratio of the visibility region to the polygon area.
     """
     opt_guards = points[gt]
-    opt_guards = opt_guards.reshape(1,-1) if len(opt_guards.shape)==1 else opt_guards
+    opt_guards = opt_guards.reshape(1, -1) if len(opt_guards.shape) == 1 else opt_guards
        
-     # draw polygon
+    # draw polygon
     poly = skgeom.Polygon(points)
         
     # return predicted and ground_truth
     # compute coverage
     # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
     eps = 1e-3
-    #eps = 1e-10
           
     # arrangments
     arr = skgeom.arrangement.Arrangement()
     # add edges to arr
-    for e in poly.edges : arr.insert(e)
+    for e in poly.edges:
+        arr.insert(e)
                         
     # compute visibility using triangular expansion
     vs = skgeom.TriangularExpansionVisibility(arr)
@@ -533,66 +520,28 @@ def evaluate_polygon_visibility_numpy(points: np.ndarray, gt: np.ndarray, soluti
 
     edges = list(poly.edges)
 
-    
-    for i in solution:        
-        # Get adjacent vertices
-        v_prev = edges[(i - 1) % len(edges)].source()
-        v = edges[i % len(edges)].source()
-        v_next = edges[i % len(edges)].target()
+    with ThreadPoolExecutor() as executor:
+        futures = [executor.submit(compute_visibility, vs, arr, poly, eps, edges, i) for i in solution]
+        for future in futures:
+            visibility_polygon, error_idx, error_q = future.result()
+            if visibility_polygon:
+                views.append(skgeom.PolygonSet([visibility_polygon]))
+            else:
+                print(f"Error: cannot find face for guard {error_idx}", file=sys.stderr)
+                log = f"no_face_at_{error_idx}" if error_idx is not None else f"unbounded_face_at_{error_idx}"
+                try:
+                    _plot_debugger(points, error_idx, error_q, log=log)            
+                except:
+                    print(f"Error plotting face at guard {error_idx}")
 
-        # Create vectors
-        p = skgeom.Vector2(v, v_prev)
-        p = p / math.sqrt(p.squared_length())
-        r = skgeom.Vector2(v, v_next)
-        r = r / math.sqrt(r.squared_length())
+    # Parallel reduction to merge polygon sets
+    with ThreadPoolExecutor() as executor:
+        chunk_size = max(1, len(views) // executor._max_workers)
+        chunks = [views[i:i + chunk_size] for i in range(0, len(views), chunk_size)]
+        futures = [executor.submit(merge_polygon_sets, chunk) for chunk in chunks]
+        merged_views = [future.result() for future in as_completed(futures)]
 
-        # Adjust point q slightly towards the inside of the polygon
-        q = skgeom.Point2(v.x() + eps * (p.x() + r.x()), v.y() + eps * (p.y() + r.y()))
-
-        # If q is not inside the polygon, adjust it
-        if poly.oriented_side(q) != skgeom.Sign.POSITIVE:             
-            q = skgeom.Point2(v.x() - eps * (p.x() + r.x()), v.y() - eps * (p.y() + r.y()))
-
-        # Find the face containing q
-        face = arr.find(q)
-        if face is None or face.is_unbounded():
-            # Skip if face is invalid
-            print(f"Error: cannot find face for guard {i}",file=sys.stderr)
-            # plot image
-            #log = f"{sample.name}_no_face_at_{i}" if face is None else f"{sample.name}_unbounded_face_at_{i}"
-            #_plot_debugger(points, i, q, log=log)            
-            continue
-
-        # Compute visibility polygon
-        try:
-            vx = vs.compute_visibility(q, face)
-        except RuntimeError as e:
-            # Handle exceptions from CGAL
-            print(f"Error computing visibility at guard {i}: {e}")            
-            #log = f"{sample.name}_no_vis_{i}" 
-            #_plot_debugger(points, i, q, log=log)            
-            continue
-
-        # Add visibility polygon to views
-        visibility_polygon = skgeom.Polygon([v.point() for v in vx.vertices])
-        views.append(visibility_polygon)
-
-
-
-    # Create a polygon set from the visibility polygons
-    #region = skgeom.PolygonSet(views)
-    
-    # Create a polygon set from the visibility polygons
-    region = skgeom.PolygonSet()  
-    try:
-        # here is the problem ...
-        for i,v in enumerate(views):
-            ps = skgeom.PolygonSet([v])            
-            region = region.union(ps)
-            
-        # region = skgeom.PolygonSet(views) # for some reason this makes a problem
-    except Exception as e:
-        print(f"Error creating polygon set: {e}")    
+    region = merge_polygon_sets(merged_views)
 
     # Calculate total visible area
     for vis_poly in region.polygons:
@@ -608,24 +557,18 @@ def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.nda
     """
     Demonstrates polygon visibility and guard placement.
     Args:
-        sample (VisSample): A sample containing polygon points and guard positions.
+        points (np.ndarray): A numpy array containing polygon points.
         solution (np.array): An array of indices representing the predicted guard positions.
     Returns:
-        tuple: A tuple containing:
-            - poly (skgeom.Polygon): The polygon created from the sample points.
-            - region (skgeom.PolygonSet): The set of visibility polygons for the guards.
-            - predicted (list of skgeom.Point2): The list of predicted guard positions.
-            - opt (list of skgeom.Point2): The list of optimal guard positions.
-            - coverage (float): The coverage ratio of the visibility region to the polygon area.
+        float: The coverage ratio of the visibility region to the polygon area.
     """       
-     # draw polygon
+    # draw polygon
     poly = skgeom.Polygon(points)
         
     # return predicted and ground_truth
     # compute coverage
     # consider p+eps*e_2 point in polygonal region instead only  p due to numerics
     eps = 1e-3
-    #eps = 1e-10
           
     # arrangments
     arr = skgeom.arrangement.Arrangement()
@@ -644,66 +587,28 @@ def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.nda
 
     edges = list(poly.edges)
 
-    
-    for i in solution:        
-        # Get adjacent vertices
-        v_prev = edges[(i - 1) % len(edges)].source()
-        v = edges[i % len(edges)].source()
-        v_next = edges[i % len(edges)].target()
+    with ThreadPoolExecutor() as executor:
+        futures = [executor.submit(compute_visibility, vs, arr, poly, eps, edges, i) for i in solution]
+        for future in futures:
+            visibility_polygon, error_idx, error_q = future.result()
+            if visibility_polygon:
+                views.append(skgeom.PolygonSet([visibility_polygon]))
+            else:
+                print(f"Error: cannot find face for guard {error_idx}", file=sys.stderr)
+                log = f"no_face_at_{error_idx}" if error_idx is not None else f"unbounded_face_at_{error_idx}"
+                try:
+                    _plot_debugger(points, error_idx, error_q, log=log)            
+                except:
+                    print(f"Error plotting face at guard {error_idx}")
 
-        # Create vectors
-        p = skgeom.Vector2(v, v_prev)
-        p = p / math.sqrt(p.squared_length())
-        r = skgeom.Vector2(v, v_next)
-        r = r / math.sqrt(r.squared_length())
+    # Parallel reduction to merge polygon sets
+    with ThreadPoolExecutor() as executor:
+        chunk_size = max(1, len(views) // executor._max_workers)
+        chunks = [views[i:i + chunk_size] for i in range(0, len(views), chunk_size)]
+        futures = [executor.submit(merge_polygon_sets, chunk) for chunk in chunks]
+        merged_views = [future.result() for future in as_completed(futures)]
 
-        # Adjust point q slightly towards the inside of the polygon
-        q = skgeom.Point2(v.x() + eps * (p.x() + r.x()), v.y() + eps * (p.y() + r.y()))
-
-        # If q is not inside the polygon, adjust it
-        if poly.oriented_side(q) != skgeom.Sign.POSITIVE:             
-            q = skgeom.Point2(v.x() - eps * (p.x() + r.x()), v.y() - eps * (p.y() + r.y()))
-
-        # Find the face containing q
-        face = arr.find(q)
-        if face is None or face.is_unbounded():
-            # Skip if face is invalid
-            print(f"Error: cannot find face for guard {i}",file=sys.stderr)
-            # plot image
-            #log = f"{sample.name}_no_face_at_{i}" if face is None else f"{sample.name}_unbounded_face_at_{i}"
-            #_plot_debugger(points, i, q)            
-            continue
-
-        # Compute visibility polygon
-        try:
-            vx = vs.compute_visibility(q, face)
-        except RuntimeError as e:
-            # Handle exceptions from CGAL
-            print(f"Error computing visibility at guard {i}: {e}")            
-            #log = f"{sample.name}_no_vis_{i}" 
-            #_plot_debugger(points, i, q)            
-            continue
-
-        # Add visibility polygon to views
-        visibility_polygon = skgeom.Polygon([v.point() for v in vx.vertices])
-        views.append(visibility_polygon)
-
-
-
-    # Create a polygon set from the visibility polygons
-    #region = skgeom.PolygonSet(views)
-    
-    # Create a polygon set from the visibility polygons
-    region = skgeom.PolygonSet()  
-    try:
-        # here is the problem ...
-        for i,v in enumerate(views):
-            ps = skgeom.PolygonSet([v])            
-            region = region.union(ps)
-            
-        # region = skgeom.PolygonSet(views) # for some reason this makes a problem
-    except Exception as e:
-        print(f"Error creating polygon set: {e}")    
+    region = merge_polygon_sets(merged_views)
 
     # Calculate total visible area
     for vis_poly in region.polygons:
@@ -747,7 +652,7 @@ def show(*demo_solution):
 
 
 if __name__ == '__main__':
-       # test instance directory
+    # test instance directory
     dataset_dir = 'dataset/development/'
     instance_name = 'large/rand-800-7.pol'
     #instance_name = 'train/rand-14-10.pol'
@@ -756,21 +661,22 @@ if __name__ == '__main__':
     sample = VisSample.read_samples(path=instance, sol_sample=1)[0]
 
     # Define solution to be all vertices
-    #solution = np.arange(len(sample.points))
-    solution = np.arange(len(sample.points[0]))
+    solution = np.arange(len(sample.points))
 
     print(sample.name)
 
     # Call the evaluate_polygon_visibility function    
-    poly, region, predicted, opt, coverage = evaluate_polygon_visibility(sample, solution)
+    #poly, region, predicted, opt, coverage = evaluate_polygon_visibility(sample, solution)
 
-    print(f'solution: {solution}')
-    print(f'guard points: {predicted}')
-    print(f'Coverage: {coverage:2.8f}')
+    #print(f'solution: {solution}')
+    #print(f'guard points: {predicted}')
+    #print(f'Coverage: {coverage:2.8f}')
+
+    # Test evaluate_polygon_visibility_numpy_wo_gt
+    points = np.array([x.tolist() for x in sample.points])[:, [0, 1]]
+    coverage_numpy = evaluate_polygon_visibility_numpy_wo_gt(points, solution)
+    print(f'Coverage (numpy): {coverage_numpy:2.8f}')
 
 
-    
 
-    
 
-    

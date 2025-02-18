@@ -1,6 +1,8 @@
 import argparse
 import pandas as pd
 import os
+import time  # Import time module
+import random  # Import random module
 
 import torch
 import torch.optim                as optim
@@ -8,10 +10,10 @@ from   torch.utils.data           import DataLoader
 from   torch.utils.tensorboard    import SummaryWriter
 
 
-from   data_types   import VisSample, VisDataset, collate_fn
+from   data_types      import VisSample, VisDataset, collate_fn
 import PtrNet
-from   demo         import evaluate_polygon_visibility_numpy_wo_gt, CustomError
-from   losses       import Reward, RewardLH
+from   demo_parallel   import evaluate_polygon_visibility_numpy_wo_gt, CustomError
+from   losses          import Reward, RewardLH
 
 # visualization
 from tqdm import tqdm
@@ -21,6 +23,7 @@ def get_model_name_and_create_paths(args):
 
 
 def batch_eval_coverage(seq, seq_lens, pointer_indices):
+    start_time = time.time()  # Start timing
     points_batch = seq[1:, :, :2].numpy()
     batch_size = points_batch.shape[1]
 
@@ -47,7 +50,11 @@ def batch_eval_coverage(seq, seq_lens, pointer_indices):
         except:
             raise CustomError("evaluate_polygon_visibility_numpy_wo_gt")
 
-    return coverages, relative_lengths, fine
+    end_time = time.time()  # End timing
+    avg_time = (end_time - start_time)   # Compute average time per batch
+    #print(f"Average time taken for batch evaluation: {avg_time:.2f} seconds")  # Output the average time taken
+
+    return coverages, relative_lengths, fine, avg_time  # Return avg_time
 
 
 def train_model(
@@ -78,7 +85,7 @@ def train_model(
             pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
 
             # Compute coverage and relative length
-            coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
+            coverages, relative_lengths, fine, avg_time = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
             coverages, relative_lengths, fine = coverages.to(device), relative_lengths.to(device), fine.to(device)
 
             # Define rewards
@@ -134,6 +141,16 @@ def train_model(
 
             critic_exp_mvg_avg = critic_exp_mvg_avg.detach()
 
+            # Log total gradient magnitude
+            total_grad_norm = 0
+            for param in model.parameters():
+                if param.grad is not None:
+                    total_grad_norm += param.grad.norm().item()
+            writer.add_scalar('Train/Gradients Norm', total_grad_norm, epoch_i * len(training_generator) + batch_idx)
+
+            # Log batch evaluation time
+            writer.add_scalar('Train/Time for batch evaluation', avg_time, epoch_i * len(training_generator) + batch_idx)
+
             if batch_idx % 10 == 0:
                 avg_coverage = coverages.mean().item()
                 avg_rel_length = relative_lengths.mean().item()
@@ -155,10 +172,7 @@ def train_model(
         if avg_coverage > best_coverage:
             best_coverage = avg_coverage
             best_epoch = epoch_i
-            torch.save(model.state_dict(), os.path.join(model_path, 'best_model.pth'))
-            
-            if args.reward_function == "reward_learnable":
-                torch.save(reward_function, os.path.join(alpha_path, 'best_model.pt'))
+            torch.save(model, os.path.join(model_path, 'best_model.pth'))
                 
             print(f"New best model saved at epoch {epoch_i} with coverage {avg_coverage}")
 
@@ -184,7 +198,7 @@ def evaluate_model(
             seq, positions = seq.to(device), positions.to(device)
             pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
 
-            coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
+            coverages, relative_lengths, fine, _ = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
             coverages = coverages.to(device)
             relative_lengths = relative_lengths.to(device)
             fine = fine.to(device)            
@@ -264,12 +278,8 @@ if __name__ == '__main__':
         model_name += f'_{args.comment}'
 
     model_path = f'./trained_models/{model_name}/'
-    alpha_path = f'./trained_models/alpha/{model_name}/'
     if not os.path.exists(model_path):
         os.makedirs(model_path)
-    
-    if not os.path.exists(alpha_path):
-        os.makedirs(alpha_path)    
     
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if use_cuda else "cpu")
@@ -283,25 +293,33 @@ if __name__ == '__main__':
     df = pd.DataFrame.from_dict(samples, orient='index').transpose()    
          
     # use specific number of samples
-    sample_size = args.sample_size if args.sample_size > 0 else None
+    sample_size = args.sample_size if args.sample_size > 0 else 1
 
-    # Load training data
-    training_set = VisDataset()
-    paths = [f"{train_path}/{filename}" for filename in df["train"].tolist() if filename is not None]
-    training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths]) 
-    training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)   
-    
-    # load validation data
-    validation_set = VisDataset()
+    print('sample size:', sample_size)  
+
+    # Define training, validation and test datasets    
+    train_paths = [f"{train_path}/{filename}" for filename in df["train"].tolist() if filename is not None]
     valid_paths = [f"{valid_path}/{filename}" for filename in df["dev"].tolist() if filename is not None]
+    test_paths = [f"{test_path}/{filename}" for filename in df["test"].tolist() if filename is not None]
+
+    # Sample specific number of paths
+    train_paths = random.sample(train_paths, min(sample_size, len(train_paths)))
+    valid_paths = random.sample(valid_paths, min(sample_size, len(valid_paths)))
+    test_paths = random.sample(test_paths, min(sample_size, len(test_paths)))
+
     
-    validation_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)[:sample_size]) for path in valid_paths])
+    training_set = VisDataset()
+    training_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)) for path in train_paths])    
+    training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)   
+        
+    
+    validation_set = VisDataset()
+    validation_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)) for path in valid_paths])
     validation_generator = DataLoader(validation_set, **dataloader_params, collate_fn=collate_fn)
 
     # load test data
     test_set = VisDataset()
-    test_paths = [f"{test_path}/{filename}" for filename in df["test"].tolist() if filename is not None]
-    test_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)[:sample_size]) for path in test_paths])
+    test_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)) for path in test_paths])
     test_generator = DataLoader(test_set, **dataloader_params, collate_fn=collate_fn)    
 
 

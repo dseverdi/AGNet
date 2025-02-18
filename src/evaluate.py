@@ -36,6 +36,10 @@ def vis_predict(
     points_generator = DataLoader(VisDataset([sample]), batch_size=1, collate_fn=collate_fn)
     points, lens, sol = next(iter(points_generator))      
     
+    # Ensure the model is loaded correctly
+    if isinstance(model, str):
+        model = torch.load(model, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    
     # Move the model to the same device as the input tensor    
     model.to(device)
     
@@ -203,7 +207,14 @@ class TGreedy:
         plt.show()
 
 
-class AGNetSearch(TGNetSearch):
+class AGNetSearch:
+    def __init__(self, model_path):
+        try:
+            self.model = torch.load(model_path, map_location=torch.device(device))
+            print("Model loaded successfully.")
+        except Exception as e:
+            print(f"Failed to load model: {e}")
+
     @conditional_decorator(timer_func,False)
     def predict(self,instance,beam_width=4,alpha=1,beta=0.2):        
         sample = VisSample.read_samples(path=instance,sol_sample=1)[0]
@@ -216,8 +227,8 @@ class AGMNetSearch:
     """
     uses predictor to predict multiple solutions, and evaluator to return best possible solution
     """
-    def __init__(self,predictor : PtrNet.PointerNetwork, evaluator : covnet.CovNet ):
-        self.predictor = predictor
+    def __init__(self, predictor_path, evaluator):
+        self.predictor = torch.load(predictor_path, map_location=torch.device(device))
         self.evaluator = evaluator        
         
         
@@ -233,8 +244,21 @@ class AGMNetSearch:
         
         self.predicted  = data[best][1].numpy()
         return self.predicted
-    
 
 
+
+if __name__ == '__main__':
+    # test AGNetSearch
+    model_path  = './trained_models/ne-1_bs-64_hs-256_hv-256_wd-0.01_lr-0.0001_ss-10000_wt_cov-0.6_parallel_visibility_computation/best_model.pth' 
+    instance = 'dataset/development/large/rand-800-7.pol'
+
     
-    
+
+    rl_model = torch.load(model_path)
+    print(rl_model)
+
+    predictor = AGNetSearch(model_path)
+    print(predictor.predict(instance))
+
+
+

@@ -13,9 +13,11 @@ from data_types import VisSample, VisDataset, collate_fn
 import numpy as np
 import PtrNet
 
-from demo import evaluate_polygon_visibility_numpy_wo_gt, CustomError
+from demo_parallel import evaluate_polygon_visibility_numpy_wo_gt, CustomError
 
 from losses import RewardTwoParams
+
+import random
 
 def get_model_name_and_create_paths(args):
     0
@@ -60,7 +62,7 @@ def train_model(
         writer: SummaryWriter,
         num_epochs: int,
         use_critic: bool = False,
-        entropy_weight: float = 0.01  # Entropy weight
+        entropy_weight: float = 0.1  # Entropy weight
     ):
 
     max_grad_norm = 2
@@ -70,17 +72,15 @@ def train_model(
     print(f"Using critic: {use_critic}")
     
     betas_list = torch.stack([
-        torch.linspace(0, 1, args.drl_moa_steps),
-        torch.linspace(1, 0, args.drl_moa_steps)
+        torch.linspace(1, 0, args.drl_moa_steps),
+        torch.linspace(0, 1, args.drl_moa_steps)
     ], dim=1)
     
-    best_model = model
-    current_model = copy.deepcopy(best_model)
+    best_model_state_dict = model.state_dict()
     best_reward_function = None
     
-    optimizer = optim.Adam([ {"params": current_model.parameters()}, { "params": critic.parameters() }], lr=1e-3)
-    
     for betas in betas_list:
+        print('Training with scalars:', betas)
         reward_function = RewardTwoParams(*betas)
         avg_coverage_list = []
         for epoch_i in range(num_epochs):
@@ -90,7 +90,7 @@ def train_model(
                 seq, positions = seq.to(device), positions.to(device)
 
                 # Sample solution from model
-                pointer_indices, pointer_log_scores = current_model(seq, seq_lens)[0]
+                pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
 
                 # Compute coverage and relative length
                 coverages, relative_lengths, fine = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
@@ -144,7 +144,7 @@ def train_model(
 
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(current_model.parameters(), max_grad_norm, norm_type=2)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, norm_type=2)
                 optimizer.step()
 
                 critic_exp_mvg_avg = critic_exp_mvg_avg.detach()
@@ -163,21 +163,21 @@ def train_model(
                     writer.add_scalar('Train/Entropy', avg_entropy, epoch_i * len(training_generator) + batch_idx)
 
             # Evaluate the model on the validation set
-            avg_coverage, avg_relative_length, avg_reward = evaluate_model(current_model, validation_generator, device, reward_function, writer, epoch_i, mode='Validation')
+            avg_coverage, avg_relative_length, avg_reward = evaluate_model(model, validation_generator, device, reward_function, writer, epoch_i, mode='Validation')
             avg_coverage_list.append(avg_coverage)
-            current_model.train()
-        
+            model.train()
         
         avg_coverage_all_epochs = torch.tensor(avg_coverage_list).mean().item()
         if avg_coverage_all_epochs > best_coverage:
             best_coverage = avg_coverage_all_epochs
             best_reward_function = reward_function
-            best_model = copy.deepcopy(current_model)
+            best_model_state_dict = model.state_dict()
         else:
-            current_model = copy.deepcopy(best_model)
-            optimizer = optim.Adam([ {"params": current_model.parameters()}, { "params": critic.parameters() }], lr=1e-3)
+            model.load_state_dict(best_model_state_dict)
+            optimizer = optim.Adam([ {"params": model.parameters()}, { "params": critic.parameters() }], lr=1e-3)
+            torch.cuda.empty_cache()
         
-    return best_reward_function, best_model
+    return best_reward_function, best_model_state_dict
 
 
 def evaluate_model(
@@ -259,8 +259,8 @@ if __name__ == '__main__':
         raise ValueError("No reward function is set")
     """
     
-    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
-    #dataset_dir = "dataset/development"
+    #dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
+    dataset_dir = "dataset/development"
 
     train_path = os.path.join(dataset_dir,f'{args.train_data}')
     valid_path = os.path.join(dataset_dir,f'{args.valid_data}')
@@ -281,14 +281,11 @@ if __name__ == '__main__':
     if args.drl_moa_steps:
         model_name += f'_{args.drl_moa_steps}'
 
-    model_path = f'./trained_models/{model_name}/'
-    alpha_path = f'./trained_models/alpha/{model_name}/'
+    model_path = f'./trained_models/{model_name}/'    
     if not os.path.exists(model_path):
         os.makedirs(model_path)
     
-    if not os.path.exists(alpha_path):
-        os.makedirs(alpha_path)    
-    
+        
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if use_cuda else "cpu")
     
@@ -301,17 +298,35 @@ if __name__ == '__main__':
     df = pd.DataFrame.from_dict(samples, orient='index').transpose()
     
          
-    sample_size = 100
+    # use specific number of samples
+    sample_size = args.sample_size if args.sample_size > 0 else 1
+
+    print('sample size:', sample_size)  
+
+    # Define training, validation and test datasets    
+    train_paths = [f"{train_path}/{filename}" for filename in df["train"].tolist() if filename is not None]
+    valid_paths = [f"{valid_path}/{filename}" for filename in df["dev"].tolist() if filename is not None]
+    test_paths = [f"{test_path}/{filename}" for filename in df["test"].tolist() if filename is not None]
+
+    # Sample specific number of paths
+    train_paths = random.sample(train_paths, min(sample_size, len(train_paths)))
+    valid_paths = random.sample(valid_paths, min(sample_size, len(valid_paths)))
+    test_paths = random.sample(test_paths, min(sample_size, len(test_paths)))
+
+    
     training_set = VisDataset()
-    paths = [f"{train_path}/{filename}" for filename in df["train"].tolist() if filename is not None]
-    training_set.extend([VisDataset(VisSample.read_samples(path=path,normalize = args.normalize)[:sample_size]) for path in paths]) 
+    training_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)) for path in train_paths])    
     training_generator = DataLoader(training_set, **dataloader_params, collate_fn=collate_fn)   
+        
     
     validation_set = VisDataset()
-    valid_paths = [f"{valid_path}/{filename}" for filename in df["dev"].tolist() if filename is not None]
-    
-    validation_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)[:sample_size]) for path in valid_paths])
+    validation_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)) for path in valid_paths])
     validation_generator = DataLoader(validation_set, **dataloader_params, collate_fn=collate_fn)
+
+    # load test data
+    test_set = VisDataset()
+    test_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)) for path in test_paths])
+    test_generator = DataLoader(test_set, **dataloader_params, collate_fn=collate_fn)    
 
     model_args = {'hidden_size': args.hidden_size,
                   'bidirectional': args.bidirectional,
@@ -322,19 +337,18 @@ if __name__ == '__main__':
     
     model = PtrNet.PointerNetwork(model_args).to(device)
     critic = PtrNet.Critic(model_args).to(device)
-    #optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)    
     optimizer = optim.Adam([ {"params": model.parameters()}, { "params": critic.parameters() }], lr=1e-3)
-    #optimizer_critic = optim.Adam(critic.parameters(), lr=1e-4)
     
-
-
     # Initialize TensorBoard writer
     writer = SummaryWriter(log_dir=f'./logs/{model_name}')
 
     # Train the model
-    best_reward_function, best_model = train_model(model, training_generator, validation_generator, optimizer, device, writer, args.num_epochs, args.use_critic)
+    best_reward_function, best_model_state_dict = train_model(model, training_generator, validation_generator, optimizer, device, writer, args.num_epochs, args.use_critic)
 
     writer.close()
+
+    # Load the best model state dict
+    model.load_state_dict(best_model_state_dict)
 
     # Evaluate the model on the test set
     test_set = VisDataset()
@@ -342,4 +356,4 @@ if __name__ == '__main__':
     test_set.extend([VisDataset(VisSample.read_samples(path=path, normalize=args.normalize)[:sample_size]) for path in test_paths])
     test_generator = DataLoader(test_set, **dataloader_params, collate_fn=collate_fn)
 
-    evaluate_model(best_model, test_generator, device, best_reward_function, writer, args.num_epochs, mode='Test')
+    evaluate_model(model, test_generator, device, best_reward_function, writer, args.num_epochs, mode='Test')

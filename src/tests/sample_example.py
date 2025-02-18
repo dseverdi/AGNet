@@ -159,8 +159,8 @@ def example_eval_all_samples_via_pytorch_dataloader_and_report_errors(dataset_di
         i += 1
 
 if __name__ == "__main__":
-    #dataset_dir = 'dataset/development'
-    dataset_dir = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development'
+    dataset_dir = 'dataset/development'
+    #dataset_dir = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development'
     #dataset_dir = "/home/jurica/Desktop/AGNet/dataset/development"
 
     #example_eval_all_vis_samples_and_report_errors(dataset_dir)    
