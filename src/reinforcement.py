@@ -22,7 +22,7 @@ def get_model_name_and_create_paths(args):
     0
 
 
-def batch_eval_coverage(seq, seq_lens, pointer_indices):
+def batch_eval_coverage(seq, seq_lens, pointer_indices, sample_names):
     start_time = time.time()  # Start timing
     points_batch = seq[1:, :, :2].numpy()
     batch_size = points_batch.shape[1]
@@ -43,7 +43,7 @@ def batch_eval_coverage(seq, seq_lens, pointer_indices):
             pointers_i = pointers_i[:first_zero_index]
 
         try:
-            coverage = evaluate_polygon_visibility_numpy_wo_gt(points, (pointers_i - 1).cpu().numpy())
+            coverage = evaluate_polygon_visibility_numpy_wo_gt(points, (pointers_i - 1).cpu().numpy(),sample_names[i])
             coverages[i] = coverage
             relative_lengths[i] = pointers_i.size(0) / seq_len
             fine[i] = 1.0
