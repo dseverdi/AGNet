@@ -85,7 +85,7 @@ def train_model(
             pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
 
             # Compute coverage and relative length
-            coverages, relative_lengths, fine, avg_time = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
+            coverages, relative_lengths, fine, avg_time = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices, sample_names)
             coverages, relative_lengths, fine = coverages.to(device), relative_lengths.to(device), fine.to(device)
 
             # Define rewards
@@ -198,7 +198,7 @@ def evaluate_model(
             seq, positions = seq.to(device), positions.to(device)
             pointer_indices, pointer_log_scores = model(seq, seq_lens)[0]
 
-            coverages, relative_lengths, fine, _ = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices)
+            coverages, relative_lengths, fine, _ = batch_eval_coverage(seq.cpu(), seq_lens, pointer_indices, sample_names)
             coverages = coverages.to(device)
             relative_lengths = relative_lengths.to(device)
             fine = fine.to(device)            
