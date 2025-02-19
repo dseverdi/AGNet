@@ -243,7 +243,7 @@ if __name__ == '__main__':
     parser.add_argument('--train-data', type=str, default='train', help='path to training samples')
     parser.add_argument('--valid-data', type=str, default='dev', help='path to validation samples')
     parser.add_argument('--test-data', type=str, default='test', help='path to test samples')
-    parser.add_argument('--sample-size', type=int, default=100, help='Number of samples to use')
+    parser.add_argument('--sample-size', type=int, default=1e6, help='Number of samples to use')
     parser.add_argument('--use-critic', action='store_true', help='Use Bello critic instead of exp_mvg_avg')
     parser.add_argument('--comment', type=str, default='', help='Additional comment for the model name')
     parser.add_argument('--cov-wt', type=float, default=0.6, help='Coverage weight')
@@ -281,7 +281,7 @@ if __name__ == '__main__':
     if args.drl_moa_steps:
         model_name += f'_steps_{args.drl_moa_steps}'
 
-    model_path = f'./trained_models/{model_name}/'    
+    model_path = f'../models/reinforce/trained_models/{model_name}/'    
     if not os.path.exists(model_path):
         os.makedirs(model_path)
     
@@ -299,7 +299,7 @@ if __name__ == '__main__':
     
          
     # use specific number of samples
-    sample_size = args.sample_size if args.sample_size > 0 else 1    
+    sample_size = args.sample_size
 
     # Define training, validation and test datasets    
     train_paths = [f"{train_path}/{filename}" for filename in df["train"].tolist() if filename is not None]

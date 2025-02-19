@@ -10,6 +10,26 @@ from polygon    import Polygon
 import PtrNet
 import covnet
 
+import torch
+
+
+# add safe model loading
+safe_globals = {
+    'PointerNetwork': PtrNet.PointerNetwork,
+    'Pointer': PtrNet.Pointer,
+    'PointerExclusive': PtrNet.PointerExclusive,
+    # add other classes/functions if needed
+}
+
+torch.serialization.add_safe_globals(safe_globals)
+
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="You are using `torch.load` with `weights_only=False`",
+    category=FutureWarning
+)
+
 # math
 import math
 # debugging
@@ -34,7 +54,7 @@ def vis_predict(
     """
     
     points_generator = DataLoader(VisDataset([sample]), batch_size=1, collate_fn=collate_fn)
-    points, lens, sol = next(iter(points_generator))      
+    points, lens, sol, _ = next(iter(points_generator))      
     
     # Ensure the model is loaded correctly
     if isinstance(model, str):
@@ -248,17 +268,41 @@ class AGMNetSearch:
 
 
 if __name__ == '__main__':
-    # test AGNetSearch
-    model_path  = './trained_models/ne-1_bs-64_hs-256_hv-256_wd-0.01_lr-0.0001_ss-10000_wt_cov-0.6_parallel_visibility_computation/best_model.pth' 
-    instance = 'dataset/development/large/rand-800-7.pol'
 
+    # define instance
+    instance = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development/large/rand-800-7.pol'
+    print('Testing neural solvers on instance:', instance)
+
+
+    # test opt solver
+    opt_solver = Opt()
+    print(' * Optimal solution:')
+    print(opt_solver.predict(instance))    
     
+    print('-'*100)
+    # test supervised model
+    supervised_model_path = './models/supervised/trained_models/ag_clusters_numsols-1_ne-100_bs-64_hs-256_tfr-0.5_wd-1e-05_lr-0.001_bidirectional_normalized.pt' 
+       
+    # PTrNet search
+    print('* Loading supervised model ...', end='', flush=True)
+    supervised_solver = AGNetSearch(supervised_model_path)
+    print('* Predicting with supervised model: ')
+    print(supervised_solver.predict(instance))
+    print("\t+ Supervised model prediction done. OK")
+    print('-'*100)
+    
+    # test RL model
+    reinforce_model_path = './models/reinforce/trained_models/ne-1_bs-64_hs-256_hv-256_wd-0.01_lr-0.0001_ss-10_wt_cov-0.6_dummy_model/best_model.pth'     
 
-    rl_model = torch.load(model_path)
-    print(rl_model)
+    print('* Loading reinforce model ...', end='', flush=True)        
+    reinforce_solver = AGNetSearch(reinforce_model_path)
+    
+    print('* Predicting with reinforce model: ')
+    print(reinforce_solver.predict(instance))
+    print("\t+ Reinforce model prediction done. OK")
+    print('='*100)
 
-    predictor = AGNetSearch(model_path)
-    print(predictor.predict(instance))
+
 
 
 

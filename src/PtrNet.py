@@ -12,6 +12,9 @@ from typing import Optional, Type # type: ignore
 from data_types import VisSequence
 from beam_search import BeamNode
 
+
+
+
 def create_mask(seq_lens, device):
     mask = torch.zeros(max(seq_lens), len(seq_lens), device=device)
     for i, seq_len in enumerate(seq_lens):
@@ -61,7 +64,7 @@ class Encoder(nn.Module):
 
     
 class Pointer(nn.Module):
-    def __init__(self, hidden_size, softmax_only=False):
+    def __init__(self, hidden_size: int, softmax_only: Optional[bool] = None):
         super().__init__()
         
         self.softmax_only = softmax_only
@@ -83,10 +86,13 @@ class Pointer(nn.Module):
         decoder_transform = self.W_d(decoder_state)
         u = self.v(self.tanh(encoder_transform + decoder_transform)).squeeze(-1)
         
-        if self.softmax_only:
-            return masked_softmax(u, mask, dim=0)
+        if not hasattr(self, 'softmax_only'):
+            return u
         else:
-            return masked_log_softmax(u, mask, dim=0)
+            if self.softmax_only:
+                return masked_softmax(u, mask, dim=0)
+            else:
+                return masked_log_softmax(u, mask, dim=0)
 
 
 class PointerExclusive(Pointer):
@@ -137,12 +143,12 @@ class PointerNetwork(nn.Module):
         self.teacher_forcing_ratio = model_args['teacher_forcing_ratio']
         self.max_decoded_length = model_args['max_decoded_length']
         self.num_sols = model_args['num_sols']
+        self.bello_et_al = model_args.get('bello_et_al', False)
 
         self.encoders = nn.ModuleList([Encoder(self.encoder_hidden_size, self.bidirectional) for _ in range(self.num_sols)])
         self.decoder_rnns = nn.ModuleList([nn.LSTMCell(self.decoder_hidden_size, self.decoder_hidden_size) for _ in range(self.num_sols)])
         
-        self.bello_et_all = True
-        if self.bello_et_all:
+        if hasattr(self, 'bello_et_al') and self.bello_et_al:
             self.pointers = nn.ModuleList([PointerExclusive(self.decoder_hidden_size) for _ in range(self.num_sols)])
         else:
             self.pointers = nn.ModuleList([Pointer(self.decoder_hidden_size) for _ in range(self.num_sols)])
@@ -167,7 +173,7 @@ class PointerNetwork(nn.Module):
         use_teacher_forcing = torch.rand(1) <= self.teacher_forcing_ratio
         mask = create_mask(seq_lens, device=seq.device)
         
-        if self.bello_et_all:
+        if hasattr(self, 'bello_et_al') and self.bello_et_al:
             self.pointers[model_idx].init_chosen(seq.size(0), seq.size(1), h.device, h.dtype)
         
         for i in range(target.shape[0] if target is not None else self.max_decoded_length):
@@ -178,7 +184,7 @@ class PointerNetwork(nn.Module):
 
             _, pointer_index = masked_max(pointer_log_score, mask, dim=0) # (batch_size)
             
-            if self.bello_et_all:
+            if hasattr(self, 'bello_et_al') and self.bello_et_al:
                 self.pointers[model_idx].set_chosen(pointer_index)
             
             pointer_indices.append(pointer_index)
