@@ -47,7 +47,13 @@ class VisSample:
 
     
     @staticmethod
-    def read_samples(path : str,sol_sample : Optional[int] = 1, normalize : Optional[bool] = False, solve : bool = True) -> List["VisSample"]:
+    def read_samples(
+        path: str,
+        sol_sample: Optional[int] = 1,
+        normalize: Optional[bool] = False,
+        solve: bool = True,
+        replicate_solutions: int = 1   # << New parameter
+    ) -> List["VisSample"]:
         """
             read samples
 
@@ -119,10 +125,19 @@ class VisSample:
                 samples.extend( [VisSample( name = instance_name, points = _points, guards = tensor([]) )]) 
             else:
                 if sol_sample > 0: 
-                    samples.extend( [VisSample( name = instance_name, points = _points, guards = _guards ) for _guards in _sols[:sol_sample] ])
+                    # Replicate each solution
+                    for _guards in _sols[:sol_sample]:
+                        for _ in range(replicate_solutions):
+                            samples.append(
+                                VisSample(name=instance_name, points=_points, guards=_guards)
+                            )
                 else:
                     # ToDo: add diverse solutions ...
-                    samples.extend( [VisSample( name = instance_name, points = _points, guards = _guards ) for _guards in _sols] )
+                    for _guards in _sols:
+                        for _ in range(replicate_solutions):
+                            samples.append(
+                                VisSample(name=instance_name, points=_points, guards=_guards)
+                            )
         
         return samples
 

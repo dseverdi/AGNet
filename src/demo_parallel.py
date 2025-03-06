@@ -415,11 +415,7 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
     guards = points[solution]
     # Extract optimal guards
     opt_guards = points[sample.guards]
-    
 
-    if solution.shape == (1,):
-        guards = guards.reshape(1, -1)
-        opt_guards = opt_guards.reshape(1, -1)
         
     # Draw polygon
     poly = skgeom.Polygon(points)    
@@ -427,7 +423,8 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
     # Predicted and optimal guards
     predicted = [skgeom.Point2(g[0], g[1]) for g in guards.tolist()]
     opt       = [skgeom.Point2(g[0], g[1]) for g in opt_guards.tolist()]
-    
+
+       
     # Create 2D arrangement of the polygon
     arr = skgeom.arrangement.Arrangement()
     for e in poly.edges:
@@ -640,7 +637,8 @@ def show(*demo_solution):
         skgeom.draw.draw(predicted,color = 'red')
         plt.show()
         print(f' * Predicted solution size:     {len(predicted)}')
-        print(f' * PtrMNet coverage:     {coverage:2.8f},      ratio=pred/opt: {len(predicted)/len(opt):2.8f}')
+        print(f' * Opt size:     {len(opt)}')
+        print(f' * PtrNet coverage:     {coverage:2.8f},      ratio=pred/opt: {len(predicted)/len(opt):2.8f}')
             
     
     else:  # opt
@@ -654,7 +652,7 @@ def show(*demo_solution):
 
 if __name__ == '__main__':
     # test instance directory
-    dataset_dir = 'dataset/development/'
+    dataset_dir = './dataset/development/'
     instance_name = 'large/rand-800-7.pol'
     #instance_name = 'train/rand-14-10.pol'
 
@@ -667,11 +665,11 @@ if __name__ == '__main__':
     print(sample.name)
 
     # Call the evaluate_polygon_visibility function    
-    #poly, region, predicted, opt, coverage = evaluate_polygon_visibility(sample, solution)
+    poly, region, predicted, opt, coverage = evaluate_polygon_visibility(sample, solution)
 
-    #print(f'solution: {solution}')
-    #print(f'guard points: {predicted}')
-    #print(f'Coverage: {coverage:2.8f}')
+    print(f'solution: {solution}')
+    print(f'guard points: {predicted}')
+    print(f'Coverage: {coverage:2.8f}')
 
     # Test evaluate_polygon_visibility_numpy_wo_gt
     points = np.array([x.tolist() for x in sample.points])[:, [0, 1]]

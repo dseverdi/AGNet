@@ -2,13 +2,20 @@ import torch
 import torch.nn
 
 class Reward(torch.nn.Module):
-    def __init__(self, cov_wt):
+    def __init__(self, cov_wt, exp_factor=None):
         super().__init__()
         self.cov_wt = cov_wt
         self.opt_wt = 1 - cov_wt
+        self.exp_factor = exp_factor  # Exponential growth factor
     
     def forward(self, coverages, relative_lengths):
-        return self.cov_wt * (1 - coverages) + self.opt_wt * relative_lengths
+        # Apply exponential transformation to relative_lengths
+        if self.exp_factor:
+            exp_relative_lengths = torch.pow(relative_lengths, self.exp_factor)
+            exp_relative_lengths = relative_lengths
+            return self.cov_wt * (1 - coverages) + self.opt_wt * exp_relative_lengths
+        else: 
+            return self.cov_wt * (1 - coverages) + self.opt_wt * relative_lengths
 
 class RewardTwoParams(torch.nn.Module):
     def __init__(self, beta_1, beta_2):
@@ -23,7 +30,7 @@ class RewardTwoParams(torch.nn.Module):
 class RewardLH(torch.nn.Module):
     def __init__(self, alpha_initial = 0.0):
         super().__init__()
-        self.alpha = torch.nn.Parameter(torch.tensor(alpha_initial, dtype=torch.float32))
+        self.alpha = torch.tensor(alpha_initial, dtype=torch.float32)
         
     def forward(self, coverages, relative_lengths):
         beta = torch.special.expit(self.alpha) * 0.9 + 0.1
@@ -35,5 +42,4 @@ if __name__ == "__main__":
     torch.save(r, "./temp.pt")
     r2 = torch.load("./temp.pt")
     print(r2.alpha)
-    
-    
+

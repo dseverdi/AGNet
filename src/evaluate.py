@@ -8,7 +8,6 @@ from terrain    import Terrain
 from polygon    import Polygon
 # NNs
 import PtrNet
-import covnet
 
 import torch
 
@@ -243,34 +242,11 @@ class AGNetSearch:
     
     
 
-class AGMNetSearch:
-    """
-    uses predictor to predict multiple solutions, and evaluator to return best possible solution
-    """
-    def __init__(self, predictor_path, evaluator):
-        self.predictor = torch.load(predictor_path, map_location=torch.device(device))
-        self.evaluator = evaluator        
-        
-        
-    def predict(self,instance,beam_width=4,alpha=1,beta=0.2):        
-        sample = VisSample.read_samples(path=instance,sol_sample=1)[0] if not isinstance(instance,VisSample) else instance       
-        seqs = vis_predict(self.predictor,sample)
-        
-        # data loader for finding solutions
-        instance = torch.tensor([x.tolist() for x in sample.points])
-        data = [[instance, torch.tensor(seqs[i]), torch.tensor(0.0)] for i in range(len(seqs))]
-        data_loader  = DataLoader(data,  shuffle=False,batch_size=1,collate_fn=covnet.collate_fn_packed)
-        best = np.argmax([ covnet.predict(self.evaluator,sample).cpu().item() for sample in data_loader ])        
-        
-        self.predicted  = data[best][1].numpy()
-        return self.predicted
-
-
 
 if __name__ == '__main__':
 
     # define instance
-    instance = '/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development/large/rand-800-7.pol'
+    instance = './dataset/AG/development/large/rand-800-7.pol'
     print('Testing neural solvers on instance:', instance)
 
 

@@ -153,6 +153,12 @@ class PointerNetwork(nn.Module):
         else:
             self.pointers = nn.ModuleList([Pointer(self.decoder_hidden_size) for _ in range(self.num_sols)])
 
+        #self._initialize_parameters()
+
+    def _initialize_parameters(self):
+        for p in self.parameters():
+            p.data.uniform_(-0.08, 0.08)
+
     def forward(self, seq, seq_lens, target=None, beam_width=None, alpha=None, beta=None):
         sols = []
         for i in range(self.num_sols):

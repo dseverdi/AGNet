@@ -11,6 +11,7 @@ import math
 import sys
 
 import faulthandler
+import os
 faulthandler.enable()
 
 
@@ -382,7 +383,11 @@ def evaluate_polygon_visibility(sample : VisSample, solution : np.ndarray) -> Tu
     # Extract optimal guards
     opt_guards = points[sample.guards]
     
-
+    if opt_guards.ndim == 1:
+        opt_guards = opt_guards.reshape(1, -1)
+    
+   
+    
     if solution.shape == (1,):
         guards = guards.reshape(1, -1)
         opt_guards = opt_guards.reshape(1, -1)
@@ -734,7 +739,7 @@ def show(*demo_solution):
         skgeom.draw.draw(predicted,color = 'red')
         plt.show()
         print(f' * Predicted solution size:     {len(predicted)}')
-        print(f' * PtrMNet coverage:     {coverage:2.8f},      ratio=pred/opt: {len(predicted)/len(opt):2.8f}')
+        print(f' * PtrNet coverage:     {coverage:2.8f},      ratio=pred/opt: {len(predicted)/len(opt):2.8f}')
             
     
     else:  # opt
@@ -747,11 +752,9 @@ def show(*demo_solution):
 
 
 if __name__ == '__main__':
-       # test instance directory
-    #dataset_dir = 'dataset/development/'
-    dataset_dir = "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development"
-
-    instance_name = 'large/rand-800-7.pol'
+    # test instance directory
+    dataset_dir = './dataset/development/'
+    instance_name = 'large/rand-600-1.pol'
     #instance_name = 'train/rand-14-10.pol'
 
     instance = os.path.join(dataset_dir, instance_name)
@@ -759,10 +762,11 @@ if __name__ == '__main__':
 
     # Define solution to be all vertices
     #solution = np.arange(len(sample.points))
-    solution = np.arange(len(sample.points[0]))
+    solution = np.arange(len(sample.points))
 
     print(sample.name)
 
+    print('test with all guards:')
     # Call the evaluate_polygon_visibility function    
     poly, region, predicted, opt, coverage = evaluate_polygon_visibility(sample, solution)
 
@@ -770,9 +774,19 @@ if __name__ == '__main__':
     print(f'guard points: {predicted}')
     print(f'Coverage: {coverage:2.8f}')
 
-
+    solution = sample.guards
     
+    print('test with optimal guards:')
+    # Call the evaluate_polygon_visibility function    
+    poly, region, predicted, opt, coverage = evaluate_polygon_visibility(sample, solution)
 
-    
+    print(f'opt-solution: {opt}')
+    print(f'solution: {solution}')
+    print(f'guard points: {predicted}')
+    print(f'Coverage: {coverage:2.8f}')
 
-    
+
+
+
+
+
