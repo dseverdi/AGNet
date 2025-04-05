@@ -15,7 +15,7 @@ from tsp_dataset import TSPDataset, tsp_examples, collate_fn as tsp_collate_fn
    
 def init_parser():  
     parser = argparse.ArgumentParser(description='Pointer network for Terrain guarding predictions.')
-    parser.add_argument('--batch-size', type=int, default=64, help='training batch size')
+    parser.add_argument('--batch-size', type=int, default=2048, help='training batch size')
     parser.add_argument('--normalize', action='store_true', default=True, help='normalize inputs to unit square')
     parser.add_argument('--bidirectional', action='store_true', default=True, help='Bidirectional encoder LSTM')
     parser.add_argument('--hidden-size', type=int, default=128, help='LSTM hidden dimension size')

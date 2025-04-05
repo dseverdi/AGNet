@@ -216,8 +216,8 @@ if __name__ == '__main__':
     
     dataset_directory = "./dataset/tsp/"
     os.system(f"mkdir -p {dataset_directory}")
-    #paths = download_google_drive_file(dataset_directory[:-1], 'tsp', '', '5')
-    #paths = download_google_drive_file(dataset_directory[:-1], 'tsp', '5', '20')
+    paths = download_google_drive_file(dataset_directory[:-1], 'tsp', '', '5')
+    paths = download_google_drive_file(dataset_directory[:-1], 'tsp', '5', '20')
 
     coord_tensors, tour_tensors = tsp_examples()
 
