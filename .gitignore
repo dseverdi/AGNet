@@ -6,3 +6,4 @@ results/
 pretrained/
 models/trained_models/
 dataset/development/
+dataset/tsp/
