@@ -4,7 +4,7 @@
 # https://github.com/devsisters/neural-combinatorial-rl-tensorflow/blob/master/data_loader.py
 import requests
 from tqdm import tqdm
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
 import torch
 import os
@@ -38,12 +38,6 @@ def reward(sample_solution, USE_CUDA=False):
     
     tour_len += torch.norm(sample_solution[n-1] - sample_solution[0], dim=1)
 
-    # For TSP_20 - map to a number between 0 and 1
-    # min_len = 3.5
-    # max_len = 10.
-    # TODO: generalize this for any TSP size
-    #tour_len = -0.1538*tour_len + 1.538 
-    #tour_len[tour_len < 0.] = 0.
     return tour_len
 
 
@@ -120,121 +114,6 @@ def read_paper_dataset(paths):
 
     return x, y
 
-def maybe_generate_and_save(self, except_list=[]):
-    data = {}
-
-    for name, num in self.data_num.items():
-        if name in except_list:
-            print("Skip creating {} because of given except_list {}".format(name, except_list))
-            continue
-        path = self.get_path(name)
-
-        print("Skip creating {} for [{}]".format(path, self.task))
-        tmp = np.load(path)
-        self.data[name] = TSP(x=tmp['x'], y=tmp['y'], name=name)
-
-def get_path(self, name):
-    return os.path.join(
-        self.data_dir, "{}_{}={}.npz".format(
-            self.task_name, name, self.data_num[name]))
-
-def read_zip_and_update_data(self, path, name):
-    if path.endswith('zip'):
-        filenames = zipfile.ZipFile(path).namelist()
-        paths = [os.path.join(self.data_dir, filename) for filename in filenames]
-    else:
-        paths = [path]
-
-    x_list, y_list = read_paper_dataset(paths, self.max_length)
-
-    x = np.zeros([len(x_list), self.max_length, 2], dtype=np.float32)
-    y = np.zeros([len(y_list), self.max_length], dtype=np.int32)
-
-    for idx, (nodes, res) in enumerate(tqdm(zip(x_list, y_list))):
-        x[idx,:len(nodes)] = nodes
-        y[idx,:len(res)] = res
-
-    if self.data is None:
-        self.data = {}
-
-    print("Update [{}] data with {} used in the paper".format(name, path))
-    self.data[name] = TSP(x=x, y=y, name=name)
-
-
-def create_dataset(
-    problem_size, 
-    data_dir):
-
-    def find_or_return_empty(data_dir, problem_size):
-        #train_fname1 = os.path.join(data_dir, 'tsp{}.txt'.format(problem_size))
-        val_fname1 = os.path.join(data_dir, 'tsp{}_test.txt'.format(problem_size))
-        #train_fname2 = os.path.join(data_dir, 'tsp-{}.txt'.format(problem_size))
-        val_fname2 = os.path.join(data_dir, 'tsp-{}_test.txt'.format(problem_size))
-        
-        if not os.path.isdir(data_dir):
-            os.mkdir(data_dir)
-        else:
-    #         if os.path.exists(train_fname1) and os.path.exists(val_fname1):
-    #             return train_fname1, val_fname1
-    #         if os.path.exists(train_fname2) and os.path.exists(val_fname2):
-    #             return train_fname2, val_fname2
-    #     return None, None
-
-    # train, val = find_or_return_empty(data_dir, problem_size)
-    # if train is None and val is None:
-    #     download_google_drive_file(data_dir,
-    #         'tsp', '', problem_size) 
-    #     train, val = find_or_return_empty(data_dir, problem_size)
-
-    # return train, val
-            if os.path.exists(val_fname1):
-                return val_fname1
-            if os.path.exists(val_fname2):
-                return val_fname2
-        return None
-
-    val = find_or_return_empty(data_dir, problem_size)
-    if val is None:
-        download_google_drive_file(data_dir, 'tsp', '', problem_size)
-        val = find_or_return_empty(data_dir, problem_size)
-
-    return val
-
-
-#######################################
-# Dataset
-#######################################
-class TSPDataset(Dataset):
-    
-    def __init__(self, dataset_fname=None, train=False, size=50, num_samples=1000000, random_seed=1111):
-        super(TSPDataset, self).__init__()
-        #start = torch.FloatTensor([[-1], [-1]]) 
-        
-        torch.manual_seed(random_seed)
-
-        self.data_set = []
-        if not train:
-            with open(dataset_fname, 'r') as dset:
-                for l in tqdm(dset):
-                    inputs, outputs = l.split(' output ')
-                    sample = torch.zeros(1, )
-                    x = np.array(inputs.split(), dtype=np.float32).reshape([-1, 2]).T
-                    #y.append(np.array(outputs.split(), dtype=np.int32)[:-1]) # skip the last one
-                    self.data_set.append(x)
-        else:
-            # randomly sample points uniformly from [0, 1]
-            for l in tqdm(range(num_samples)):
-                x = torch.FloatTensor(2, size).uniform_(0, 1)
-                #x = torch.cat([start, x], 1)
-                self.data_set.append(x)
-
-        self.size = len(self.data_set)
-
-    def __len__(self):
-        return self.size
-
-    def __getitem__(self, idx):
-        return self.data_set[idx]
 
 def save_numpy_dataset(dataset_name, dataset_directory):
     dataset_numpy_directory = "./dataset/tsp/numpy/"
@@ -250,23 +129,116 @@ def save_numpy_dataset(dataset_name, dataset_directory):
     
 def load_numpy_dataset(dataset_name):
     dataset_numpy_directory = "./dataset/tsp/numpy/"    
-    x = np.load(f"{dataset_numpy_directory}/{dataset_name}_x.npy")
-    y = np.load(f"{dataset_numpy_directory}/{dataset_name}_y.npy")
+    try:  
+        x = np.load(f"{dataset_numpy_directory}/{dataset_name}_x.npy")
+        y = np.load(f"{dataset_numpy_directory}/{dataset_name}_y.npy")
+        
+    except:
+        dataset_directory = "./dataset/tsp/"
+        save_numpy_dataset(dataset_name, dataset_directory)
+        x = np.load(f"{dataset_numpy_directory}/{dataset_name}_x.npy")
+        y = np.load(f"{dataset_numpy_directory}/{dataset_name}_y.npy")
     
     return x, y
+
+def modify_for_ptrnet(x, y):
+    x_with_third_zero = np.zeros((x.shape[0], x.shape[1], 3), dtype=x.dtype)
+    x_with_third_zero[:, :, :2] = x.copy()
+    y -= 1
+    return x_with_third_zero, y 
+
+
+class TSPDataset(torch.utils.data.Dataset):
+    def __init__(self, coord_tensors, tour_tensors):
+        self.samples = []
+
+        for coords, tours in zip(coord_tensors, tour_tensors):
+            for c, t in zip(coords, tours):
+                self.samples.append({
+                    'coords': torch.tensor(c, dtype=torch.float),  # shape [n, 2]
+                    'tour': torch.tensor(t, dtype=torch.long)      # shape [n]
+                })
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        return {
+            'coords': sample['coords'],
+            'tour': sample['tour'],
+            'length': sample['coords'].size(0)
+        }
+
+eos = torch.Tensor([0.0, 0.0, -1.0])
+def collate_fn(batch):
+    coords = [item['coords'] for item in batch]
+    tours = [item['tour'] for item in batch]
+    lengths = [item['length'] for item in batch]
+
+    coords = tuple(torch.cat((eos.unsqueeze(0), coord)) for coord in coords)
+    tours = tuple(torch.cat((pos + 1, torch.tensor([0]))) for coord, pos in zip(coords, tours))
+    
+    lengths = [coord.shape[0] for coord in coords]
+    
+    coords_padded = torch.nn.utils.rnn.pad_sequence(coords, batch_first=False, padding_value=-1)
+    tours_padded = torch.nn.utils.rnn.pad_sequence(tours, batch_first=False, padding_value=-1)
+    #lengths = torch.tensor(lengths)
+    return coords_padded, tours_padded, lengths
+
+    return {
+        'coords': coords_padded,  # [batch, max_len, 3]
+        'tours': tours_padded,    # [batch, max_len]
+        'lengths': lengths        # [batch]
+    }
+
+def tsp_examples():
+    a_sample = False
+    num_samples_each_dataset = 1000
+
+    dataset_names = ["tsp_all_len5", "tsp_all_len7", "tsp_all_len9"]
+    
+    coord_tensors, tour_tensors = [], []
+
+    for dataset_name in dataset_names:
+        coords, tours = modify_for_ptrnet(*load_numpy_dataset(dataset_name))
+        if a_sample:
+            coords, tours = coords[:num_samples_each_dataset], tours[:num_samples_each_dataset]
+
+        coord_tensors.append(coords)
+        tour_tensors.append(tours)
+
+    return coord_tensors, tour_tensors
+
+
 
 if __name__ == '__main__':
     
     dataset_directory = "./dataset/tsp/"
-    #os.system(f"mkdir -p {dataset_directory}")
+    os.system(f"mkdir -p {dataset_directory}")
     #paths = download_google_drive_file(dataset_directory[:-1], 'tsp', '', '5')
     #paths = download_google_drive_file(dataset_directory[:-1], 'tsp', '5', '20')
-    
-    dataset_name = "tsp5"
-        
 
-    #save_numpy_dataset(dataset_name, dataset_directory)
-    x, y = load_numpy_dataset(dataset_name)
+    coord_tensors, tour_tensors = tsp_examples()
+
+    dataset = TSPDataset(
+        coord_tensors=coord_tensors,
+        tour_tensors=tour_tensors
+    )
     
-    print(x.shape, y.shape)
-    print(x[0], y[0])    
+    dataloader = DataLoader(
+        dataset,
+        batch_size=4,
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+    
+    for batch in dataloader:
+        coords, tours, lengths = batch
+        
+        seq = coords
+        seq_lens = lengths
+        positions = tours
+
+        
+    

@@ -9,7 +9,6 @@ import numpy as np
 #from skgeom import arrangement, RotationalSweepVisibility, TriangularExpansionVisibility # type: ignore
 from typing import Optional, Type # type: ignore
 
-from data_types import VisSequence
 from beam_search import BeamNode
 
 
@@ -37,13 +36,13 @@ def masked_max(vector, mask, dim, keepdim=False, min_val=-1e7):
 class Encoder(nn.Module):
     def __init__(self, hidden_size, bidirectional):
         super().__init__()
-        self.lstm = nn.LSTM(input_size=VisSequence.input_size, hidden_size=hidden_size, bidirectional=bidirectional)
+        self.lstm = nn.LSTM(input_size=3, hidden_size=hidden_size, bidirectional=bidirectional)
         self.hidden_size = hidden_size
         self.bidirectional = bidirectional
 
     def forward(self, seq, seq_lens):
         """ Forward call for PtrNet encoder
-        :param seq: torch.tensor of dimension (seq_len, batch_size, VisSequence.input_size)
+        :param seq: torch.tensor of dimension (seq_len, batch_size, 3)
         :param seq_lens: list of length batch_size, contains lengths of unpadded sequences
         :returns: tuple (h_n, c_n), concatenated fwd/bkd hidden and cell states, and tensor *output* of all hidden states
         """                
@@ -100,16 +99,28 @@ class PointerExclusive(Pointer):
         super().__init__(hidden_size)
         self._chosen = None
         self._indices_j = None
-        self._first_iteration = None
+        self._tsp_lengths = None
+        self._num_selected = None  # how many cities (not EOS) have been selected
+        self._n = None  # number of encoder elements (including EOS)
     
-    def init_chosen(self, n, batch_size, device, dtype):
+    def init_chosen(self, n, batch_size, tsp_lengths, device, dtype):
         self._chosen = torch.zeros((n, batch_size), dtype=dtype, device=device)
-        self._indices_j = torch.arange(batch_size)
-        self._first_iteration = True
+        self._indices_j = torch.arange(batch_size, device=device)
         
+        # Convert tsp_lengths to tensor if needed
+        if not torch.is_tensor(tsp_lengths):
+            tsp_lengths = torch.tensor(tsp_lengths, device=device)
+        
+        self._tsp_lengths = tsp_lengths
+        self._num_selected = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self._n = n
+
     def set_chosen(self, indices_i):
         self._chosen[indices_i.cpu(), self._indices_j] = 1
-        
+        # Update num_selected only if not EOS (i.e., index > 0)
+        not_eos = indices_i != 0
+        self._num_selected += not_eos.long()
+
     def is_chosen(self, indices_i=None):
         if indices_i is None:
             return self._chosen
@@ -117,22 +128,19 @@ class PointerExclusive(Pointer):
             return self._chosen[indices_i.cpu(), self._indices_j]
         
     def forward(self, decoder_state, encoder_states, mask):
-        """ Forward call for Pointer
-        :param decoder_state: last state from decoder
-        :param encoder_states: tensor of all encoder states
-        :param mask: bool tensor for softmax masking
-        :returns: log-softmax scores for every input sequence
-        """        
         encoder_transform = self.W_e(encoder_states)
         decoder_transform = self.W_d(decoder_state)
-        u = self.v(self.tanh(encoder_transform + decoder_transform)).squeeze(-1)        
+        u = self.v(self.tanh(encoder_transform + decoder_transform)).squeeze(-1)
+
+        # Mask out already chosen indices
         c = self.is_chosen()
         u = c * torch.finfo(u.dtype).min + (1 - c) * u
-        if self._first_iteration:
-            self._first_iteration = False
-            u[0, :] = torch.finfo(u.dtype).min
-        
-        return masked_log_softmax(u, mask, dim=0)        
+
+        # Disallow EOS (index 0) unless num_selected == tsp_lengths
+        eos_mask = self._num_selected != self._tsp_lengths  # shape (batch_size,)
+        u[0, eos_mask] = torch.finfo(u.dtype).min
+
+        return masked_log_softmax(u, mask, dim=0)    
 
 class PointerNetwork(nn.Module):
     def __init__(self, model_args):
@@ -178,30 +186,53 @@ class PointerNetwork(nn.Module):
 
         use_teacher_forcing = torch.rand(1) <= self.teacher_forcing_ratio
         mask = create_mask(seq_lens, device=seq.device)
-        
+
+        batch_size = seq.size(1)
+        max_dec_len = self.max_decoded_length
+
+        # Init mask for pointer logic (including EOS tracking)
         if hasattr(self, 'bello_et_al') and self.bello_et_al:
-            self.pointers[model_idx].init_chosen(seq.size(0), seq.size(1), h.device, h.dtype)
-        
-        for i in range(target.shape[0] if target is not None else self.max_decoded_length):
+            # +1 because seq_lens excludes EOS
+            n = seq.size(0)
+            tsp_lengths = [l - 1 for l in seq_lens]  # each item is number of cities
+            self.pointers[model_idx].init_chosen(n=n, batch_size=batch_size, tsp_lengths=tsp_lengths, device=h.device, dtype=h.dtype)
+
+        # To detect end of sequence
+        eos_chosen = torch.zeros(batch_size, dtype=torch.bool, device=seq.device)
+
+        for i in range(target.shape[0] if target is not None else max_dec_len):
             h, c = self.decoder_rnns[model_idx](x, (h, c))
 
-            pointer_log_score = self.pointers[model_idx](h, encoder_states, mask) # (seq_len, batch_size)
+            pointer_log_score = self.pointers[model_idx](h, encoder_states, mask)  # (seq_len, batch_size)
             pointer_log_scores.append(pointer_log_score)
 
-            _, pointer_index = masked_max(pointer_log_score, mask, dim=0) # (batch_size)
-            
+            _, pointer_index = masked_max(pointer_log_score, mask, dim=0)  # (batch_size)
+
             if hasattr(self, 'bello_et_al') and self.bello_et_al:
                 self.pointers[model_idx].set_chosen(pointer_index)
-            
+
             pointer_indices.append(pointer_index)
 
+            # Update EOS chosen mask
+            eos_chosen |= (pointer_index == 0)
+
+            # Stop early if all EOS chosen
+            if eos_chosen.all():
+                break
+
+            # Use teacher forcing if applicable
             if use_teacher_forcing and target is not None:
-                idx = torch.where(target[i, :, model_idx] == -1, 0, target[i, :, model_idx]).reshape(1, -1, 1).expand(1, -1, self.decoder_hidden_size)
+                # Replace -1 with 0 (EOS) to avoid index errors
+                teacher_index = target[i, :, model_idx]
+                teacher_index = torch.where(teacher_index == -1, 0, teacher_index)
+                idx = teacher_index.reshape(1, -1, 1).expand(1, -1, self.decoder_hidden_size)
             else:
                 idx = pointer_index.reshape(1, -1, 1).expand(1, -1, self.decoder_hidden_size)
+
             x = torch.gather(encoder_states, dim=0, index=idx).squeeze(0)
 
         return torch.stack(pointer_indices, dim=0), torch.stack(pointer_log_scores, dim=0)
+
 
     def beam_search_decode(self, seq, seq_lens, target, model_idx, beam_width, alpha, beta):
         batch_size = seq.shape[1]
@@ -262,14 +293,14 @@ class Critic(nn.Module):
         
         self.decoder_projection_size = self.decoder_hidden_size # also called d in the paper
         
-        self.encoder = Encoder(self.hidden_size, self.bidirectional)
+        self.encoder = Encoder(self.encoder_hidden_size, self.bidirectional)
         
         self.pointer = Pointer(self.decoder_hidden_size, softmax_only=True)
 
         self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(in_features=self.hidden_size, out_features=self.decoder_projection_size),
+            torch.nn.Linear(in_features=self.decoder_hidden_size, out_features=self.decoder_hidden_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(in_features=self.decoder_projection_size, out_features=1)
+            torch.nn.Linear(in_features=self.decoder_hidden_size, out_features=1)
         )
     
     def forward(self, seq, seq_lens):
