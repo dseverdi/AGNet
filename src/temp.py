@@ -15,4 +15,4 @@ if __name__ == "__main__":
     plt.title('Differences and Losses')
     plt.legend()
     plt.grid(True)
-    plt.show()
+    plt.savefig('differences_and_losses.png')
