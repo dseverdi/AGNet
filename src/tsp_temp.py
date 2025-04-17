@@ -71,7 +71,9 @@ def calculate_tour_lengths(coords, tours):
 
         points = coords[tour_trimmed, b, :2]
 
+
         segment_dists = torch.norm(points[1:] - points[:-1], dim=1)
+        segment_dists
         loop_closure = torch.norm(points[0] - points[-1])
         total_length = segment_dists.sum() + loop_closure
 
@@ -159,7 +161,7 @@ if __name__ == '__main__':
             coords, tours = coords.to(device), tours.to(device)
 
             with torch.no_grad():
-                gt_rewards = -calculate_ground_truth_tour_lengths(coords, tours)
+                gt_rewards = calculate_ground_truth_tour_lengths(coords, tours)
 
             pred_values = critic(coords, lengths)
             loss = F.mse_loss(pred_values, gt_rewards)
@@ -168,14 +170,15 @@ if __name__ == '__main__':
             loss.backward()
             critic_optimizer.step()
 
-    optimizer = optim.Adam([{"params": model.parameters()}, {"params": critic.parameters()}], lr=1e-4, weight_decay=args.wd)
+    optimizer = optim.Adam([{"params": model.parameters()}, {"params": critic.parameters(), "lr": 1e-5}], lr=1e-4)#, weight_decay=args.wd)
     
     lr_lambda = lambda epoch: 0.1 if epoch == 10 else 1.0
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     losses_epochs = []
     differences_epochs = []
-    
+    model.train()
+    critic.train()
     for epoch in range(1, num_epochs + 1):
         losses, tour_lengths_, differences = [], [], []
         for batch in dataloader:
@@ -188,42 +191,54 @@ if __name__ == '__main__':
             tour_lengths = calculate_tour_lengths(coords, pointer_indices)
             ground_truth_lengths = calculate_ground_truth_tour_lengths(coords, tours)
             
-            rewards = -tour_lengths
-
-            critic_values = critic(seq, seq_lens)
-            advantage = rewards - critic_values.detach()
-            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-
+            baseline = critic(seq, seq_lens)
+    
+            advantage = tour_lengths - baseline.detach()
+            
             batch_size = seq.size(1)
-            log_probs = torch.empty(batch_size, dtype=advantage.dtype, device=device)
-            entropy = torch.empty(batch_size, dtype=advantage.dtype, device=device)
 
-            for b_i in range(batch_size):
-                pointers_i = pointer_indices[:, b_i]
-                zero_indices = (pointers_i == 0).nonzero()
-                if zero_indices.numel() > 0:
-                    pointers_i = pointers_i[:zero_indices[0, 0].item()]
-                pointers_i_y = pointers_i
-                pointers_i_x = torch.arange(pointers_i.size(0), device=device)
-                log_probs[b_i] = pointer_log_scores[pointers_i_x, pointers_i_y, b_i].sum()
-                log_probs_i = pointer_log_scores[pointers_i_x, :, b_i]
-                probs_i = torch.exp(log_probs_i)
-                entropy[b_i] = -torch.sum(probs_i * log_probs_i)
+            T, B = pointer_indices.shape
 
-            reinforce = -torch.mean(advantage * log_probs)
-            #critic_loss = torch.mean((rewards - critic_values) ** 2)
-            #entropy_weight = entropy_weight_initial * (0.99 ** epoch)
-            loss = reinforce + critic_loss# - entropy_weight * entropy.mean()
+            # Gather log probs from [T, B, N] using [T, B] indices
+            selected_log_probs = pointer_log_scores.gather(dim=2, index=pointer_indices.unsqueeze(-1)).squeeze(-1)  # [T, B]
 
+            # Create mask to ignore entries after EOS
+            is_eos = pointer_indices == 0  # EOS token index is 0
+            eos_seen = is_eos.float().cumsum(dim=0) > 1
+            valid_mask = ~eos_seen
+
+            # Mask and sum
+            log_probs = (selected_log_probs * valid_mask).sum(dim=0)  # [B]
+            
+            print("log_probs: mean =", log_probs.mean().item(), "std =", log_probs.std().item())
+            print("advantage: mean =", advantage.mean().item(), "std =", advantage.std().item())
+
+            
+            actor_loss = -torch.mean(advantage * log_probs)  # p. 5, Algorithm 1, line 8
+            
+            any_grad = False
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    print(f"{name}: {param.grad.norm().item()}")
+                    any_grad = True
+            if not any_grad:
+                print("❌ No actor gradients flowing!")            
+            
+            critic_loss = F.mse_loss(baseline, tour_lengths)
+            
+            #for name, param in model.named_parameters():
+            #    if param.grad is not None:
+            #        print(f"{name}: grad norm = {param.grad.norm().item()}")
+            #exit()
             optimizer.zero_grad()
-            loss.backward()
-            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, norm_type=2)
-            #torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm, norm_type=2)
+            critic_loss.backward()
+            actor_loss.backward()
+            
             torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'] + optimizer.param_groups[1]['params'], max_grad_norm)
 
             optimizer.step()
 
-            losses.append(loss.item())
+            losses.append(actor_loss.item())
             tour_lengths_ += [t.item() for t in tour_lengths]
             differences += [(t - g).item() for t, g in zip(tour_lengths, ground_truth_lengths)]
         scheduler.step()

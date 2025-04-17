@@ -139,6 +139,7 @@ class PointerExclusive(Pointer):
         # Disallow EOS (index 0) unless num_selected == tsp_lengths
         eos_mask = self._num_selected != self._tsp_lengths  # shape (batch_size,)
         u[0, eos_mask] = torch.finfo(u.dtype).min
+        return masked_log_softmax(u.transpose(0, 1), mask.transpose(0, 1), dim=1)  # [B, N]
 
         return masked_log_softmax(u, mask, dim=0)    
 
@@ -203,10 +204,15 @@ class PointerNetwork(nn.Module):
         for i in range(target.shape[0] if target is not None else max_dec_len):
             h, c = self.decoder_rnns[model_idx](x, (h, c))
 
-            pointer_log_score = self.pointers[model_idx](h, encoder_states, mask)  # (seq_len, batch_size)
+            #pointer_log_score = self.pointers[model_idx](h, encoder_states, mask)  # (seq_len, batch_size)
+            #pointer_log_scores.append(pointer_log_score)
+
+            pointer_log_score = self.pointers[model_idx](h, encoder_states, mask)  # [B, N]
             pointer_log_scores.append(pointer_log_score)
 
-            _, pointer_index = masked_max(pointer_log_score, mask, dim=0)  # (batch_size)
+            #_, pointer_index = masked_max(pointer_log_score, mask, dim=0)  # (batch_size)
+            _, pointer_index = masked_max(pointer_log_score, mask.transpose(0, 1), dim=1)  # ✅
+
 
             if hasattr(self, 'bello_et_al') and self.bello_et_al:
                 self.pointers[model_idx].set_chosen(pointer_index)

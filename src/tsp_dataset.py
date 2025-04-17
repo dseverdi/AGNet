@@ -170,33 +170,37 @@ class TSPDataset(torch.utils.data.Dataset):
             'length': sample['coords'].size(0)
         }
 
-eos = torch.Tensor([0.0, 0.0, -1.0])
+eos = torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32)
+
 def collate_fn(batch):
     coords = [item['coords'] for item in batch]
     tours = [item['tour'] for item in batch]
-    lengths = [item['length'] for item in batch]
-
+    
+    # Normalize per sample
+    for i in range(len(coords)):
+        max_val = coords[i][:, :2].abs().max()
+        coords[i][:, :2] /= max_val
+    
+    # Prepend EOS token to coords
     coords = tuple(torch.cat((eos.unsqueeze(0), coord)) for coord in coords)
+    
+    # Shift tour indices by 1 and append EOS (index 0)
     tours = tuple(torch.cat((pos + 1, torch.tensor([0]))) for coord, pos in zip(coords, tours))
     
-    lengths = [coord.shape[0] for coord in coords]
+    # Compute lengths (optional)
+    lengths = torch.tensor([coord.shape[0] for coord in coords], dtype=torch.long)
     
-    coords_padded = torch.nn.utils.rnn.pad_sequence(coords, batch_first=False, padding_value=-1)
+    # Pad sequences
+    coords_padded = torch.nn.utils.rnn.pad_sequence(coords, batch_first=False, padding_value=-1.0)
     tours_padded = torch.nn.utils.rnn.pad_sequence(tours, batch_first=False, padding_value=-1)
-    #lengths = torch.tensor(lengths)
+    
     return coords_padded, tours_padded, lengths
 
-    return {
-        'coords': coords_padded,  # [batch, max_len, 3]
-        'tours': tours_padded,    # [batch, max_len]
-        'lengths': lengths        # [batch]
-    }
-
 def tsp_examples():
-    a_sample = False
+    a_sample = True
     num_samples_each_dataset = 1000
 
-    dataset_names = ["tsp_all_len5", "tsp_all_len7", "tsp_all_len9"]
+    dataset_names = ["tsp_all_len5"]#, "tsp_all_len7", "tsp_all_len9"]
     
     coord_tensors, tour_tensors = [], []
 
