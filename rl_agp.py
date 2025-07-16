@@ -4,7 +4,11 @@ from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor, create_critic
 from utils import createPolygon, compute_visibility
 import torch
-import skgeom
+try:
+    import skgeom
+except ImportError:
+    skgeom = None
+    print("Warning: skgeom not available, some visualization functions may not work")
 from torch.utils.data import DataLoader, Sampler
 
 from utils import evaluate_polygon_visibility_numpy_wo_gt  # reuse coverage evaluation
@@ -217,106 +221,174 @@ def reinforce_train_critic(actor, critic, dataset, reward_fn,
 
 # --- Evaluation ---
 def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
-    """Evaluate the model on the validation dataset and report metrics, including comparison to optimal solution size if available."""
+    """Evaluate the model on the validation dataset with comprehensive metrics for whisker plots."""
     print(f"\n--- Evaluation on {len(dataset)} validation samples (batch size {batch_size}) ---")
     model.eval()
     lengths = get_lengths_from_dataset(dataset)
     batch_sampler = BucketBatchSampler(lengths, batch_size, shuffle=False, bucket_size=10)
     loader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collate_fn, num_workers=2)
     device = next(model.parameters()).device
+    
+    # Statistics for whisker plots (same as supervised learning)
+    pred_sizes = []
+    true_sizes = []
+    coverage_ratios = []  # What fraction of optimal guards are covered by predicted guards
+    efficiency_ratios = []  # What fraction of predicted guards are in the optimal set
+    size_ratios = []  # predicted_size / optimal_size
+    overlap_counts = []  # absolute number of overlapping guards
     all_rewards = []
-    all_num_guards = []
     all_coverages = []
-    all_rel_sizes = []
-    all_rel_to_opt = []
+    
     if sol_dir is None:
         # Default: use the directory of the first validation .pol file
         if hasattr(dataset, 'samples') and len(dataset.samples) > 0 and hasattr(dataset.samples[0], 'name'):
             sample_name = dataset.samples[0].name
             sol_dir = os.path.dirname(sample_name)
-            print(sample_name)
         else:
             sol_dir = '.'
+    
     with torch.no_grad():
         for batch_data, mask, lengths, batch_names in loader:
             batch_data = batch_data.to(device)
             mask = mask.to(device)
             lengths = torch.tensor(lengths, dtype=torch.long, device=device)
             selected_idxs, log_probs = model(batch_data, padding_mask=mask, lengths=lengths)
-            for i, (data_tensor, idxs, name) in enumerate(zip(batch_data.cpu(), selected_idxs, batch_names)):
+            
+            for i, (data_tensor, pred_indices, name) in enumerate(zip(batch_data.cpu(), selected_idxs, batch_names)):
                 points = data_tensor.numpy()
-                sol = np.array(idxs)
                 length = lengths[i].item() if lengths is not None else len(points)
-                r = reward(points, sol, name, length=length)
+                
+                # Compute reward and coverage
+                r = reward_fn(points, np.array(pred_indices), name, length=length)
                 all_rewards.append(r)
-                all_num_guards.append(len(sol))
-                all_rel_sizes.append(len(sol) / float(length) if length > 0 else float('nan'))
-                # Try to extract coverage from reward if possible, else recompute
-                if hasattr(reward_fn, 'last_coverage'):
-                    all_coverages.append(reward_fn.last_coverage)
+                
+                # Extract coverage from reward if available
+                if isinstance(r, tuple) and len(r) == 2:
+                    coverage = r[1]
                 else:
-                    if isinstance(r, tuple) and len(r) == 2:
-                        all_coverages.append(r[1])
-                    else:
-                        try:
-                            from utils import evaluate_polygon_visibility_numpy_wo_gt
-                            coverage = evaluate_polygon_visibility_numpy_wo_gt(points, sol, name)
-                            all_coverages.append(coverage)
-                        except Exception:
-                            all_coverages.append(float('nan'))
-                # --- Optimal solution comparison ---
-                # Always use sol_dir for .solution lookup
+                    try:
+                        from utils import evaluate_polygon_visibility_numpy_wo_gt
+                        coverage = evaluate_polygon_visibility_numpy_wo_gt(points, np.array(pred_indices), name)
+                    except Exception:
+                        coverage = float('nan')
+                all_coverages.append(coverage)
+                
+                # Read optimal solution for comparison
                 base_name = os.path.splitext(os.path.basename(name))[0]
                 opt_sol_path = os.path.join(sol_dir, f"{base_name}.solution")
-                opt_sizes = []
+                true_indices = []
                 try:
                     with open(opt_sol_path, 'r') as f:
                         lines = f.read().splitlines()
-                        # For each non-header, non-empty line after the header, count the number of guards
-                        for line in lines[1:]:
-                            if line.strip() and not line.strip().startswith('#'):
-                                opt_idxs = [int(x) for x in line.strip().split()]
-                                opt_sizes.append(len(opt_idxs))
-                    if opt_sizes:
-                        min_opt_size = min(opt_sizes)
-                        all_rel_to_opt.append(len(sol) / min_opt_size if min_opt_size > 0 else float('nan'))
-                    else:
-                        all_rel_to_opt.append(float('nan'))
+                        if len(lines) >= 2:
+                            true_indices = [int(x) for x in lines[1].split()]
                 except Exception:
-                    all_rel_to_opt.append(float('nan'))
-    # Compute statistics
-    metrics = {
-        'Coverage': np.array(all_coverages, dtype=np.float32),
-        'Rel. Sol. Size': np.array(all_rel_sizes, dtype=np.float32),
-        'Rel. to Opt. Sol. Size': np.array(all_rel_to_opt, dtype=np.float32)
-    }
-    stats = {}
-    for key, arr in metrics.items():
-        arr = arr[~np.isnan(arr)]
-        stats[key] = {
-            'avg': np.mean(arr) if arr.size else float('nan'),
-            'min': np.min(arr) if arr.size else float('nan'),
-            'max': np.max(arr) if arr.size else float('nan'),
-            'std': np.std(arr) if arr.size else float('nan')
+                    true_indices = []
+                
+                if len(true_indices) > 0:
+                    pred_set = set(pred_indices)
+                    true_set = set(true_indices)
+                    overlap = pred_set.intersection(true_set)
+                    
+                    pred_size = len(pred_indices)
+                    true_size = len(true_indices)
+                    overlap_count = len(overlap)
+                    
+                    # Coverage: what fraction of optimal guards are covered
+                    coverage_ratio = overlap_count / true_size if true_size > 0 else 0.0
+                    
+                    # Efficiency: what fraction of predicted guards are optimal
+                    efficiency_ratio = overlap_count / pred_size if pred_size > 0 else 0.0
+                    
+                    # Size ratio: how many times larger is the prediction vs optimal
+                    size_ratio = pred_size / true_size if true_size > 0 else float('inf')
+                    
+                    pred_sizes.append(pred_size)
+                    true_sizes.append(true_size)
+                    coverage_ratios.append(coverage_ratio)
+                    efficiency_ratios.append(efficiency_ratio)
+                    size_ratios.append(size_ratio)
+                    overlap_counts.append(overlap_count)
+    
+    # Compute statistics for whisker plots
+    def compute_stats(data, name):
+        data = np.array(data)
+        if len(data) == 0:
+            return {key: float('nan') for key in ['mean', 'median', 'std', 'min', 'max', 'q25', 'q75', 'iqr']}
+        
+        stats = {
+            'mean': np.mean(data),
+            'median': np.median(data),
+            'std': np.std(data),
+            'min': np.min(data),
+            'max': np.max(data),
+            'q25': np.percentile(data, 25),
+            'q75': np.percentile(data, 75),
+            'iqr': np.percentile(data, 75) - np.percentile(data, 25)
         }
-    # Print as a table
-    print("\nValidation set metrics:")
-    print("+-------------------------+----------+----------+----------+----------+")
-    print("|        Metric           |   Avg    |   Min    |   Max    |   Std    |")
-    print("+-------------------------+----------+----------+----------+----------+")
-    for key in metrics.keys():
-        print(f"| {key:<23} | {stats[key]['avg']:^8.4f} | {stats[key]['min']:^8.4f} | {stats[key]['max']:^8.4f} | {stats[key]['std']:^8.4f} |")
-    print("+-------------------------+----------+----------+----------+----------+")
+        print(f"\n{name} Statistics:")
+        print(f"  Mean: {stats['mean']:.3f}")
+        print(f"  Median: {stats['median']:.3f}")
+        print(f"  Std: {stats['std']:.3f}")
+        print(f"  Min: {stats['min']:.3f}")
+        print(f"  Max: {stats['max']:.3f}")
+        print(f"  Q25: {stats['q25']:.3f}")
+        print(f"  Q75: {stats['q75']:.3f}")
+        print(f"  IQR: {stats['iqr']:.3f}")
+        return stats
+    
+    print("\n=== EVALUATION RESULTS ===")
+    
+    # Compute all statistics
+    if len(pred_sizes) > 0:
+        size_stats = compute_stats(pred_sizes, "Predicted Solution Sizes")
+        optimal_stats = compute_stats(true_sizes, "Optimal Solution Sizes")
+        coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of optimal guards found)")
+        efficiency_stats = compute_stats(efficiency_ratios, "Efficiency Ratios (fraction of predicted guards that are optimal)")
+        ratio_stats = compute_stats(size_ratios, "Size Ratios (predicted/optimal)")
+        overlap_stats = compute_stats(overlap_counts, "Overlap Counts (absolute number of matching guards)")
+        
+        # Summary metrics
+        print(f"\n=== SUMMARY ===")
+        print(f"Instances evaluated: {len(pred_sizes)}")
+        print(f"Perfect solutions (100% coverage): {sum(1 for c in coverage_ratios if c >= 1.0)}")
+        print(f"Good solutions (>=80% coverage): {sum(1 for c in coverage_ratios if c >= 0.8)}")
+        print(f"Reasonable solutions (>=60% coverage): {sum(1 for c in coverage_ratios if c >= 0.6)}")
+        if len(size_ratios) > 0:
+            print(f"Average size inflation: {np.mean(size_ratios):.2f}x optimal")
+    else:
+        print("No valid instances with optimal solutions found for comparison.")
+        size_stats = optimal_stats = coverage_stats = efficiency_stats = ratio_stats = overlap_stats = {}
+    
+    # Compute coverage statistics from polygon visibility
+    coverage_array = np.array([c for c in all_coverages if not np.isnan(c)])
+    coverage_vis_stats = compute_stats(coverage_array, "Polygon Coverage (visibility)") if len(coverage_array) > 0 else {}
+    
+    # Backward compatibility: old format metrics (skip for now as it's complex to compute)
+    rel_sizes = []
+    
     return {
-        'coverage': metrics['Coverage'],
-        'rel_size': metrics['Rel. Sol. Size'],
-        'rel_to_opt': metrics['Rel. to Opt. Sol. Size'],
-        'stats': stats,
+        # New comprehensive metrics
+        'pred_sizes': pred_sizes,
+        'true_sizes': true_sizes,
+        'coverage_ratios': coverage_ratios,
+        'efficiency_ratios': efficiency_ratios,
+        'size_ratios': size_ratios,
+        'overlap_counts': overlap_counts,
+        'polygon_coverages': coverage_array.tolist() if len(coverage_array) > 0 else [],
+        'stats': {
+            'size_stats': size_stats,
+            'optimal_stats': optimal_stats,
+            'coverage_stats': coverage_stats,
+            'efficiency_stats': efficiency_stats,
+            'ratio_stats': ratio_stats,
+            'overlap_stats': overlap_stats,
+            'coverage_vis_stats': coverage_vis_stats
+        },
+        # Legacy compatibility
         'rewards': all_rewards,
-        'num_guards': all_num_guards,
         'coverages': all_coverages,
-        'rel_sizes': all_rel_sizes,
-        'rel_to_opt': all_rel_to_opt
+        'rel_sizes': rel_sizes
     }
 
 
@@ -378,6 +450,10 @@ def test_coverage_on_sample(dataset, sol_dir, index=0, regime="opt", n_random_gu
 
     # --- Visualization with visibility regions ---
     # Compute visibility polygons for each guard
+    if skgeom is None:
+        print("Warning: skgeom not available, skipping visibility visualization")
+        return
+    
     from concurrent.futures import ThreadPoolExecutor
     eps = 1e-8
     poly_obj = createPolygon(points)
@@ -470,7 +546,33 @@ def main():
                                epochs=args.epochs, batch_size=args.batch_size, lr_actor=args.lr, lr_critic=args.lr)
 
     # evaluate the model on the validation dataset
-    reinforce_eval(agp_model, small_val_dataset, reward_fn, batch_size=1, sol_dir=args.agp_val_dir)
+    eval_results = reinforce_eval(agp_model, small_val_dataset, reward_fn, batch_size=1, sol_dir=args.agp_val_dir)
+    
+    # Save evaluation results
+    import json
+    results_summary = {
+        'args': vars(args),
+        'num_train_samples': len(small_train_dataset),
+        'num_val_samples': len(small_val_dataset),
+        'training_method': 'reinforcement_learning'
+    }
+    
+    # Add statistics if available
+    if 'stats' in eval_results and eval_results['stats']:
+        if 'coverage_stats' in eval_results['stats']:
+            results_summary['coverage_stats'] = eval_results['stats']['coverage_stats']
+        if 'efficiency_stats' in eval_results['stats']:
+            results_summary['efficiency_stats'] = eval_results['stats']['efficiency_stats']
+        if 'ratio_stats' in eval_results['stats']:
+            results_summary['size_ratio_stats'] = eval_results['stats']['ratio_stats']
+        if 'coverage_vis_stats' in eval_results['stats']:
+            results_summary['polygon_coverage_stats'] = eval_results['stats']['coverage_vis_stats']
+    
+    # Save to results directory
+    os.makedirs('results', exist_ok=True)
+    with open('results/rl_agp_evaluation.json', 'w') as f:
+        json.dump(results_summary, f, indent=2)
+    print("Results summary saved to results/rl_agp_evaluation.json")
 
 
 if __name__ == "__main__":

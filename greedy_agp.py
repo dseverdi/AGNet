@@ -2,6 +2,7 @@ import os
 import argparse
 import numpy as np
 import torch
+import json
 from utils import evaluate_polygon_visibility_numpy_wo_gt
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import skgeom
@@ -191,12 +192,164 @@ def process_single_sample(pol_path, normalize, agp_val_dir, verbose):
         print(f"[ERROR] Sample: {os.path.basename(pol_path)} | Guards: nan | Opt: nan | Coverage: nan | Exception: {e}")
         return (pol_path, float('nan'), float('nan'), float('nan'), float('nan'))
 
+def greedy_eval_comprehensive(pol_files, agp_val_dir, normalize=True, verbose=False):
+    """Comprehensive evaluation of greedy algorithm with whisker plot statistics."""
+    print(f"\n--- Comprehensive Greedy Evaluation on {len(pol_files)} samples ---")
+    
+    # Statistics for whisker plots (same as supervised learning and RL)
+    pred_sizes = []
+    true_sizes = []
+    coverage_ratios = []  # What fraction of optimal guards are covered by greedy guards
+    efficiency_ratios = []  # What fraction of greedy guards are in the optimal set
+    size_ratios = []  # greedy_size / optimal_size
+    overlap_counts = []  # absolute number of overlapping guards
+    polygon_coverages = []  # geometric coverage of the polygon
+    
+    total_samples = len(pol_files)
+    print(f"Processing {total_samples} samples...")
+    
+    with ProcessPoolExecutor() as executor:
+        futures = [executor.submit(process_comprehensive_sample, pol_path, normalize, agp_val_dir, verbose) for pol_path in pol_files]
+        
+        for i, future in enumerate(as_completed(futures)):
+            result = future.result()
+            if result is not None:
+                pred_size, true_size, coverage_ratio, efficiency_ratio, size_ratio, overlap_count, polygon_coverage = result
+                pred_sizes.append(pred_size)
+                true_sizes.append(true_size)
+                coverage_ratios.append(coverage_ratio)
+                efficiency_ratios.append(efficiency_ratio)
+                size_ratios.append(size_ratio)
+                overlap_counts.append(overlap_count)
+                polygon_coverages.append(polygon_coverage)
+    
+    # Compute statistics for whisker plots
+    def compute_stats(data, name):
+        data = np.array(data)
+        if len(data) == 0:
+            return {key: float('nan') for key in ['mean', 'median', 'std', 'min', 'max', 'q25', 'q75', 'iqr']}
+        
+        stats = {
+            'mean': np.mean(data),
+            'median': np.median(data),
+            'std': np.std(data),
+            'min': np.min(data),
+            'max': np.max(data),
+            'q25': np.percentile(data, 25),
+            'q75': np.percentile(data, 75),
+            'iqr': np.percentile(data, 75) - np.percentile(data, 25)
+        }
+        print(f"\n{name} Statistics:")
+        print(f"  Mean: {stats['mean']:.3f}")
+        print(f"  Median: {stats['median']:.3f}")
+        print(f"  Std: {stats['std']:.3f}")
+        print(f"  Min: {stats['min']:.3f}")
+        print(f"  Max: {stats['max']:.3f}")
+        print(f"  Q25: {stats['q25']:.3f}")
+        print(f"  Q75: {stats['q75']:.3f}")
+        print(f"  IQR: {stats['iqr']:.3f}")
+        return stats
+    
+    print("\n=== EVALUATION RESULTS ===")
+    
+    # Compute all statistics
+    if len(pred_sizes) > 0:
+        size_stats = compute_stats(pred_sizes, "Greedy Solution Sizes")
+        optimal_stats = compute_stats(true_sizes, "Optimal Solution Sizes")
+        coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of optimal guards found)")
+        efficiency_stats = compute_stats(efficiency_ratios, "Efficiency Ratios (fraction of greedy guards that are optimal)")
+        ratio_stats = compute_stats(size_ratios, "Size Ratios (greedy/optimal)")
+        overlap_stats = compute_stats(overlap_counts, "Overlap Counts (absolute number of matching guards)")
+        
+        # Summary metrics
+        print(f"\n=== SUMMARY ===")
+        print(f"Instances evaluated: {len(pred_sizes)}")
+        print(f"Perfect solutions (100% coverage): {sum(1 for c in coverage_ratios if c >= 1.0)}")
+        print(f"Good solutions (>=80% coverage): {sum(1 for c in coverage_ratios if c >= 0.8)}")
+        print(f"Reasonable solutions (>=60% coverage): {sum(1 for c in coverage_ratios if c >= 0.6)}")
+        if len(size_ratios) > 0:
+            print(f"Average size inflation: {np.mean(size_ratios):.2f}x optimal")
+    else:
+        print("No valid instances with optimal solutions found for comparison.")
+        size_stats = optimal_stats = coverage_stats = efficiency_stats = ratio_stats = overlap_stats = {}
+    
+    # Compute coverage statistics from polygon visibility
+    coverage_array = np.array([c for c in polygon_coverages if not np.isnan(c)])
+    coverage_vis_stats = compute_stats(coverage_array, "Polygon Coverage (visibility)") if len(coverage_array) > 0 else {}
+    
+    return {
+        # Comprehensive metrics
+        'pred_sizes': pred_sizes,
+        'true_sizes': true_sizes,
+        'coverage_ratios': coverage_ratios,
+        'efficiency_ratios': efficiency_ratios,
+        'size_ratios': size_ratios,
+        'overlap_counts': overlap_counts,
+        'polygon_coverages': coverage_array.tolist() if len(coverage_array) > 0 else [],
+        'stats': {
+            'size_stats': size_stats,
+            'optimal_stats': optimal_stats,
+            'coverage_stats': coverage_stats,
+            'efficiency_stats': efficiency_stats,
+            'ratio_stats': ratio_stats,
+            'overlap_stats': overlap_stats,
+            'coverage_vis_stats': coverage_vis_stats
+        }
+    }
+
+def process_comprehensive_sample(pol_path, normalize, agp_val_dir, verbose):
+    """Process a single sample for comprehensive evaluation."""
+    try:
+        points = read_single_pol_file(pol_path, normalize=normalize)
+        n_vertices = len(points)
+        pred_indices, coverages = greedy_guard_selection_fast(points.numpy(), verbose=verbose, name=pol_path)
+        final_coverage = coverages[-1] if coverages else 0.0
+        
+        # Read optimal solution for comparison
+        base_name = os.path.splitext(os.path.basename(pol_path))[0]
+        opt_sol_path = os.path.join(agp_val_dir, f"{base_name}.solution")
+        true_indices = []
+        try:
+            with open(opt_sol_path, 'r') as f:
+                lines = f.read().splitlines()
+                if len(lines) >= 2:
+                    true_indices = [int(x) for x in lines[1].split()]
+        except Exception:
+            true_indices = []
+        
+        if len(true_indices) > 0:
+            pred_set = set(pred_indices)
+            true_set = set(true_indices)
+            overlap = pred_set.intersection(true_set)
+            
+            pred_size = len(pred_indices)
+            true_size = len(true_indices)
+            overlap_count = len(overlap)
+            
+            # Coverage: what fraction of optimal guards are covered
+            coverage_ratio = overlap_count / true_size if true_size > 0 else 0.0
+            
+            # Efficiency: what fraction of greedy guards are optimal
+            efficiency_ratio = overlap_count / pred_size if pred_size > 0 else 0.0
+            
+            # Size ratio: how many times larger is the greedy vs optimal
+            size_ratio = pred_size / true_size if true_size > 0 else float('inf')
+            
+            return (pred_size, true_size, coverage_ratio, efficiency_ratio, size_ratio, overlap_count, final_coverage)
+        else:
+            return None
+    except Exception as e:
+        if verbose:
+            print(f"[ERROR] Sample: {os.path.basename(pol_path)} | Exception: {e}")
+        return None
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--agp_val_dir', type=str, default="/home/dseverdi/Radno/MLAG/dataset/AGPIL/dev", help='Directory with validation .pol files')
     parser.add_argument('--train-size', type=int, default=8000, help='Number of validation samples to use (default: 8000, or all if smaller)')
     parser.add_argument('--normalize', action='store_true', default=True)
     parser.add_argument('--verbose', action='store_true', default=False)
+    parser.add_argument('--comprehensive', action='store_true', default=True, help='Use comprehensive evaluation with whisker plot statistics')
     args = parser.parse_args()
 
     agp_dir = args.agp_val_dir
@@ -204,61 +357,92 @@ def main():
     if args.train_size is not None:
         pol_files = pol_files[:args.train_size]
 
-    all_num_guards = []
-    all_coverages = []
-    all_rel_sizes = []
-    all_rel_to_opt = []
-    total_samples = len(pol_files)
-    print(f"Processing {total_samples} samples in parallel...")
-    suspicious_cases = []
-    with ProcessPoolExecutor() as executor:
-        futures = [executor.submit(process_single_sample, pol_path, args.normalize, args.agp_val_dir, args.verbose) for pol_path in pol_files]
-        all_results = []
-        for i, future in enumerate(as_completed(futures)):
-            pol_path, num_guards, final_coverage, rel_size, rel_to_opt = future.result()
-            # Print all results for debugging
-            print(f"[RESULT] {os.path.basename(pol_path)} | Guards: {num_guards} | Rel_size: {rel_size} | Rel_to_opt: {rel_to_opt} | Coverage: {final_coverage:.4f}")
-            # Only collect suspicious cases here
-            if not np.isnan(num_guards) and not np.isnan(rel_to_opt) and num_guards < rel_to_opt:
-                suspicious_cases.append((os.path.basename(pol_path), num_guards, rel_to_opt, final_coverage))
-            all_num_guards.append(num_guards)
-            all_coverages.append(final_coverage)
-            all_rel_sizes.append(rel_size)
-            all_rel_to_opt.append(rel_to_opt)
-            all_results.append((pol_path, num_guards, final_coverage, rel_size, rel_to_opt))
-
-    # Print only suspicious cases
-    if suspicious_cases:
-        print("\nCases where greedy uses fewer guards than 'optimal':")
-        print("| Polygon file | Greedy Guards | Opt Guards | Coverage |")
-        for fname, greedy, opt, cov in suspicious_cases:
-            print(f"| {fname:<20} | {greedy:^13} | {opt:^9} | {cov:^8.4f} |")
-    else:
-        print("\nNo cases where greedy uses fewer guards than 'optimal'.")
-
-    # Print only number of processed instances and summary metrics
-    print(f"\nProcessed {len(all_results)} instances.")
-    # Print summary statistics in table format (like rl_agp.py)
-    metrics = {
-        'Coverage': np.array(all_coverages, dtype=np.float32),
-        'Rel. Sol. Size': np.array(all_rel_sizes, dtype=np.float32),
-        'Rel. to Opt. Sol. Size': np.array(all_rel_to_opt, dtype=np.float32)
-    }
-    stats = {}
-    for key, arr in metrics.items():
-        arr = arr[~np.isnan(arr)]
-        stats[key] = {
-            'avg': np.mean(arr) if arr.size else float('nan'),
-            'min': np.min(arr) if arr.size else float('nan'),
-            'max': np.max(arr) if arr.size else float('nan'),
-            'std': np.std(arr) if arr.size else float('nan')
+    if args.comprehensive:
+        # Use comprehensive evaluation
+        eval_results = greedy_eval_comprehensive(pol_files, args.agp_val_dir, normalize=args.normalize, verbose=args.verbose)
+        
+        # Save evaluation results
+        import json
+        results_summary = {
+            'args': vars(args),
+            'num_samples': len(pol_files),
+            'training_method': 'greedy_algorithm'
         }
-    print("+-------------------------+----------+----------+----------+----------+")
-    print("|        Metric           |   Avg    |   Min    |   Max    |   Std    |")
-    print("+-------------------------+----------+----------+----------+----------+")
-    for key in metrics.keys():
-        print(f"| {key:<23} | {stats[key]['avg']:^8.4f} | {stats[key]['min']:^8.4f} | {stats[key]['max']:^8.4f} | {stats[key]['std']:^8.4f} |")
-    print("+-------------------------+----------+----------+----------+----------+")
+        
+        # Add statistics if available
+        if 'stats' in eval_results and eval_results['stats']:
+            if 'coverage_stats' in eval_results['stats']:
+                results_summary['coverage_stats'] = eval_results['stats']['coverage_stats']
+            if 'efficiency_stats' in eval_results['stats']:
+                results_summary['efficiency_stats'] = eval_results['stats']['efficiency_stats']
+            if 'ratio_stats' in eval_results['stats']:
+                results_summary['size_ratio_stats'] = eval_results['stats']['ratio_stats']
+            if 'coverage_vis_stats' in eval_results['stats']:
+                results_summary['polygon_coverage_stats'] = eval_results['stats']['coverage_vis_stats']
+        
+        # Save to results directory
+        os.makedirs('results', exist_ok=True)
+        with open('results/greedy_agp_evaluation.json', 'w') as f:
+            json.dump(results_summary, f, indent=2)
+        print("Results summary saved to results/greedy_agp_evaluation.json")
+        
+    else:
+        # Use legacy evaluation
+        all_num_guards = []
+        all_coverages = []
+        all_rel_sizes = []
+        all_rel_to_opt = []
+        total_samples = len(pol_files)
+        print(f"Processing {total_samples} samples in parallel...")
+        suspicious_cases = []
+        with ProcessPoolExecutor() as executor:
+            futures = [executor.submit(process_single_sample, pol_path, args.normalize, args.agp_val_dir, args.verbose) for pol_path in pol_files]
+            all_results = []
+            for i, future in enumerate(as_completed(futures)):
+                pol_path, num_guards, final_coverage, rel_size, rel_to_opt = future.result()
+                # Print all results for debugging
+                print(f"[RESULT] {os.path.basename(pol_path)} | Guards: {num_guards} | Rel_size: {rel_size} | Rel_to_opt: {rel_to_opt} | Coverage: {final_coverage:.4f}")
+                # Only collect suspicious cases here
+                if not np.isnan(num_guards) and not np.isnan(rel_to_opt) and num_guards < rel_to_opt:
+                    suspicious_cases.append((os.path.basename(pol_path), num_guards, rel_to_opt, final_coverage))
+                all_num_guards.append(num_guards)
+                all_coverages.append(final_coverage)
+                all_rel_sizes.append(rel_size)
+                all_rel_to_opt.append(rel_to_opt)
+                all_results.append((pol_path, num_guards, final_coverage, rel_size, rel_to_opt))
+
+        # Print only suspicious cases
+        if suspicious_cases:
+            print("\nCases where greedy uses fewer guards than 'optimal':")
+            print("| Polygon file | Greedy Guards | Opt Guards | Coverage |")
+            for fname, greedy, opt, cov in suspicious_cases:
+                print(f"| {fname:<20} | {greedy:^13} | {opt:^9} | {cov:^8.4f} |")
+        else:
+            print("\nNo cases where greedy uses fewer guards than 'optimal'.")
+
+        # Print only number of processed instances and summary metrics
+        print(f"\nProcessed {len(all_results)} instances.")
+        # Print summary statistics in table format (like rl_agp.py)
+        metrics = {
+            'Coverage': np.array(all_coverages, dtype=np.float32),
+            'Rel. Sol. Size': np.array(all_rel_sizes, dtype=np.float32),
+            'Rel. to Opt. Sol. Size': np.array(all_rel_to_opt, dtype=np.float32)
+        }
+        stats = {}
+        for key, arr in metrics.items():
+            arr = arr[~np.isnan(arr)]
+            stats[key] = {
+                'avg': np.mean(arr) if arr.size else float('nan'),
+                'min': np.min(arr) if arr.size else float('nan'),
+                'max': np.max(arr) if arr.size else float('nan'),
+                'std': np.std(arr) if arr.size else float('nan')
+            }
+        print("+-------------------------+----------+----------+----------+----------+")
+        print("|        Metric           |   Avg    |   Min    |   Max    |   Std    |")
+        print("+-------------------------+----------+----------+----------+----------+")
+        for key in metrics.keys():
+            print(f"| {key:<23} | {stats[key]['avg']:^8.4f} | {stats[key]['min']:^8.4f} | {stats[key]['max']:^8.4f} | {stats[key]['std']:^8.4f} |")
+        print("+-------------------------+----------+----------+----------+----------+")
 
 def get_optimal_solution_indices(pol_path, agp_val_dir):
     base_name = os.path.splitext(os.path.basename(pol_path))[0]
