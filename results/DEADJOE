@@ -1,0 +1,28 @@
+
+*** These modified files were found in JOE when it aborted on Fri Jul 11 11:43:22 2025
+*** JOE was aborted because the terminal closed
+
+*** File '(Unnamed)'
+q
+
+*** File '(Unnamed)'
+c.Spawner.cmd
+
+*** File '(Unnamed)'
+/home/dseverdi/Radno/MLAG/code/AGNet/.git/MERGE_MSG
+* Build Log *
+/home/dseverdi/Radno/MLAG/code/AGNet/.git/MERGE_MSG
+/home/dseverdi/Radno/genos/.git/MERGE_MSG
+/home/dseverdi/Radno/MLAG/dataset/AGPIL/train/fat-8-1.clusters
+/home/dseverdi/Radno/MLAG/dataset/AGPIL/train/fat-8-1.pol
+/home/dseverdi/Radno/MLAG/dataset/AGPIL/train/rand-116-107.pol
+/home/dseverdi/Radno/MLAG/dataset/AGPIL/train/rand-116-107.pol
+/home/dseverdi/Radno/MLAG/code/AGNet2/results/results.txt
+/home/dseverdi/Radno/MLAG/code/AGNet2/results/rl_results.txt
+/home/dseverdi/Radno/MLAG/code/AGNet2/results/greedy_results.txt
+
+*** File '* Startup Log *'
+Processing '/etc/joe/editorrc'...
+Processing '/etc/joe/ftyperc'...
+Finished processing /etc/joe/ftyperc
+Finished processing /etc/joe/editorrc

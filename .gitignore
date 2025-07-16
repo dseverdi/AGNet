@@ -1,8 +1,5 @@
-logs/
-.ipynb_checkpoints/
+# Ignore Python cache folders
 __pycache__/
-trained_models/
-results/
-pretrained/
-models/trained_models/
-dataset/development/
+checkpoints/
+gfx/
+tsplib_cache/
