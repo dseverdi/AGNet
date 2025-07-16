@@ -1,0 +1,232 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{verbatim}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{todonotes}
+\usepackage{subfigure}
+\usepackage{url}
+%\usepackage[scale={0.6,0.6}]{geometry}
+%#\newcommand{\todo}[1]{ \ {\bfseries\sffamily\textcolor{red}{[#1]}} \ }
+\newcommand{\todoauth}[1]{\todo[color=green!40]{#1}}
+
+\title{Neural combinatorial optimization algorithm for Art Gallery Problem}
+\author{Domagoj Ševerdija \and Antonio Jovanović \and Nathan Chappel \and Domagoj Matijević  }
+\date{January 2022}
+
+
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+ The Art Gallery problem is a well-known combinatorial optimization problem in computational geometry that seeks to minimize the number of guards required to ensure visibility within a simple polygon. Specifically, the goal is to identify a minimal set of points (guards) within the polygon such that every internal point remains visible to at least one guard. This visibility criterion is established by line segments connecting each point to a guard, all contained within the polygon. In our study, we focus on the variant where guards are selected from the set of polygon vertices. However, finding the optimal guard configuration is NP-hard, necessitating the use of approximation algorithms. To address this problem, we propose a novel approach leveraging deep learning techniques. Specifically, we employ pointer networks, a specialized type of neural network designed for subset selection based on specific criteria. 
+Our empirical findings demonstrate that our approach achieves near-optimal guard counts for Art Gallery instances consistent with the model’s training data sizes. 
+\end{abstract}
+
+
+
+\section{Introduction}
+
+
+Combinatorial optimization problems, which involve discrete decision variables, are typically challenging to solve efficiently. State-of-the-art algorithms often rely on handcrafted heuristics, and machine learning provides an opportunity to improve decision-making in a more principled and optimized manner \cite{survey:BENGIO2021405}. Machine learning can enhance combinatorial optimization algorithms in two ways: by providing fast approximations for computationally intensive components and by exploring and learning optimal decision-making policies to improve overall performance. Machine learning focuses on performing tasks given finite and often noisy data, making it suitable for handling natural signals where clear mathematical formulations are lacking. Deep learning, in particular, has shown significant advancements in handling high-dimensional spaces and large datasets.
+
+
+The problem of interest in this paper is the famous art gallery problem, presented by Chv\'{a}tal in 1975, which aims to find the smallest number of guards required to cover an art gallery shaped as a polygon of $n$ vertices.  This NP-hard problem gained in importance with advances in robotics where one of the main goals  is to enable robots localization in a new environment. It has been shown in \cite{DBLP:journals/evi/BighamDK22} and \cite{1545170} that efficient solutions to that problem are applicable  in robot localization and SLAM.  
+
+
+In this paper we highlight the application of machine learning algorithms for the combinatorial optimization Art Gallery problem. Namely, we adapt the pointer-network architecture from \cite{paper/vinyals2017pointer} so it can be applied for the Art Gallery Problem. The authors in \cite{paper/vinyals2017pointer} demonstrated applications of such architecture in convex hull, TSP and Delaunay computation and showed that relatively simple recurrent neural network can learn combinatorial features of the corresponding problems and achieve comparable results with state-of-the-art algorithms.
+
+
+Recurrent Neural Networks (RNNs) have achieved tremendous popularity for learning functions over variable sized input sequences \cite{} in various sequence-to-sequence scenarios.   For that reason RNNs have these days become main tool-of-choice in language processing problems such as text labelling \cite{}, text classification \cite{}, text generation \cite{}, translation \cite{} etc. 
+
+Sequence-to-sequence models are one-to-one systems that  provides an output sequence given the corresponding input sequence. Typical example of one-to-one are language translation problems, or speech recognition problems where transcription is being produced given an input speech wave. 
+
+The attention mechanism was introduced in \cite{bahdanau2016neural} in sequence-to-sequence (encoder-decoder) neural networks for the neural machine translation tasks in NLP. The purpose was to soft-search  for parts of source sentence that is relevant for predicting a word in target sentence compared to previous approaches where usually the last hidden state was used to initialize the decoder. This approach gained much traction in the Transformer architecture \cite{vaswani2017attention}. 
+
+
+Pointer network (PtrNet) \cite{paper/vinyals2017pointer} was the first one to introduce the sequence-to-sequence neural architecture that used an attention layer in a clever way such that the  conditional probabilities of an output sequence has an entry for each position in an input sequence. The attention layer they proposed enabled the neural network to have the output dictionary of variable size, i.e. the probability vector is of size of the input sequence nevertheless the length of the input sequence. Selecting the highest probability is thus interpreted as "pointer" to the position in the input sequence corresponding to corresponding index in probability vector. This nice feature enabled the PtrNet to be successfully applied to popular discrete problems such as Convex Hull, Delaunay triangulation and Travelling Salesman problem.
+
+
+However, overcoming the problem of output dictionary to be fixed {\it a priory} still doesn't seem sufficient for many of discrete problems. 
+
+Note, though, that the art gallery is not one-to-one but rather one-to-many problem, since for a given polygon, different subsets of guards of the same (smallest) size can cover an entire polygon. Hence, the existing methods, such as PtrNet, doesn't seem to be sufficient. Hence, in our approach we extend sequence-to-subsequence model introduced by PtrNet to sequence-to-multi-subsequence ... 
+
+\subsection{Previous Work} \label{sec:prev-work} 
+
+
+In recent years, there is a wide interest of applying machine learning approach to combinatorial optimization problems. First of all, the PointerNet paper demonstrated its applicability in computing convex hulls.  They used same network to approximate travelling salesman tours (TSP) and compute Delaunay triangulation.  Dai et al. used graph neural network for finding good policies in searching neighbourhood for TSP heuristics (\cite{}). For the full survey see \cite{tour }. 
+
+
+
+\subsection{Our results and outline of the paper }
+\label{sec:our-results}
+
+
+The main result of our paper is the trainable function based on a pointer network which can provide a feasible solution to the art gallery problem where guards are restricted on the vertices of the polygon. We show that our model can find a set of guards comparable to the optimal solution size. This is especially the case for instance sizes upon which our model was trained. Moreover, during inference, we do not need any geometrical information (i.e, visibility computation) to compute such guards.  
+
+
+\section{Problem definition}
+
+In the \emph{art  gallery problem}, we are given a simple polygon and the goal is to find a minimum number of points in the polygon where the entire polygon is visible from these points. Let $P=\langle P_1,P_2,\ldots,P_n\rangle$ denote a simple polygon, i.e.~edges of the polygon intersect only in vertices $P_1,P_2,\ldots, P_n$. Usually we think of $P$ as a non-empty region bounded by its edges. We say that some point $p\in P$ sees some other point $q\in P$ if the line segment $\overline{pq}$ is entirely contained within $P$. The goal is to determine the minimum set of points $C\subset P$ such that every point $q\in P$ there exists $p\in C$ such that $p$ sees $q$. Points from $C$ are called guards of $P$. In the general setting, guards can be arbitrary points from the polygon. Imposing such a constraint can be a challenging task for the neural network models. It is shown that hard constraint to the neural network model is basically treated as a soft constraint \todo{dodati referencu}.
+
+
+
+
+
+\begin{figure}[!h]
+    \centering
+    \subfigure[Polygon visibility: $p$ sees $q$, but not $r$]{\includegraphics[scale=0.75]{gfx//sees.pdf}} \hfill
+    \subfigure[Terrain visibility from \cite{tgpil}: red points and blue edges are visible from white vertex]{\includegraphics[scale=0.3]{gfx//tgpil_instance.pdf}} 
+    \caption{Visibility in polygon and terrains.}
+    \label{fig:visibilty}
+
+\end{figure}
+
+
+For every polygon $P$ and set of possible guards $C$ we define a visibility region 
+
+$$\textrm{Vis}(P,C)=\{q\in P: p~\textrm{sees}~q, p\in C\}$$ 
+and we define a coverage as 
+
+
+ $$c(P,C)=\textrm{Area}(\textrm{Vis}(P,C))/\textrm{Area}(P)$$
+ 
+ Note that $0\leq c(P,C)\leq 1$ due to definition.
+
+
+In this paper we are interested in finding optimal guards from the discrete set $C=\{P_1,P_2,\ldots,P_n\}$ which is a special case of the art gallery problem. Such problem can be used as an initial step for finding points within a polygon \todo{dodati referencu}. 
+
+\section{Model}
+
+In this paper, we show how a pointer network \cite{paper/vinyals2017pointer} can be applied to compute points for guarding polygons from vertices.  One of the obvious differences from the geometric applications of pointer networks listed in \cite{paper/vinyals2017pointer} is that the art gallery problem usually has multiple solutions. Therefore, we extend the concept of pointer network to decode an input sequence to multiple set of pointers. Our model is also augmented with (trainable) evaluation function which picks best possible set of pointers for the given input.
+
+
+
+
+
+\subsection{Pointer Network architecture}
+Consider a sequence to sequence model: given a training pair $(X,Y)$ the sequence-to-sequence model computes the conditional probability $P(Y|X;\theta)$ using a parametric model (a RNN with parameters $\theta$) by estimating
+$$P(Y|X;\theta)=\Pi_{i=1}^{m(X)} P(Y_i|Y_{1:i-1},X;\theta)$$ where $X=\langle X_1,X_2\ldots,X_n\rangle$ and $Y=\langle Y_1,Y_2,\ldots,Y_{m(X)} \rangle$ is a subsequence of indices of $X$. The number $m(X)\leq n$ denotes number of indices.
+
+
+
+The parameters of the model are learned by maximizing the conditional probabilities for the training set $D$: $$\theta^*=\arg\max\sum_{(X,Y)\in \matchal{D}} \log P(Y|X;\theta)$$
+
+We model our $P(Y|X;\theta)$ as an encoder-decoder network, i.e. $X$ is fed to an encoder at step $i$ until the end of the sequence is reached. The encoder part encodes input information into a sequence of hidden states $E=\langle e_1,e_2,\ldots,e_n\rangle$. After encoding, the model switches to the decoder part which in turn, computes a sequence of hidden states $D=\langle d_1,d_2,\ldots,d_{m(X)}\rangle$. Both the encoder and decoder are implemented as separate LSTMs.
+
+The pointer part of the architecture models  $P(Y_i|Y_{1:i-1},X;\theta)$ using the attention mechanism over encoder and decoder outputs: 
+
+\begin{eqnarray} 
+u^i_j & = & v^\top \textrm{tanh}(W_1 e_j+W_2d_i), \quad j=1,2,\ldots,n \label{eq:1}   \\ 
+P(Y_i|Y_{1:i-1},X;\theta) & = & \textrm{softmax}(u^i) \label{eq:2}
+\end{eqnarray}
+where $v,W_1,W_2\in \theta$ are trainable parameters. Note that \eqref{eq:2} uses softmax to produce distribution over indices of the input. 
+
+During inference, given the input sequence $X$, the learned parameters $\theta^*$  are used to search for a sequence $Y^*=\arg\max_{Y}P(Y|X;\theta^*)$. Due to computational complexity of such procedure, we usually resort to doing a beam search or any other appropriate heuristic.
+
+
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[scale=0.45]{gfx//PtrMNet.pdf}
+    \caption{Multiple pointer networks encode polygon $X$ and produce $k$ subsequences of $X$. The coverage of these sequences is evaluated with CovNet and the best candidate is returned. } 
+    \label{fig:MPtrNet}
+\end{figure}
+
+
+
+\subsection{Multi-Pointer Network}
+
+In a nutshell, our model consists of multiple pointer networks. An input for the model is a sequence of data $X$ that is passed to $k$ pointer networks. For $i=1,2,\ldots,k$, the $i$-th encoder produces a representation of $X$, i.e. $E^{(i)}$ while $i$-th decoder computes $D^{(i)}$. The encoder and decoder outputs are used to compute conditional probability $P(Y|X;\theta^{(i)})$ using \eqref{eq:1} and \eqref{eq:2}. During inference, we use beam search to decode $Y^{(i)}=\arg\max_{Y}P(Y|X;\theta^{(i)*})$. To choose best possible subsequence $Y^*$ of $X$ an evaluation function is added to the model.
+
+\subsection{Evaluation function}
+As an evaluation function, we used CovNet architecture as a regression model to evaluate the quality of the decoded solution (shown in Figure~\ref{fig:CovNet}). It  consists of 2 encoders: one for the input sequence $X$ and other for the pointers $Y$ of $X$. Both these encoders are implemented as LSTMs. Hidden states from LSTMs for $X$ and $Y$ are aggregated via dense layer into a scalar as an output of the model. The output is a prediction of how good sub-sequence $Y$ covers the entire $X$. The model is trained using the MSE loss function.
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=0.7]{gfx//CovNet.pdf}
+    \caption{Evaluation function encodes input $X$ and its sub-sequence $Y$ and returns a coverage value for $Y$}
+    \label{fig:CovNet}
+\end{figure}
+
+
+
+
+
+
+\section{Experiments} 
+
+\subsection{Architecture and Hyperparameters} \todoauth{Antonio}
+
+In the Multi-Pointer Network each encoder is a single-layer bidirectional LSTM layer with a hidden size of 256, while the decoder uses a hidden size of 512 to account for stacking the encoder hidden states. All parameter dimensions in the pointer layer are also $512$ or $512 \times 512$.
+
+We use teacher-forcing with a ratio of 0.5 to switch between feeding true outputs to the decoder and previously generated ones during training. The maximum decoding length is set to 1000 for the Terrain Guarding problem and to 100 for the Art Gallery problem.
+
+For training we used the Adam optimization algorithm with a learning rate of $10^{-3}$ and weight decay of $10^{-5}$. The batch size used for training was 256 for Terrain Guarding and 64 for Art Gallery. 
+
+All models were trained for a maximum of 1000 epoch with early stopping, when we haven't observed a decrease in validation loss for the last 30 epochs.
+
+For the CovNet we used 3-layered LSTM encoders with size of hidden layers 20.
+We didn't put much effort in finding the best hyperparameters. 
+
+Training was conducted on a workstation with an AMD Ryzen Threadripper 3990X CPU, 256 gigabytes of RAM and an Nvidia RTX 3090 GPU.
+
+\subsection{Dataset}
+
+\paragraph{AGPIL dataset}
+AGPLIB \cite{art-gallery-instances-page} was used as a dataset for our purposes. The dataset consists of randomly generated simple polygons of various sizes as simple, orthogonal, and van-Koch types (for a detailed description of polygon types, see \cite{art-gallery-instances-page} and references therein). The AGPIL instances were augmented with optimal solutions for the vertex guard case. Using GUROBI  optimizer \cite{tools:gurobi}, we formulated an integer linear program for the problem with the help of \texttt{Scikit-geometry} package \cite{tools:scikit-geometry}. We solved the problem with up to 1024 solutions for every instance. These solutions were clustered into $k$ clusters. Although we can output a relatively high number of solutions per instance, one can notice that many of these solutions differ in a few points. Clustering solutions into $k$ groups helped us to use $k$ seemingly different solutions.
+The dataset was split into train, validation and test datasets in 7:1:2 ratio. The total number of samples were cca 40000. 
+
+
+\paragraph{CovNet dataset}
+In addition, the CovNet model was trained on a set of AGPIL polygon instances of size up to 200. For every polygon $P$ we sampled subset of optimal guards $G^{(i)}=\{g_1,g_2,\ldots,g_{n(i)}\}$, $i=1,2,\ldots,k$ and evaluated the coverage of polygon $c(P,G^{(i)})$ using the  \texttt{scikit-geometry} package. Therefore, our dataset consists of $k$ triples $(P,G_i,c(P,G_i))$ for every instance.
+
+For the training purposes, we used 2000 instances of up to 200 vertices and generated $k=40$ samples of guards for every instance. 
+
+
+\paragraph{TGPIL dataset}
+TGPIL dataset \cite{tgpil} consists of instances for the 1.5D terrain guarding problem. These instances are created randomly or procedurally with optional random noise (see \cite{tgpil} for thorough description). The dataset provides only one solution per instance, therefore we solved and enumerated up to 1024 solutions per instance like in AGPIL case.
+
+
+
+\subsection{Results}
+
+\input{gfx//results.tex}
+
+As an evaluation function, we used pretrained CovNet architecture that implements a regression model to evaluate the quality of the decoded solution (shown in Figure~\ref{fig:CovNet}). We conduct our experiments on all types of polygons given in AGPIL.
+In Tables~\ref{tab:results_1} Tables~\ref{tab:results_2}\todo{Update values for TGPIL results} and  experimental results are summarized according to sizes of the AGPIL instances. Due to inbalance in instance sizes the results are organized in "bins", i.e.~instance size ranges with the total number of instances per bin (instance counts). 
+
+
+
+In the Figure~\ref{fig:CovNet} we report the appropriateness of the CovNet model for approximation coverage of polygon for given points.
+
+
+
+
+
+
+
+\subsection{Discussion}
+\subsubsection{Transfer Learn} \todoauth{Antonio Jovanović}
+
+We experimented with transfer learn from Convex Hull dataset. 
+
+\subsubsection{Value function for decoding} \todoauth{Domagoj Ševerdija}
+One of the inherent problems of sequence decoding is its miyopic bias. We experimented with value function during inference ...
+
+
+\subsubsection{Small scale vs large scale problems} \emph{Domagoj Ševerdija}
+Overfitting problem on small instances.
+
+
+\section{Conclusion}
+In this work, a Sequence to MultiSubSequence (Seq2MSSeq) neural network is proposed that learns a mapping of a source sequence to its multiple subsequences during training. In inference, our model returns a best subsequence with respect to a certain criteria. We demonstrated this approach in  efficiently finding approximate solutions for 1.5D terrain guarding instances. The model learns well small-scale instances and it is also applicable to large scale instances. We believe that our approach can be applied for general visibility problems on polygons where one can leverage information from multiple solutions. 
+
+\bibliographystyle{abbrv}
+\bibliography{paper}
+\end{document}
