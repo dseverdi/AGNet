@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 import argparse
 import numpy as np
 import torch
@@ -344,8 +345,14 @@ def process_comprehensive_sample(pol_path, normalize, agp_val_dir, verbose):
         return None
 
 def main():
+    # Load environment variables from .env
+    load_dotenv()
+    DATASET_PATH = os.getenv("DATASET_PATH")
+    if not DATASET_PATH:
+        raise EnvironmentError("DATASET_PATH environment variable must be set in .env file.")
     parser = argparse.ArgumentParser()
-    parser.add_argument('--agp_val_dir', type=str, default="/home/dseverdi/Radno/MLAG/dataset/AGPIL/dev", help='Directory with validation .pol files')
+    default_val = os.path.join(DATASET_PATH, "dev")
+    parser.add_argument('--agp_val_dir', type=str, default=default_val, help='Directory with validation .pol files')
     parser.add_argument('--train-size', type=int, default=8000, help='Number of validation samples to use (default: 8000, or all if smaller)')
     parser.add_argument('--normalize', action='store_true', default=True)
     parser.add_argument('--verbose', action='store_true', default=False)
@@ -506,16 +513,3 @@ def draw_all_greedy_vs_optimal(pol_files, agp_val_dir, rel_to_opts, out_dir=None
 
 if __name__ == "__main__":
     main()
-    # After main, visualize all polygons where greedy rel_size to optimal < 1
-    agp_dir = "/home/dseverdi/Radno/MLAG/dataset/AGPIL/dev"  # or use args.agp_val_dir if available
-    pol_files = [os.path.join(agp_dir, f) for f in os.listdir(agp_dir) if f.endswith('.pol')]
-    rel_to_opts = []
-    for pol_path in pol_files:
-        points = read_single_pol_file(pol_path, normalize=False).numpy()
-        greedy_idxs, _ = greedy_guard_selection_fast(points, name=pol_path)
-        opt_idxs = get_optimal_solution_indices(pol_path, agp_dir)
-        rel_to_opt = float('nan')
-        if len(opt_idxs) > 0:
-            rel_to_opt = len(greedy_idxs) / float(len(opt_idxs)) if len(opt_idxs) > 0 else float('nan')
-        rel_to_opts.append(rel_to_opt)
-    draw_all_greedy_vs_optimal(pol_files, agp_dir, rel_to_opts, out_dir="gfx")

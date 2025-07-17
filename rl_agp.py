@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 import argparse
 from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor, create_critic
@@ -501,6 +502,11 @@ def test_coverage_on_sample(dataset, sol_dir, index=0, regime="opt", n_random_gu
 
 
 def main():
+    # Load environment variables from .env
+    load_dotenv()
+    DATASET_PATH = os.getenv("DATASET_PATH")
+    if not DATASET_PATH:
+        raise EnvironmentError("DATASET_PATH environment variable must be set in .env file.")
     parser = argparse.ArgumentParser()
     parser.add_argument('--embedding-size', type=int, default=128)
     parser.add_argument('--hidden-size', type=int, default=128)
@@ -512,8 +518,10 @@ def main():
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--temperature', type=float, default=1.0)
-    parser.add_argument('--agp_train_dir', type=str, default="/home/dseverdi/Radno/MLAG/dataset/AGPIL/train")
-    parser.add_argument('--agp_val_dir', type=str, default="/home/dseverdi/Radno/MLAG/dataset/AGPIL/dev")
+    default_train = os.path.join(DATASET_PATH, "train")
+    default_val = os.path.join(DATASET_PATH, "dev")
+    parser.add_argument('--agp_train_dir', type=str, default=default_train)
+    parser.add_argument('--agp_val_dir', type=str, default=default_val)
     parser.add_argument('--train-size', type=int, default=8000, help="Number of training samples to use (default: 8000, or all if smaller)")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--ema', action='store_true', help='Use EMA baseline (reinforce_train_ema)')
