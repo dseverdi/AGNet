@@ -541,9 +541,40 @@ def main():
     if args.ema:
         reinforce_train_ema(agp_model, small_train_dataset, reward_fn,
                             epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, beta=args.beta)
+        training_method = 'reinforcement_learning_ema'
     elif args.critic:
         reinforce_train_critic(agp_model, critic_model, small_train_dataset, reward_fn,
                                epochs=args.epochs, batch_size=args.batch_size, lr_actor=args.lr, lr_critic=args.lr)
+        training_method = 'reinforcement_learning_critic'
+
+    # Save the trained model
+    checkpoint_params = {
+        'embedding_size': args.embedding_size,
+        'hidden_size': args.hidden_size,
+        'n_glimpses': args.n_glimpses,
+        'tanh_exploration': args.tanh_exploration,
+        'use_tanh': args.use_tanh,
+        'beta': args.beta if args.ema else None,
+        'temperature': args.temperature
+    }
+    # Remove None values from checkpoint params
+    checkpoint_params = {k: v for k, v in checkpoint_params.items() if v is not None}
+    
+    checkpoint_path = get_checkpoint_path('checkpoints', 'rl_agp_model', checkpoint_params, args.epochs)
+    model_checkpoint = {
+        'model_state_dict': agp_model.state_dict(),
+        'args': vars(args),
+        'training_method': training_method,
+        'num_train_samples': len(small_train_dataset),
+        'num_val_samples': len(small_val_dataset)
+    }
+    
+    # Also save critic if used
+    if args.critic:
+        model_checkpoint['critic_state_dict'] = critic_model.state_dict()
+    
+    torch.save(model_checkpoint, checkpoint_path)
+    print(f"Model saved to {checkpoint_path}")
 
     # evaluate the model on the validation dataset
     eval_results = reinforce_eval(agp_model, small_val_dataset, reward_fn, batch_size=1, sol_dir=args.agp_val_dir)

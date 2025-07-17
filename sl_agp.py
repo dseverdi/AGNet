@@ -380,6 +380,25 @@ def main():
         print("Starting supervised training...")
         supervised_train(agp_model, small_train_dataset, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr)
         print("Training complete. Starting evaluation...")
+        
+        # Save the trained model
+        checkpoint_params = {
+            'embedding_size': args.embedding_size,
+            'hidden_size': args.hidden_size,
+            'n_glimpses': args.n_glimpses,
+            'tanh_exploration': args.tanh_exploration,
+            'use_tanh': args.use_tanh
+        }
+        checkpoint_path = get_checkpoint_path('checkpoints', 'sl_agp_model', checkpoint_params, args.epochs)
+        torch.save({
+            'model_state_dict': agp_model.state_dict(),
+            'args': vars(args),
+            'training_method': 'supervised_learning',
+            'num_train_samples': len(small_train_dataset),
+            'num_val_samples': len(small_val_dataset)
+        }, checkpoint_path)
+        print(f"Model saved to {checkpoint_path}")
+        
         eval_results = supervised_eval(agp_model, small_val_dataset, batch_size=1)
         print("Evaluation complete.")
         
