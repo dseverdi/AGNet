@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 import argparse
 from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor
@@ -346,6 +347,9 @@ def supervised_eval(model, dataset, batch_size=1):
 
 
 def main():
+    # Load environment variables from .env
+    load_dotenv()
+    DATASET_PATH = os.getenv("DATASET_PATH")
     print("Starting main() in sl_agp.py...")
     try:
         parser = argparse.ArgumentParser()
@@ -357,8 +361,13 @@ def main():
         parser.add_argument('--epochs', type=int, default=10)
         parser.add_argument('--batch-size', type=int, default=128)
         parser.add_argument('--lr', type=float, default=1e-3)
-        parser.add_argument('--agp_train_dir', type=str, default="/home/dseverdi/Radno/MLAG/dataset/AGPIL/train")
-        parser.add_argument('--agp_val_dir', type=str, default="/home/dseverdi/Radno/MLAG/dataset/AGPIL/dev")
+        # Always use DATASET_PATH from environment variable, no fallback
+        if not DATASET_PATH:
+            raise EnvironmentError("DATASET_PATH environment variable must be set in .env file.")
+        default_train = os.path.join(DATASET_PATH, "train")
+        default_val = os.path.join(DATASET_PATH, "dev")
+        parser.add_argument('--agp_train_dir', type=str, default=default_train)
+        parser.add_argument('--agp_val_dir', type=str, default=default_val)
         parser.add_argument('--train-size', type=int, default=8000, help="Number of training samples to use (default: 8000, or all if smaller)")
         args = parser.parse_args()
 
