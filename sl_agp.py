@@ -91,27 +91,35 @@ def prepare_datasets_with_targets(train_path, val_path, normalize=True):
     return train_samples, val_samples
 
 class BucketBatchSampler(Sampler):
+    """Batch sampler that groups samples of similar length into the same batch."""
     def __init__(self, lengths, batch_size, shuffle=True, drop_last=False, bucket_size=10):
         self.lengths = lengths
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_last = drop_last
         self.bucket_size = bucket_size
+        # Sort indices by length
         self.sorted_indices = sorted(range(len(lengths)), key=lambda i: lengths[i])
+        # Create buckets
         self.buckets = []
         for i in range(0, len(self.sorted_indices), bucket_size):
             self.buckets.append(self.sorted_indices[i:i+bucket_size])
+
     def __iter__(self):
+        # Shuffle buckets if needed
         buckets = self.buckets.copy()
         if self.shuffle:
             np.random.shuffle(buckets)
         for bucket in buckets:
+            # Shuffle within bucket
             if self.shuffle:
                 np.random.shuffle(bucket)
+            # Yield batches from this bucket
             for i in range(0, len(bucket), self.batch_size):
                 batch = bucket[i:i+self.batch_size]
                 if len(batch) == self.batch_size or (not self.drop_last and len(batch) > 0):
                     yield batch
+
     def __len__(self):
         total = 0
         for bucket in self.buckets:
@@ -122,49 +130,42 @@ class BucketBatchSampler(Sampler):
         return total
 
 def get_lengths_from_dataset(dataset):
-    return [sample.data.shape[0] for sample in dataset]
+    # Assumes dataset[i][0] is a tensor of shape [num_points, 2]
+    return [sample[0].shape[0] for sample in dataset]
 
 # --- Supervised Training Loop ---
 def supervised_train(model, dataset, epochs=10, batch_size=128, lr=1e-3):
     print(f"\n--- Supervised Training on {len(dataset)} samples for {epochs} epochs (batch size {batch_size}) ---")
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    lengths = get_lengths_from_dataset(dataset)
+    # Convert to standard dataset format for efficient batching
+    standard_dataset = []
+    for sample in dataset:
+        # Convert Sample objects to (data, label, name) tuples for collate_fn compatibility
+        standard_dataset.append((sample.data, sample.label, sample.name))
+    
+    lengths = [sample[0].shape[0] for sample in standard_dataset]
     batch_sampler = BucketBatchSampler(lengths, batch_size, shuffle=True, bucket_size=10)
-    def supervised_collate_fn(batch):
-        # batch: list of samples
-        samples = batch
-        # Extract data directly from Sample objects  
-        datas = [sample.data for sample in samples]
-        labels = [sample.label for sample in samples]  # These are the target indices
-        names = [sample.name for sample in samples]
-        
-        # Manual collate function logic
-        lengths = [d.shape[0] for d in datas]
-        # Pad variable-length polygons (each data is [num_points, 2])
-        datas_padded = torch.nn.utils.rnn.pad_sequence(datas, batch_first=True, padding_value=0.0)
-        # Create mask: True for real vertices, False for padding
-        max_len = datas_padded.size(1)
-        mask = torch.zeros(len(datas), max_len, dtype=torch.bool)
-        for i, l in enumerate(lengths):
-            mask[i, :l] = True
-        
-        return (datas_padded, mask, lengths, names), labels
-    class SupervisedDataset:
-        def __init__(self, data):
-            self.data = data
-        def __len__(self):
-            return len(self.data)
-        def __getitem__(self, idx):
-            return self.data[idx]
-    supervised_dataset = SupervisedDataset(dataset)
-    loader = DataLoader(supervised_dataset, batch_sampler=batch_sampler, collate_fn=supervised_collate_fn, pin_memory=True, num_workers=2)
+    loader = DataLoader(standard_dataset, batch_sampler=batch_sampler, collate_fn=collate_fn, pin_memory=True, num_workers=2)
     device = next(model.parameters()).device
-    for epoch in range(epochs):
+    try:
+        from tqdm import tqdm
+        epoch_iter = tqdm(range(epochs), desc='Training Epochs', leave=True)
+        use_tqdm = True
+    except ImportError:
+        epoch_iter = range(epochs)
+        use_tqdm = False
+    for epoch in epoch_iter:
         total_loss = 0
-        for batch in loader:
-            batch_data, mask, lengths, batch_names = batch[0]
-            targets = batch[1]
+        for batch_data, mask, lengths, batch_names in loader:
+            # Extract targets for this batch - need to map from names to target indices
+            targets = []
+            for name in batch_names:
+                for sample in standard_dataset:
+                    if sample[2] == name:
+                        targets.append(sample[1])
+                        break
+            
             batch_data = batch_data.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             lengths = torch.tensor(lengths, dtype=torch.long, device=device)
@@ -202,12 +203,24 @@ def supervised_train(model, dataset, epochs=10, batch_size=128, lr=1e-3):
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * batch_data.size(0)
+            
+            # Debug: Print sample predictions during training for first epoch
+            if epoch == 0 and len(targets) > 0:
+                sample_pred = selected_idxs[0] if len(selected_idxs) > 0 else []
+                sample_target = targets[0] if len(targets) > 0 else []
+                if len(sample_pred) > 0 and len(sample_target) > 0:
+                    sample_coverage = len(set(sample_pred).intersection(set(sample_target))) / len(sample_target)
+                    print(f"    Batch sample - Pred: {len(sample_pred)} guards, Target: {len(sample_target)} guards, Coverage: {sample_coverage:.3f}")
+            
             del batch_data, mask, lengths, selected_idxs, log_probs, targets
             torch.cuda.empty_cache()
             import gc
             gc.collect()
         avg_loss = total_loss / len(dataset)
-        print(f"Epoch {epoch+1}/{epochs} - Avg loss: {avg_loss:.4f}")
+        if use_tqdm:
+            epoch_iter.set_postfix({'Avg loss': f'{avg_loss:.4f}'})
+        else:
+            print(f"Epoch {epoch+1}/{epochs} - Avg loss: {avg_loss:.4f}")
         torch.cuda.empty_cache()
     print("Supervised training done.")
 
@@ -215,35 +228,16 @@ def supervised_train(model, dataset, epochs=10, batch_size=128, lr=1e-3):
 def supervised_eval(model, dataset, batch_size=1):
     print(f"\n--- Evaluation on {len(dataset)} validation samples (batch size {batch_size}) ---")
     model.eval()
-    lengths = get_lengths_from_dataset(dataset)
+    
+    # Convert to standard dataset format for efficient batching
+    standard_dataset = []
+    for sample in dataset:
+        # Convert Sample objects to (data, label, name) tuples for collate_fn compatibility
+        standard_dataset.append((sample.data, sample.label, sample.name))
+    
+    lengths = [sample[0].shape[0] for sample in standard_dataset]
     batch_sampler = BucketBatchSampler(lengths, batch_size, shuffle=False, bucket_size=10)
-    def supervised_collate_fn(batch):
-        samples = batch
-        # Extract data directly from Sample objects
-        datas = [sample.data for sample in samples]
-        labels = [sample.label for sample in samples]  # These are the target indices
-        names = [sample.name for sample in samples]
-        
-        # Manual collate function logic
-        lengths = [d.shape[0] for d in datas]
-        # Pad variable-length polygons (each data is [num_points, 2])
-        datas_padded = torch.nn.utils.rnn.pad_sequence(datas, batch_first=True, padding_value=0.0)
-        # Create mask: True for real vertices, False for padding
-        max_len = datas_padded.size(1)
-        mask = torch.zeros(len(datas), max_len, dtype=torch.bool)
-        for i, l in enumerate(lengths):
-            mask[i, :l] = True
-        
-        return (datas_padded, mask, lengths, names), labels
-    class SupervisedDataset:
-        def __init__(self, data):
-            self.data = data
-        def __len__(self):
-            return len(self.data)
-        def __getitem__(self, idx):
-            return self.data[idx]
-    supervised_dataset = SupervisedDataset(dataset)
-    loader = DataLoader(supervised_dataset, batch_sampler=batch_sampler, collate_fn=supervised_collate_fn, num_workers=2)
+    loader = DataLoader(standard_dataset, batch_sampler=batch_sampler, collate_fn=collate_fn, num_workers=2)
     device = next(model.parameters()).device
     
     # Statistics for whisker plots
@@ -255,13 +249,32 @@ def supervised_eval(model, dataset, batch_size=1):
     overlap_counts = []  # absolute number of overlapping guards
     
     with torch.no_grad():
-        for batch in loader:
-            batch_data, mask, lengths, batch_names = batch[0]
-            targets = batch[1]
+        batch_count = 0
+        for batch_data, mask, lengths, batch_names in loader:
+            # Extract targets for this batch
+            targets = []
+            for name in batch_names:
+                for sample in standard_dataset:
+                    if sample[2] == name:
+                        targets.append(sample[1])
+                        break
+            
             batch_data = batch_data.to(device)
             mask = mask.to(device)
             lengths = torch.tensor(lengths, dtype=torch.long, device=device)
             selected_idxs, log_probs = model(batch_data, padding_mask=mask, lengths=lengths)
+            
+            # Debug: Print first few predictions
+            if batch_count < 3:
+                print(f"\n🔍 Debug - Batch {batch_count}:")
+                for i, (pred_indices, true_indices, name) in enumerate(zip(selected_idxs[:2], targets[:2], batch_names[:2])):
+                    print(f"  Sample {name}:")
+                    print(f"    Predicted: {pred_indices} (count: {len(pred_indices)})")
+                    print(f"    True: {true_indices} (count: {len(true_indices)})")
+                    if len(pred_indices) > 0 and len(true_indices) > 0:
+                        coverage = len(set(pred_indices).intersection(set(true_indices))) / len(true_indices)
+                        print(f"    Coverage: {coverage:.3f}")
+            batch_count += 1
             
             for pred_indices, true_indices, name in zip(selected_idxs, targets, batch_names):
                 pred_set = set(pred_indices)
@@ -376,9 +389,14 @@ def main():
         train_dataset, val_dataset = prepare_datasets_with_targets(args.agp_train_dir, args.agp_val_dir, normalize=True)
         print("Datasets loaded.")
         print("Creating model...")
+        # For supervised learning, we don't need a reward function, but need to provide a dummy one
+        def dummy_reward(points, solution, name, length):
+            return 0.0
+        
+        # Set seq_len to None (will be handled dynamically in the model)
         agp_model = create_actor(
             args.embedding_size, args.hidden_size, None, args.n_glimpses,
-            args.tanh_exploration, args.use_tanh, "Bahdanau", None, temperature=1.0
+            args.tanh_exploration, args.use_tanh, "Bahdanau", dummy_reward, temperature=1.0
         )
         print("Model created.")
 
