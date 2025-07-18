@@ -204,14 +204,6 @@ def supervised_train(model, dataset, epochs=10, batch_size=128, lr=1e-3):
             optimizer.step()
             total_loss += loss.item() * batch_data.size(0)
             
-            # Debug: Print sample predictions during training for first epoch
-            if epoch == 0 and len(targets) > 0:
-                sample_pred = selected_idxs[0] if len(selected_idxs) > 0 else []
-                sample_target = targets[0] if len(targets) > 0 else []
-                if len(sample_pred) > 0 and len(sample_target) > 0:
-                    sample_coverage = len(set(sample_pred).intersection(set(sample_target))) / len(sample_target)
-                    print(f"    Batch sample - Pred: {len(sample_pred)} guards, Target: {len(sample_target)} guards, Coverage: {sample_coverage:.3f}")
-            
             del batch_data, mask, lengths, selected_idxs, log_probs, targets
             torch.cuda.empty_cache()
             import gc
@@ -221,10 +213,91 @@ def supervised_train(model, dataset, epochs=10, batch_size=128, lr=1e-3):
             epoch_iter.set_postfix({'Avg loss': f'{avg_loss:.4f}'})
         else:
             print(f"Epoch {epoch+1}/{epochs} - Avg loss: {avg_loss:.4f}")
+        
+        # Report detailed metrics every 10th epoch
+        if (epoch + 1) % 10 == 0:
+            print(f"\n📊 Training Set Metrics (Epoch {epoch+1}):")
+            train_loss, train_coverage, train_size_ratio = compute_dataset_metrics(model, dataset, batch_size=batch_size, device=device)
+            print(f"  Loss: {train_loss:.4f}")
+            print(f"  Coverage: {train_coverage:.3f} ({train_coverage*100:.1f}%)")
+            print(f"  Size Ratio (pred/target): {train_size_ratio:.2f}")
+            model.train()  # Set back to training mode
+        
         torch.cuda.empty_cache()
     print("Supervised training done.")
 
 # --- Evaluation ---
+def compute_dataset_metrics(model, dataset, batch_size=32, device=None):
+    """Compute average loss, coverage, and size ratio on a dataset."""
+    if device is None:
+        device = next(model.parameters()).device
+    
+    model.eval()
+    
+    # Convert to standard dataset format for efficient batching
+    standard_dataset = []
+    for sample in dataset:
+        standard_dataset.append((sample.data, sample.label, sample.name))
+    
+    lengths = [sample[0].shape[0] for sample in standard_dataset]
+    batch_sampler = BucketBatchSampler(lengths, batch_size, shuffle=False, bucket_size=10)
+    loader = DataLoader(standard_dataset, batch_sampler=batch_sampler, collate_fn=collate_fn, pin_memory=True, num_workers=2)
+    
+    total_loss = 0
+    all_coverages = []
+    all_size_ratios = []
+    
+    with torch.no_grad():
+        for batch_data, mask, lengths, batch_names in loader:
+            # Extract targets for this batch
+            targets = []
+            for name in batch_names:
+                for sample in standard_dataset:
+                    if sample[2] == name:
+                        targets.append(sample[1])
+                        break
+            
+            batch_data = batch_data.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
+            lengths = torch.tensor(lengths, dtype=torch.long, device=device)
+            selected_idxs, log_probs = model(batch_data, padding_mask=mask, lengths=lengths)
+            
+            # Compute loss (same as training)
+            loss = torch.tensor(0.0, device=device, requires_grad=False)
+            for i, (pred_indices, target_indices) in enumerate(zip(selected_idxs, targets)):
+                if len(target_indices) > 0:
+                    pred_set = set(pred_indices)
+                    target_set = set(target_indices)
+                    overlap = len(pred_set.intersection(target_set))
+                    total_target = len(target_set)
+                    overlap_ratio = overlap / total_target if total_target > 0 else 0.0
+                    
+                    # Coverage and size ratio for this sample
+                    all_coverages.append(overlap_ratio)
+                    size_ratio = len(pred_indices) / len(target_indices) if len(target_indices) > 0 else 0.0
+                    all_size_ratios.append(size_ratio)
+                    
+                    weight = 1.0 - overlap_ratio + 0.1
+                    sample_loss = -log_probs[i] * weight
+                    loss = loss + sample_loss
+                else:
+                    penalty = len(pred_indices) * 0.1
+                    loss = loss + torch.tensor(penalty, device=device)
+                    all_coverages.append(0.0)
+                    all_size_ratios.append(0.0)
+            
+            loss = loss / batch_data.size(0)
+            total_loss += loss.item() * batch_data.size(0)
+            
+            del batch_data, mask, lengths, selected_idxs, log_probs, targets
+            torch.cuda.empty_cache()
+    
+    avg_loss = total_loss / len(dataset)
+    avg_coverage = np.mean(all_coverages) if all_coverages else 0.0
+    avg_size_ratio = np.mean(all_size_ratios) if all_size_ratios else 0.0
+    
+    return avg_loss, avg_coverage, avg_size_ratio
+
 def supervised_eval(model, dataset, batch_size=1):
     print(f"\n--- Evaluation on {len(dataset)} validation samples (batch size {batch_size}) ---")
     model.eval()
