@@ -5,43 +5,35 @@
     "n_glimpses": 1,
     "tanh_exploration": 10,
     "use_tanh": true,
-    "epochs": 3,
-    "batch_size": 32,
+    "epochs": 1,
+    "batch_size": 2,
     "lr": 0.001,
-    "agp_train_dir": "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development/train",
-    "agp_val_dir": "/mnt/nvme0n1/dseverdi/MLAG/dataset/AG/development/dev",
-    "train_size": 200
+    "agp_train_dir": "/home/dseverdi/Radno/MLAG/dataset/AGPIL/train",
+    "agp_val_dir": "/home/dseverdi/Radno/MLAG/dataset/AGPIL/dev",
+    "train_size": 5,
+    "debug": false
   },
-  "num_train_samples": 200,
-  "num_val_samples": 200,
+  "num_train_samples": 5,
+  "num_val_samples": 10,
+  "training_method": "supervised_learning",
   "coverage_stats": {
-    "mean": 0.42837060897718415,
-    "median": 0.4128787878787879,
-    "std": 0.26970524292327386,
+    "mean": 0.45099384644689977,
+    "median": 0.3265720081135903,
+    "std": 0.33413865578461205,
     "min": 0.0,
     "max": 1.0,
-    "q25": 0.20961887477313973,
-    "q75": 0.6163003663003663,
-    "iqr": 0.4066814915272266
-  },
-  "efficiency_stats": {
-    "mean": 0.15912438922817018,
-    "median": 0.1590909090909091,
-    "std": 0.07218552270948568,
-    "min": 0.0,
-    "max": 0.6666666666666666,
-    "q25": 0.125,
-    "q75": 0.1875,
-    "iqr": 0.0625
+    "q25": 0.19744318181818182,
+    "q75": 0.7388888888888889,
+    "iqr": 0.541445707070707
   },
   "size_ratio_stats": {
-    "mean": 3.0460409247456743,
-    "median": 2.5277777777777777,
-    "std": 3.305940008679071,
-    "min": 0.1,
-    "max": 32.0,
-    "q25": 1.4719298245614034,
-    "q75": 3.814814814814815,
-    "iqr": 2.3428849902534115
+    "mean": 3.0437979283447416,
+    "median": 3.235294117647059,
+    "std": 2.3348474987006655,
+    "min": 0.0,
+    "max": 8.0,
+    "q25": 1.1829937304075235,
+    "q75": 4.25,
+    "iqr": 3.0670062695924765
   }
 }

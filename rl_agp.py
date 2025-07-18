@@ -105,7 +105,6 @@ def get_lengths_from_dataset(dataset):
 
 
 
-# --- Simple Training Loop for Debugging ---
 def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e-3, beta=0.99):
     """
     Train the model using REINFORCE with exponential moving average (EMA) baseline for variance reduction.
@@ -355,6 +354,7 @@ def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
         print(f"Perfect solutions (100% coverage): {sum(1 for c in coverage_ratios if c >= 1.0)}")
         print(f"Good solutions (>=80% coverage): {sum(1 for c in coverage_ratios if c >= 0.8)}")
         print(f"Reasonable solutions (>=60% coverage): {sum(1 for c in coverage_ratios if c >= 0.6)}")
+        print(f"Average coverage: {np.mean(coverage_ratios):.3f}")
         if len(size_ratios) > 0:
             print(f"Average size inflation: {np.mean(size_ratios):.2f}x optimal")
     else:

@@ -133,6 +133,81 @@ def get_lengths_from_dataset(dataset):
     # Assumes dataset[i][0] is a tensor of shape [num_points, 2]
     return [sample[0].shape[0] for sample in dataset]
 
+def visualize_polygon_with_guards(points, pred_guards, true_guards, name, save_path=None):
+    """Visualize polygon with predicted and true guard positions"""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        from matplotlib.collections import LineCollection
+    except ImportError:
+        print("Matplotlib not available for visualization")
+        return
+    
+    # Convert to numpy if tensor
+    if hasattr(points, 'numpy'):
+        points = points.numpy()
+    
+    # Filter out invalid indices
+    num_vertices = len(points)
+    valid_pred_guards = [idx for idx in pred_guards if 0 <= idx < num_vertices] if pred_guards else []
+    valid_true_guards = [idx for idx in true_guards if 0 <= idx < num_vertices] if true_guards else []
+    
+    # Report any invalid indices
+    if pred_guards:
+        invalid_pred = [idx for idx in pred_guards if idx < 0 or idx >= num_vertices]
+        if invalid_pred:
+            print(f"Warning: Invalid predicted guard indices {invalid_pred} for polygon with {num_vertices} vertices")
+    
+    if true_guards:
+        invalid_true = [idx for idx in true_guards if idx < 0 or idx >= num_vertices]
+        if invalid_true:
+            print(f"Warning: Invalid true guard indices {invalid_true} for polygon with {num_vertices} vertices")
+    
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    
+    # Draw polygon
+    polygon = patches.Polygon(points, fill=False, edgecolor='black', linewidth=2)
+    ax.add_patch(polygon)
+    
+    # Plot all vertices as small dots
+    ax.scatter(points[:, 0], points[:, 1], c='lightgray', s=20, alpha=0.7, label='Vertices')
+    
+    # Plot predicted guards (only valid indices)
+    if valid_pred_guards:
+        pred_points = points[valid_pred_guards]
+        ax.scatter(pred_points[:, 0], pred_points[:, 1], c='red', s=100, 
+                  marker='^', label=f'Predicted Guards ({len(valid_pred_guards)})', alpha=0.8)
+    
+    # Plot true guards (only valid indices)
+    if valid_true_guards:
+        true_points = points[valid_true_guards]
+        ax.scatter(true_points[:, 0], true_points[:, 1], c='green', s=80, 
+                  marker='o', label=f'Optimal Guards ({len(valid_true_guards)})', alpha=0.8)
+    
+    # Calculate coverage and overlap using original lists (for reporting)
+    if pred_guards and true_guards:
+        overlap = len(set(pred_guards).intersection(set(true_guards)))
+        coverage = overlap / len(true_guards) if len(true_guards) > 0 else 0.0
+        size_ratio = len(pred_guards) / len(true_guards) if len(true_guards) > 0 else 0.0
+        title = f"{name} (Vertices: {num_vertices})\nCoverage: {coverage:.2f} | Size Ratio: {size_ratio:.2f} | Overlap: {overlap}"
+        if len(valid_pred_guards) < len(pred_guards):
+            title += f"\nNote: {len(pred_guards) - len(valid_pred_guards)} invalid pred indices"
+    else:
+        title = f"{name} (Vertices: {num_vertices})\nPred: {len(pred_guards) if pred_guards else 0} | True: {len(true_guards) if true_guards else 0}"
+    
+    ax.set_title(title, fontsize=12)
+    ax.set_aspect('equal')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Visualization saved to {save_path}")
+    else:
+        plt.show()
+    
+    plt.close()
+
 # --- Supervised Training Loop ---
 def supervised_train(model, dataset, epochs=10, batch_size=128, lr=1e-3):
     print(f"\n--- Supervised Training on {len(dataset)} samples for {epochs} epochs (batch size {batch_size}) ---")
@@ -172,6 +247,23 @@ def supervised_train(model, dataset, epochs=10, batch_size=128, lr=1e-3):
             # Forward pass: model should return (selected_idxs, log_probs)
             selected_idxs, log_probs = model(batch_data, padding_mask=mask, lengths=lengths)
             
+            # Validate model outputs during training - Pointer Network should only output valid indices
+            for i, (pred_indices, length, name) in enumerate(zip(selected_idxs, lengths, batch_names)):
+                max_valid_idx = length.item() - 1
+                eos_idx = length.item()  # EOS token is at position equal to sequence length
+                
+                # Filter out EOS token from predictions and validate remaining indices
+                valid_pred_indices = [idx for idx in pred_indices if idx != eos_idx]
+                invalid_indices = [idx for idx in valid_pred_indices if idx < 0 or idx > max_valid_idx]
+                
+                if invalid_indices:
+                    print(f"🚨 TRAINING ERROR: Sample {name} (length {length.item()}) produced invalid indices: {invalid_indices}")
+                    print(f"   Valid range: [0, {max_valid_idx}], EOS: {eos_idx}, Predicted: {pred_indices}")
+                    print(f"   This indicates a bug in the Pointer Network implementation!")
+                
+                # Update selected_idxs to remove EOS tokens for loss computation
+                selected_idxs[i] = valid_pred_indices
+            
             # Simplified supervised loss: use the log probabilities from the model
             # The model already computed log probabilities for the selected sequences
             # We want to maximize the probability of sequences that match the targets better
@@ -208,20 +300,21 @@ def supervised_train(model, dataset, epochs=10, batch_size=128, lr=1e-3):
             torch.cuda.empty_cache()
             import gc
             gc.collect()
-        avg_loss = total_loss / len(dataset)
-        if use_tqdm:
-            epoch_iter.set_postfix({'Avg loss': f'{avg_loss:.4f}'})
-        else:
-            print(f"Epoch {epoch+1}/{epochs} - Avg loss: {avg_loss:.4f}")
         
-        # Report detailed metrics every 10th epoch
-        if (epoch + 1) % 10 == 0:
-            print(f"\n📊 Training Set Metrics (Epoch {epoch+1}):")
-            train_loss, train_coverage, train_size_ratio = compute_dataset_metrics(model, dataset, batch_size=batch_size, device=device)
-            print(f"  Loss: {train_loss:.4f}")
-            print(f"  Coverage: {train_coverage:.3f} ({train_coverage*100:.1f}%)")
-            print(f"  Size Ratio (pred/target): {train_size_ratio:.2f}")
-            model.train()  # Set back to training mode
+        avg_loss = total_loss / len(dataset)
+        
+        # Compute metrics every epoch
+        train_loss, train_coverage, train_size_ratio = compute_dataset_metrics(model, dataset, batch_size=batch_size, device=device)
+        model.train()  # Set back to training mode
+        
+        if use_tqdm:
+            epoch_iter.set_postfix({
+                'loss': f'{avg_loss:.4f}',
+                'cov': f'{train_coverage:.3f}',
+                'ratio': f'{train_size_ratio:.2f}'
+            })
+        else:
+            print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} | Coverage: {train_coverage:.3f} | Ratio: {train_size_ratio:.2f}")
         
         torch.cuda.empty_cache()
     print("Supervised training done.")
@@ -262,6 +355,11 @@ def compute_dataset_metrics(model, dataset, batch_size=32, device=None):
             lengths = torch.tensor(lengths, dtype=torch.long, device=device)
             selected_idxs, log_probs = model(batch_data, padding_mask=mask, lengths=lengths)
             
+            # Filter out EOS tokens from predictions
+            for i, length in enumerate(lengths):
+                eos_idx = length.item()
+                selected_idxs[i] = [idx for idx in selected_idxs[i] if idx != eos_idx]
+            
             # Compute loss (same as training)
             loss = torch.tensor(0.0, device=device, requires_grad=False)
             for i, (pred_indices, target_indices) in enumerate(zip(selected_idxs, targets)):
@@ -298,7 +396,7 @@ def compute_dataset_metrics(model, dataset, batch_size=32, device=None):
     
     return avg_loss, avg_coverage, avg_size_ratio
 
-def supervised_eval(model, dataset, batch_size=1):
+def supervised_eval(model, dataset, batch_size=1, debug=False):
     print(f"\n--- Evaluation on {len(dataset)} validation samples (batch size {batch_size}) ---")
     model.eval()
     
@@ -314,12 +412,14 @@ def supervised_eval(model, dataset, batch_size=1):
     device = next(model.parameters()).device
     
     # Statistics for whisker plots
-    pred_sizes = []
-    true_sizes = []
     coverage_ratios = []  # What fraction of optimal guards are covered by predicted guards
-    efficiency_ratios = []  # What fraction of predicted guards are in the optimal set
     size_ratios = []  # predicted_size / optimal_size
-    overlap_counts = []  # absolute number of overlapping guards
+    
+    # Debug mode setup
+    if debug:
+        os.makedirs('debug_visualizations', exist_ok=True)
+        vis_count = 0
+        max_visualizations = 10
     
     with torch.no_grad():
         batch_count = 0
@@ -337,16 +437,32 @@ def supervised_eval(model, dataset, batch_size=1):
             lengths = torch.tensor(lengths, dtype=torch.long, device=device)
             selected_idxs, log_probs = model(batch_data, padding_mask=mask, lengths=lengths)
             
-            # Debug: Print first few predictions
-            if batch_count < 3:
-                print(f"\n🔍 Debug - Batch {batch_count}:")
+            # Validate model outputs - Pointer Network should only output valid indices
+            for i, (pred_indices, length, name) in enumerate(zip(selected_idxs, lengths, batch_names)):
+                max_valid_idx = length.item() - 1
+                eos_idx = length.item()  # EOS token is at position equal to sequence length
+                
+                # Filter out EOS token from predictions and validate remaining indices
+                valid_pred_indices = [idx for idx in pred_indices if idx != eos_idx]
+                invalid_indices = [idx for idx in valid_pred_indices if idx < 0 or idx > max_valid_idx]
+                
+                if invalid_indices:
+                    print(f"🚨 MODEL ERROR: Sample {name} (length {length.item()}) produced invalid indices: {invalid_indices}")
+                    print(f"   Valid range: [0, {max_valid_idx}], EOS: {eos_idx}, Predicted: {pred_indices}")
+                
+                # Update selected_idxs to remove EOS tokens
+                selected_idxs[i] = valid_pred_indices
+            
+            # Create visualizations if in debug mode
+            if debug and batch_count < 3:
                 for i, (pred_indices, true_indices, name) in enumerate(zip(selected_idxs[:2], targets[:2], batch_names[:2])):
-                    print(f"  Sample {name}:")
-                    print(f"    Predicted: {pred_indices} (count: {len(pred_indices)})")
-                    print(f"    True: {true_indices} (count: {len(true_indices)})")
-                    if len(pred_indices) > 0 and len(true_indices) > 0:
-                        coverage = len(set(pred_indices).intersection(set(true_indices))) / len(true_indices)
-                        print(f"    Coverage: {coverage:.3f}")
+                    # Create visualization
+                    if vis_count < max_visualizations:
+                        # Get original points (move to CPU)
+                        points = batch_data[i].cpu()
+                        save_path = f"debug_visualizations/{name}_guards.png"
+                        visualize_polygon_with_guards(points, pred_indices, true_indices, name, save_path)
+                        vis_count += 1
             batch_count += 1
             
             for pred_indices, true_indices, name in zip(selected_idxs, targets, batch_names):
@@ -361,22 +477,18 @@ def supervised_eval(model, dataset, batch_size=1):
                 # Coverage: what fraction of optimal guards are covered
                 coverage_ratio = overlap_count / true_size if true_size > 0 else 0.0
                 
-                # Efficiency: what fraction of predicted guards are optimal
-                efficiency_ratio = overlap_count / pred_size if pred_size > 0 else 0.0
-                
                 # Size ratio: how many times larger is the prediction vs optimal
                 size_ratio = pred_size / true_size if true_size > 0 else float('inf')
                 
-                pred_sizes.append(pred_size)
-                true_sizes.append(true_size)
                 coverage_ratios.append(coverage_ratio)
-                efficiency_ratios.append(efficiency_ratio)
                 size_ratios.append(size_ratio)
-                overlap_counts.append(overlap_count)
     
     # Compute statistics for whisker plots
     def compute_stats(data, name):
         data = np.array(data)
+        if len(data) == 0:
+            return {key: float('nan') for key in ['mean', 'median', 'std', 'min', 'max', 'q25', 'q75', 'iqr']}
+        
         stats = {
             'mean': np.mean(data),
             'median': np.median(data),
@@ -399,35 +511,27 @@ def supervised_eval(model, dataset, batch_size=1):
         return stats
     
     print("\n=== EVALUATION RESULTS ===")
-    size_stats = compute_stats(pred_sizes, "Predicted Solution Sizes")
-    optimal_stats = compute_stats(true_sizes, "Optimal Solution Sizes")
     coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of optimal guards found)")
-    efficiency_stats = compute_stats(efficiency_ratios, "Efficiency Ratios (fraction of predicted guards that are optimal)")
     ratio_stats = compute_stats(size_ratios, "Size Ratios (predicted/optimal)")
-    overlap_stats = compute_stats(overlap_counts, "Overlap Counts (absolute number of matching guards)")
     
     # Summary metrics
     print(f"\n=== SUMMARY ===")
-    print(f"Instances evaluated: {len(pred_sizes)}")
+    print(f"Instances evaluated: {len(coverage_ratios)}")
     print(f"Perfect solutions (100% coverage): {sum(1 for c in coverage_ratios if c >= 1.0)}")
     print(f"Good solutions (>=80% coverage): {sum(1 for c in coverage_ratios if c >= 0.8)}")
     print(f"Reasonable solutions (>=60% coverage): {sum(1 for c in coverage_ratios if c >= 0.6)}")
+    print(f"Average coverage: {np.mean(coverage_ratios):.3f}")
     print(f"Average size inflation: {np.mean(size_ratios):.2f}x optimal")
     
+    if debug:
+        print(f"\n📊 Debug mode: {vis_count} visualizations saved to debug_visualizations/")
+    
     return {
-        'pred_sizes': pred_sizes,
-        'true_sizes': true_sizes,
         'coverage_ratios': coverage_ratios,
-        'efficiency_ratios': efficiency_ratios,
         'size_ratios': size_ratios,
-        'overlap_counts': overlap_counts,
         'stats': {
-            'size_stats': size_stats,
-            'optimal_stats': optimal_stats,
             'coverage_stats': coverage_stats,
-            'efficiency_stats': efficiency_stats,
-            'ratio_stats': ratio_stats,
-            'overlap_stats': overlap_stats
+            'ratio_stats': ratio_stats
         }
     }
 
@@ -455,6 +559,7 @@ def main():
         parser.add_argument('--agp_train_dir', type=str, default=default_train)
         parser.add_argument('--agp_val_dir', type=str, default=default_val)
         parser.add_argument('--train-size', type=int, default=8000, help="Number of training samples to use (default: 8000, or all if smaller)")
+        parser.add_argument('--debug', action='store_true', help="Enable debug mode with visualizations")
         args = parser.parse_args()
 
         print(f"Arguments: {args}")
@@ -475,7 +580,29 @@ def main():
 
         size = args.train_size
         small_train_dataset = train_dataset if len(train_dataset) <= size else train_dataset[:size]
-        small_val_dataset = val_dataset if len(val_dataset) <= size else val_dataset[:size]
+        
+        # For validation, include rand-8-8 if it exists, plus a few others
+        small_val_dataset = []
+        rand_8_8_found = False
+        for sample in val_dataset:
+            if sample.name == 'rand-8-8':
+                small_val_dataset.append(sample)
+                rand_8_8_found = True
+                print(f"✓ Found rand-8-8 sample in validation set!")
+                break
+        
+        # Add a few more samples if we haven't reached the size limit
+        for sample in val_dataset:
+            if len(small_val_dataset) >= min(10, len(val_dataset)):
+                break
+            if sample.name != 'rand-8-8':  # Don't add rand-8-8 twice
+                small_val_dataset.append(sample)
+        
+        if not rand_8_8_found:
+            print(f"⚠️ rand-8-8 not found in validation set!")
+            small_val_dataset = val_dataset if len(val_dataset) <= size else val_dataset[:size]
+        else:
+            print(f"Using validation set with {len(small_val_dataset)} samples including rand-8-8")
 
         print("Starting supervised training...")
         supervised_train(agp_model, small_train_dataset, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr)
@@ -499,7 +626,7 @@ def main():
         }, checkpoint_path)
         print(f"Model saved to {checkpoint_path}")
         
-        eval_results = supervised_eval(agp_model, small_val_dataset, batch_size=1)
+        eval_results = supervised_eval(agp_model, small_val_dataset, batch_size=1, debug=args.debug)
         print("Evaluation complete.")
         
         # Optionally save results for further analysis
@@ -508,10 +635,15 @@ def main():
             'args': vars(args),
             'num_train_samples': len(small_train_dataset),
             'num_val_samples': len(small_val_dataset),
-            'coverage_stats': eval_results['stats']['coverage_stats'],
-            'efficiency_stats': eval_results['stats']['efficiency_stats'],
-            'size_ratio_stats': eval_results['stats']['ratio_stats']
+            'training_method': 'supervised_learning'
         }
+        
+        # Add statistics if available
+        if 'stats' in eval_results and eval_results['stats']:
+            if 'coverage_stats' in eval_results['stats']:
+                results_summary['coverage_stats'] = eval_results['stats']['coverage_stats']
+            if 'ratio_stats' in eval_results['stats']:
+                results_summary['size_ratio_stats'] = eval_results['stats']['ratio_stats']
         
         # Save to results directory
         os.makedirs('results', exist_ok=True)

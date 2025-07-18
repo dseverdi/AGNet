@@ -119,32 +119,41 @@ class PointerNet(nn.Module):
         
         self.eos_token = -1  # EOS index (will be appended to input)
         
-    def apply_mask_to_logits(self, logits, mask, idxs, eos_position=None): 
+    def apply_mask_to_logits(self, logits, mask, idxs, lengths=None): 
         batch_size = logits.size(0)
         # Create a new mask to avoid in-place modifications
         clone_mask = mask.clone()
         # Mask already-selected indices
         if idxs is not None:
             clone_mask[torch.arange(batch_size), idxs] = True
-        # Ensure EOS remains unmasked so there's always at least one valid choice
-        if eos_position is not None:
-            clone_mask[:, eos_position] = False
+        
+        # For each sample, ensure its EOS position remains unmasked
+        if lengths is not None:
+            for b in range(batch_size):
+                actual_len = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                eos_pos = actual_len  # EOS position for this sample
+                clone_mask[b, eos_pos] = False  # Ensure EOS is unmasked for this sample
+        
         # Check if any sample has all positions masked except EOS
-        # If so, ensure at least EOS is available
         for b in range(batch_size):
-            if clone_mask[b].sum() == clone_mask.size(1) - 1:  # All but one position masked
-                if eos_position is not None:
-                    clone_mask[b, eos_position] = False  # Ensure EOS is unmasked
+            if lengths is not None:
+                actual_len = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                eos_pos = actual_len
+                if clone_mask[b].sum() == clone_mask.size(1) - 1:  # All but one position masked
+                    clone_mask[b, eos_pos] = False  # Ensure EOS is unmasked
+        
         # Apply mask to logits
         masked_logits = logits.masked_fill(clone_mask, float('-inf'))
         
         # Additional safety: ensure no row has all -inf values
         for b in range(batch_size):
             if torch.all(torch.isinf(masked_logits[b]) & (masked_logits[b] < 0)):
-                # If all values are -inf, unmask EOS position
-                if eos_position is not None:
-                    masked_logits[b, eos_position] = logits[b, eos_position]
-                    clone_mask[b, eos_position] = False
+                # If all values are -inf, unmask EOS position for this sample
+                if lengths is not None:
+                    actual_len = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                    eos_pos = actual_len
+                    masked_logits[b, eos_pos] = logits[b, eos_pos]
+                    clone_mask[b, eos_pos] = False
                 else:
                     # Fallback: unmask the first position
                     masked_logits[b, 0] = logits[b, 0]
@@ -164,6 +173,7 @@ class PointerNet(nn.Module):
         batch_size = inputs.size(0)
         seq_len = inputs.size(1)
         device = inputs.device
+        
         # Add EOS token to input (as zeros)
         eos_vec = torch.zeros(batch_size, 1, 2, device=inputs.device)
         inputs_ext = torch.cat([inputs, eos_vec], dim=1)  # [B, N+1, 2]
@@ -175,10 +185,10 @@ class PointerNet(nn.Module):
             packed_embedded = nn.utils.rnn.pack_padded_sequence(embedded, enc_lengths, batch_first=True, enforce_sorted=False)
             packed_outputs, (hidden, context) = self.encoder(packed_embedded)
             encoder_outputs, _ = nn.utils.rnn.pad_packed_sequence(packed_outputs, batch_first=True, total_length=seq_len+1)
+            
         else:
             encoder_outputs, (hidden, context) = self.encoder(embedded)
         total_len = seq_len + 1  # including shared EOS
-        eos_position = seq_len  # EOS is always at the end
         # Build mask: True for masked (invalid), False for valid
         if padding_mask is not None:
             pad = ~padding_mask  # True for padded positions
@@ -186,6 +196,15 @@ class PointerNet(nn.Module):
             mask = torch.cat([pad, pad_eos], dim=1)
         else:
             mask = torch.zeros(batch_size, total_len, dtype=torch.bool, device=device)
+        
+        # For each sample, mask positions beyond its actual sequence length
+        if lengths is not None:
+            for b in range(batch_size):
+                actual_len = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                # Mask positions beyond actual_len (but leave EOS at actual_len unmasked)
+                if actual_len + 1 < total_len:
+                    mask[b, actual_len + 1:] = True
+        
         idxs = None
         decoder_input = self.decoder_start_input.unsqueeze(0).repeat(batch_size, 1)
         output_idxs = [[] for _ in range(batch_size)]
@@ -197,28 +216,37 @@ class PointerNet(nn.Module):
             query = hidden.squeeze(0)
             for _ in range(self.n_glimpses):
                 ref, logits = self.glimpse(query, encoder_outputs)
-                logits, mask = self.apply_mask_to_logits(logits, mask, idxs, eos_position)
+                logits, mask = self.apply_mask_to_logits(logits, mask, idxs, lengths)
                 logits = logits / self.temperature
                 query = torch.bmm(ref, F.softmax(logits, dim=1).unsqueeze(2)).squeeze(2)
             _, logits = self.pointer(query, encoder_outputs)
-            logits, mask = self.apply_mask_to_logits(logits, mask, idxs, eos_position)
+            logits, mask = self.apply_mask_to_logits(logits, mask, idxs, lengths)
             # Safety: if all logits are -inf for a sample, unmask EOS
             for b in range(batch_size):
+                actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
                 if torch.all(torch.isinf(logits[b]) & (logits[b] < 0)):
-                    logits[b, eos_position] = 0.0  # Only EOS is valid
+                    logits[b, actual_eos] = 0.0  # Only EOS for this sample is valid
             probs = F.softmax(logits, dim=1)
-            # Safety: replace any NaN rows with one-hot on EOS
+            # Safety: replace any NaN rows with one-hot on their respective EOS
             nan_rows = torch.isnan(probs).any(dim=1)
             if nan_rows.any():
                 probs[nan_rows] = 0.0
-                probs[nan_rows, eos_position] = 1.0
+                # Set EOS for each NaN row based on their individual lengths
+                if lengths is not None:
+                    for b in range(batch_size):
+                        if nan_rows[b]:
+                            actual_eos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                            probs[b, actual_eos] = 1.0
             idxs = probs.multinomial(1).squeeze(1)
+            
             for b in range(batch_size):
                 if not finished[b]:
                     output_idxs[b].append(idxs[b].item())
                     log_prob = torch.log(probs[b, idxs[b]])
                     log_probs_list[b].append(log_prob)
-                    if idxs[b].item() == eos_position:
+                    # Check if this sample reached its EOS
+                    actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
+                    if idxs[b].item() == actual_eos:
                         finished[b] = True
             selected_mask = F.one_hot(idxs, total_len).bool()
             mask = mask | selected_mask
