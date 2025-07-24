@@ -558,7 +558,7 @@ def main():
         default_val = os.path.join(DATASET_PATH, "dev")
         parser.add_argument('--agp_train_dir', type=str, default=default_train)
         parser.add_argument('--agp_val_dir', type=str, default=default_val)
-        parser.add_argument('--train-size', type=int, default=8000, help="Number of training samples to use (default: 8000, or all if smaller)")
+        parser.add_argument('--train-size', type=int, default=None, help="Number of training samples to use (default: all)")
         parser.add_argument('--debug', action='store_true', help="Enable debug mode with visualizations")
         args = parser.parse_args()
 
@@ -579,30 +579,17 @@ def main():
         print("Model created.")
 
         size = args.train_size
-        small_train_dataset = train_dataset if len(train_dataset) <= size else train_dataset[:size]
-        
-        # For validation, include rand-8-8 if it exists, plus a few others
-        small_val_dataset = []
-        rand_8_8_found = False
-        for sample in val_dataset:
-            if sample.name == 'rand-8-8':
-                small_val_dataset.append(sample)
-                rand_8_8_found = True
-                print(f"✓ Found rand-8-8 sample in validation set!")
-                break
-        
-        # Add a few more samples if we haven't reached the size limit
-        for sample in val_dataset:
-            if len(small_val_dataset) >= min(10, len(val_dataset)):
-                break
-            if sample.name != 'rand-8-8':  # Don't add rand-8-8 twice
-                small_val_dataset.append(sample)
-        
-        if not rand_8_8_found:
-            print(f"⚠️ rand-8-8 not found in validation set!")
-            small_val_dataset = val_dataset if len(val_dataset) <= size else val_dataset[:size]
+        if size is None:
+            small_train_dataset = train_dataset
         else:
-            print(f"Using validation set with {len(small_val_dataset)} samples including rand-8-8")
+            small_train_dataset = train_dataset if len(train_dataset) <= size else train_dataset[:size]
+        
+        # Use all validation samples by default, or limit if specified
+        val_size = None  # Change to an argument if you want to specify
+        if val_size is None:
+            small_val_dataset = val_dataset
+        else:
+            small_val_dataset = val_dataset if len(val_dataset) <= val_size else val_dataset[:val_size]
 
         print("Starting supervised training...")
         supervised_train(agp_model, small_train_dataset, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr)

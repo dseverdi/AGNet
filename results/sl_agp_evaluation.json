@@ -5,35 +5,35 @@
     "n_glimpses": 1,
     "tanh_exploration": 10,
     "use_tanh": true,
-    "epochs": 1,
-    "batch_size": 2,
+    "epochs": 30,
+    "batch_size": 128,
     "lr": 0.001,
     "agp_train_dir": "/home/dseverdi/Radno/MLAG/dataset/AGPIL/train",
     "agp_val_dir": "/home/dseverdi/Radno/MLAG/dataset/AGPIL/dev",
-    "train_size": 5,
+    "train_size": 8000,
     "debug": false
   },
-  "num_train_samples": 5,
+  "num_train_samples": 8000,
   "num_val_samples": 10,
   "training_method": "supervised_learning",
   "coverage_stats": {
-    "mean": 0.45099384644689977,
-    "median": 0.3265720081135903,
-    "std": 0.33413865578461205,
+    "mean": 0.0,
+    "median": 0.0,
+    "std": 0.0,
     "min": 0.0,
-    "max": 1.0,
-    "q25": 0.19744318181818182,
-    "q75": 0.7388888888888889,
-    "iqr": 0.541445707070707
+    "max": 0.0,
+    "q25": 0.0,
+    "q75": 0.0,
+    "iqr": 0.0
   },
   "size_ratio_stats": {
-    "mean": 3.0437979283447416,
-    "median": 3.235294117647059,
-    "std": 2.3348474987006655,
+    "mean": 0.0058823529411764705,
+    "median": 0.0,
+    "std": 0.01764705882352941,
     "min": 0.0,
-    "max": 8.0,
-    "q25": 1.1829937304075235,
-    "q75": 4.25,
-    "iqr": 3.0670062695924765
+    "max": 0.058823529411764705,
+    "q25": 0.0,
+    "q75": 0.0,
+    "iqr": 0.0
   }
 }
