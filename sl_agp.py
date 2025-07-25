@@ -1,4 +1,7 @@
 import os
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
+
 from dotenv import load_dotenv
 import argparse
 from dataset import Dataset, agp_read_samples, collate_fn
@@ -8,6 +11,8 @@ from torch.utils.data import DataLoader, Sampler
 import numpy as np
 import sys
 from functools import partial
+
+
 
 nn = torch.nn
 F = torch.nn.functional
