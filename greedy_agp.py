@@ -257,7 +257,7 @@ def greedy_eval_comprehensive(pol_files, agp_val_dir, normalize=True, verbose=Fa
     if len(pred_sizes) > 0:
         size_stats = compute_stats(pred_sizes, "Greedy Solution Sizes")
         optimal_stats = compute_stats(true_sizes, "Optimal Solution Sizes")
-        coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of optimal guards found)")
+        coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of covered polygon area)")
         efficiency_stats = compute_stats(efficiency_ratios, "Efficiency Ratios (fraction of greedy guards that are optimal)")
         ratio_stats = compute_stats(size_ratios, "Size Ratios (greedy/optimal)")
         overlap_stats = compute_stats(overlap_counts, "Overlap Counts (absolute number of matching guards)")

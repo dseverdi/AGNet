@@ -1,6 +1,5 @@
 import os
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1" 
 
 from dotenv import load_dotenv
 import argparse
@@ -516,7 +515,7 @@ def supervised_eval(model, dataset, batch_size=1, debug=False):
         return stats
     
     print("\n=== EVALUATION RESULTS ===")
-    coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of optimal guards found)")
+    coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of covered polygon area)")
     ratio_stats = compute_stats(size_ratios, "Size Ratios (predicted/optimal)")
     
     # Summary metrics
