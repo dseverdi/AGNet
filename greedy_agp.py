@@ -156,12 +156,12 @@ def read_single_pol_file(path, normalize=False):
             points_tensor = (points_tensor - min_xy) / denom
         return points_tensor
 
-def process_single_sample(pol_path, normalize, agp_val_dir, verbose):
+def process_single_sample(pol_path, normalize, agp_val_dir, verbose, coverage_threshold=1.0):
     import numpy as np
     try:
         points = read_single_pol_file(pol_path, normalize=normalize)
         n_vertices = len(points)
-        guards, coverages = greedy_guard_selection_fast(points.numpy(), verbose=verbose, name=pol_path)
+        guards, coverages = greedy_guard_selection_fast(points.numpy(), verbose=verbose, name=pol_path, coverage_threshold=coverage_threshold)
         final_coverage = coverages[-1] if coverages else 0.0
         rel_size = len(guards) / float(n_vertices) if n_vertices > 0 else float('nan')
         # --- Optimal solution comparison ---
@@ -193,7 +193,7 @@ def process_single_sample(pol_path, normalize, agp_val_dir, verbose):
         print(f"[ERROR] Sample: {os.path.basename(pol_path)} | Guards: nan | Opt: nan | Coverage: nan | Exception: {e}")
         return (pol_path, float('nan'), float('nan'), float('nan'), float('nan'))
 
-def greedy_eval_comprehensive(pol_files, agp_val_dir, normalize=True, verbose=False):
+def greedy_eval_comprehensive(pol_files, agp_val_dir, normalize=True, verbose=False, coverage_threshold=1.0):
     """Comprehensive evaluation of greedy algorithm with whisker plot statistics."""
     print(f"\n--- Comprehensive Greedy Evaluation on {len(pol_files)} samples ---")
     
@@ -210,7 +210,7 @@ def greedy_eval_comprehensive(pol_files, agp_val_dir, normalize=True, verbose=Fa
     print(f"Processing {total_samples} samples...")
     
     with ProcessPoolExecutor() as executor:
-        futures = [executor.submit(process_comprehensive_sample, pol_path, normalize, agp_val_dir, verbose) for pol_path in pol_files]
+        futures = [executor.submit(process_comprehensive_sample, pol_path, normalize, agp_val_dir, verbose, coverage_threshold) for pol_path in pol_files]
         
         for i, future in enumerate(as_completed(futures)):
             result = future.result()
@@ -257,7 +257,7 @@ def greedy_eval_comprehensive(pol_files, agp_val_dir, normalize=True, verbose=Fa
     if len(pred_sizes) > 0:
         size_stats = compute_stats(pred_sizes, "Greedy Solution Sizes")
         optimal_stats = compute_stats(true_sizes, "Optimal Solution Sizes")
-        coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of covered polygon area)")
+        coverage_stats = compute_stats(coverage_ratios, "Guard Set Coverage Ratios (fraction of optimal guards covered by greedy guards)")
         efficiency_stats = compute_stats(efficiency_ratios, "Efficiency Ratios (fraction of greedy guards that are optimal)")
         ratio_stats = compute_stats(size_ratios, "Size Ratios (greedy/optimal)")
         overlap_stats = compute_stats(overlap_counts, "Overlap Counts (absolute number of matching guards)")
@@ -298,14 +298,14 @@ def greedy_eval_comprehensive(pol_files, agp_val_dir, normalize=True, verbose=Fa
         }
     }
 
-def process_comprehensive_sample(pol_path, normalize, agp_val_dir, verbose):
+def process_comprehensive_sample(pol_path, normalize, agp_val_dir, verbose, coverage_threshold=1.0):
     """Process a single sample for comprehensive evaluation."""
     try:
         points = read_single_pol_file(pol_path, normalize=normalize)
         n_vertices = len(points)
-        pred_indices, coverages = greedy_guard_selection_fast(points.numpy(), verbose=verbose, name=pol_path)
+        pred_indices, coverages = greedy_guard_selection_fast(points.numpy(), verbose=verbose, name=pol_path, coverage_threshold=coverage_threshold)
         final_coverage = coverages[-1] if coverages else 0.0
-        
+
         # Read optimal solution for comparison
         base_name = os.path.splitext(os.path.basename(pol_path))[0]
         opt_sol_path = os.path.join(agp_val_dir, f"{base_name}.solution")
@@ -317,25 +317,25 @@ def process_comprehensive_sample(pol_path, normalize, agp_val_dir, verbose):
                     true_indices = [int(x) for x in lines[1].split()]
         except Exception:
             true_indices = []
-        
+
         if len(true_indices) > 0:
             pred_set = set(pred_indices)
             true_set = set(true_indices)
             overlap = pred_set.intersection(true_set)
-            
+
             pred_size = len(pred_indices)
             true_size = len(true_indices)
             overlap_count = len(overlap)
-            
+
             # Coverage: what fraction of optimal guards are covered
             coverage_ratio = overlap_count / true_size if true_size > 0 else 0.0
-            
+
             # Efficiency: what fraction of greedy guards are optimal
             efficiency_ratio = overlap_count / pred_size if pred_size > 0 else 0.0
-            
+
             # Size ratio: how many times larger is the greedy vs optimal
             size_ratio = pred_size / true_size if true_size > 0 else float('inf')
-            
+
             return (pred_size, true_size, coverage_ratio, efficiency_ratio, size_ratio, overlap_count, final_coverage)
         else:
             return None
@@ -357,6 +357,7 @@ def main():
     parser.add_argument('--normalize', action='store_true', default=True)
     parser.add_argument('--verbose', action='store_true', default=False)
     parser.add_argument('--comprehensive', action='store_true', default=True, help='Use comprehensive evaluation with whisker plot statistics')
+    parser.add_argument('--coverage-threshold', type=float, default=1.0, help='Stop greedy when polygon coverage >= threshold (0..1)')
     args = parser.parse_args()
 
     agp_dir = args.agp_val_dir
@@ -366,7 +367,7 @@ def main():
 
     if args.comprehensive:
         # Use comprehensive evaluation
-        eval_results = greedy_eval_comprehensive(pol_files, args.agp_val_dir, normalize=args.normalize, verbose=args.verbose)
+        eval_results = greedy_eval_comprehensive(pol_files, args.agp_val_dir, normalize=args.normalize, verbose=args.verbose, coverage_threshold=args.coverage_threshold)
         
         # Save evaluation results
         import json
@@ -403,7 +404,7 @@ def main():
         print(f"Processing {total_samples} samples in parallel...")
         suspicious_cases = []
         with ProcessPoolExecutor() as executor:
-            futures = [executor.submit(process_single_sample, pol_path, args.normalize, args.agp_val_dir, args.verbose) for pol_path in pol_files]
+            futures = [executor.submit(process_single_sample, pol_path, args.normalize, args.agp_val_dir, args.verbose, args.coverage_threshold) for pol_path in pol_files]
             all_results = []
             for i, future in enumerate(as_completed(futures)):
                 pol_path, num_guards, final_coverage, rel_size, rel_to_opt = future.result()
@@ -500,12 +501,12 @@ def visualize_greedy_vs_optimal(pol_path, greedy_idxs, greedy_vis_polys, opt_idx
         plt.show()
     plt.close(fig)
 
-def draw_all_greedy_vs_optimal(pol_files, agp_val_dir, rel_to_opts, out_dir=None):
+def draw_all_greedy_vs_optimal(pol_files, agp_val_dir, rel_to_opts, out_dir=None, coverage_threshold=1.0):
     # Sequential processing, no parallelism
     for pol_path, rel_to_opt in zip(pol_files, rel_to_opts):
         if rel_to_opt < 1.0:
             points = read_single_pol_file(pol_path, normalize=False).numpy()
-            greedy_idxs, _ = greedy_guard_selection_fast(points, name=pol_path)
+            greedy_idxs, _ = greedy_guard_selection_fast(points, name=pol_path, coverage_threshold=coverage_threshold)
             greedy_vis_polys, _ = precompute_visibility_polygons(points, pol_path)
             opt_idxs = get_optimal_solution_indices(pol_path, agp_val_dir)
             opt_vis_polys, _ = precompute_visibility_polygons(points, pol_path)

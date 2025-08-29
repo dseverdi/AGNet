@@ -6,9 +6,17 @@
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{hyperref}
+% Notation helpers
+\newcommand{\sinst}{s}
+\newcommand{\Vis}[2]{\mathrm{Vis}(#1 \mid #2)}
+\newcommand{\Covf}[2]{\mathrm{Cov}(#1 \mid #2)}
+\newcommand{\Area}[1]{\mathrm{Area}(#1)}
+\newcommand{\EOS}{\mathrm{EOS}}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\OPT}{\mathrm{OPT}}
 
 \title{Learning-Based Methods vs Greedy Heuristics for the Art Gallery Problem: A Comparative Study}
-\author{Author at al}
+\author{Domagoj Ševerdija \and Antonio Jovanović \and Nathan Chappel \and Domagoj Matijević  }
 \date{}
 
 \begin{document}
@@ -16,7 +24,7 @@
 \maketitle
 
 \begin{abstract}
-The \emph{Art Gallery Problem} (AGP) is a classic NP-hard problem in computational geometry, which involves placing the minimum number of guards in an art gallery (modeled as a polygon) such that the guards together can observe the entire area. In this paper, we present a comparative study of three approaches for solving the AGP: (1) a conventional greedy heuristic, (2) a reinforcement learning approach using the REINFORCE algorithm, and (3) a supervised learning approach using a deep neural network. We describe the methodological distinctions of these approaches and evaluate their performance on a common set of gallery floorplan instances. Key metrics of interest are the \emph{coverage} (fraction of area covered by the placed guards) and the \emph{relative guard set size} (the size of the guard set relative to the optimal minimum). Our experiments show that the greedy algorithm reliably achieves 100\% coverage with solutions on average only about 17\% larger than the optimum. The reinforcement learning (RL) approach can learn to place guards covering around 90\% of the area, but with larger variance and typically using about 1.5--3.4 times the optimal number of guards. The supervised learning approach attains high coverage on smaller instances (up to 95\% on average) but often uses significantly more guards (up to 20 times the optimum) and its coverage deteriorates on larger, unseen instances. We analyze the advantages and limitations of each approach and discuss the implications for using machine learning to tackle NP-hard geometric problems like the AGP.
+The \emph{Art Gallery Problem} (AGP) is a classic NP-hard problem in computational geometry, which involves placing the minimum number of guards in an art gallery (modeled as a polygon) such that the guards together can observe the entire area. In this paper, we present a comparative study of three approaches for solving the AGP: (1) a conventional greedy heuristic, (3) a supervised learning approach using a deep neural network, and (3) a reinforcement learning approach using the REINFORCE algorithm.  We describe the methodological distinctions of these approaches and evaluate their performance on a common set of gallery floorplan instances. Key metrics of interest are the \emph{coverage} (fraction of area covered by the placed guards) and the \emph{relative guard set size} (the size of the guard set relative to the optimal minimum). Our experiments show that the greedy algorithm reliably achieves 100\% coverage with solutions on average only about 17\% larger than the optimum. The supervised learning approach attains high coverage on smaller instances (up to 95\% on average) but often uses significantly more guards (up to 20 times the optimum) and its coverage deteriorates on larger, unseen instances. We analyze the advantages and limitations of each approach and discuss the implications for using machine learning to tackle NP-hard geometric problems like the AGP. The reinforcement learning (RL) approach can learn to place guards covering around 90\% of the area, but with larger variance and typically using about 1.5--3.4 times the optimal number of guards. 
 \end{abstract}
 
 \section{Introduction}
@@ -24,7 +32,7 @@ The Art Gallery Problem (AGP) is a well-known problem in computational geometry:
 
 Traditional approaches to AGP include exact methods such as integer programming and exhaustive search for small instances, as well as various heuristic and approximation algorithms for larger instances. One classical result is that $\lfloor n/3 \rfloor$ guards are always sufficient for covering a simple polygon of $n$ vertices (the Art Gallery Theorem) \cite{O'Rourke1987}, but finding the minimum required guards for a given layout is much harder. Greedy algorithms have been proposed that iteratively place guards to cover as much uncovered area as possible \cite{GonzalezBanos2001}, typically yielding a feasible (though not always optimal) solution in reasonable time.
 
-Recently, there has been growing interest in applying machine learning techniques to combinatorial optimization problems, including routing, scheduling, and covering problems \cite{Vinyals2015, Bello2016}. Such approaches aim to \emph{learn} heuristics or direct mappings from problem instances to solutions, potentially generalizing to new instances without solving each from scratch. In this paper, we explore two learning-based methods for the AGP: a reinforcement learning approach and a supervised learning approach, and compare them against a conventional greedy heuristic baseline.
+Recently, there has been growing interest in applying machine learning techniques to combinatorial optimization problems, including routing, scheduling, and covering problems \cite{Vinyals2015, Bello2016}. Such approaches aim to \emph{learn} heuristics or direct mappings from problem instances to solutions, potentially generalizing to new instances without solving each from scratch. In this paper, we explore two learning-based methods for the AGP: a supervised learning approach and a reinforcement learning approach, and compare them against a conventional greedy heuristic baseline.
 
 The reinforcement learning (RL) approach involves training a model (in our case, a form of \emph{pointer network} \cite{Vinyals2015}) to construct guard sets sequentially. The model is trained with a reward signal that encourages maximizing coverage of the polygon while penalizing excessive use of guards, using the REINFORCE policy gradient algorithm \cite{Williams1992}. The supervised learning approach involves training a deep neural network on example solutions (for smaller gallery instances where near-optimal solutions are known) to directly predict guard positions for new instances. 
 
@@ -32,84 +40,192 @@ Our contribution in this work is a systematic comparison of these three approach
 
 The remainder of the paper is organized as follows. In Section~\ref{sec:methods}, we describe each of the three methods in detail, highlighting the methodological distinctions. Section~\ref{sec:experiments} outlines the experimental setup, including the datasets of polygonal rooms and the evaluation metrics. We then present and discuss the results in Section~\ref{sec:results}, focusing on coverage and solution size comparisons across the methods. Section~\ref{sec:conclusion} concludes the paper with a summary of findings and perspectives on future work.
 
+
+\paragraph{Problem and Notation.} Let $s\subset\mathbb{R}^2$ denote a simple polygonal region (the closed set consisting of its interior and boundary), specified by an ordered vertex sequence $V(s)=(x_1,\dots,x_n)$ with $x_i\in\mathbb{R}^2$. A \emph{guard} is any point $g\in s$ with unobstructed $360^\circ$ visibility inside $s$. For any finite guard set $G\subseteq s$, define the visibility region and coverage
+\begin{equation}
+\Vis{G}{s} \,=\, \{\, q\in s : \exists g\in G,\ \overline{gq}\subseteq s \,\},
+\qquad
+\Covf{G}{s} \,=\, \frac{\Area{\Vis{G}{s}}}{\Area{s}}\in[0,1].
+\label{eq:vis-cov-general}
+\end{equation}
+The (point-guard) \emph{Art Gallery Problem (AGP)} asks for a minimum-cardinality guard set $G^*\subseteq s$ such that $\Covf{G^*}{s}=1$. We denote $\OPT=|G^*|$.
+
+In this paper we focus on the \emph{vertex-guard} variant, where guards must be chosen from the polygon's vertex set $V(s)=\{x_1,\dots,x_n\}$. We encode a solution by an index set $\pi\subseteq \{1,\dots,n\}$, corresponding to the guard set $G(\pi)=\{x_i: i\in\pi\}$. The visibility and coverage in \eqref{eq:vis-cov-general} then specialize to
+\begin{equation}
+\Vis{\pi}{s} \,=\, \{\, q \in s : \exists i \in \pi,\ \overline{x_i q} \subseteq s \,\},
+\qquad
+\Covf{\pi}{s} \,=\, \frac{\Area{\Vis{\pi}{s}}}{\Area{s}}\in[0,1].
+\label{eq:vis-cov}
+\end{equation}
+Let $\pi^\star$ be an optimal index set for the vertex-guard AGP and note that $|\pi^\star|\ge \OPT$. We report the approximation ratio $\rho=|\pi|/\OPT$ (and, when relevant, the normalized size $|\pi|/n$). In all learned policies, actions index vertices and include a distinguished $\EOS$ token to terminate sequences.
+
+
 \section{Methods}
 \label{sec:methods}
-In this section, we describe the three approaches compared in this study for solving the Art Gallery Problem: a greedy heuristic, a reinforcement learning method, and a supervised learning method. Each approach takes as input a polygon (the floorplan of the gallery) and produces a set of guard positions as output, but they differ significantly in how they determine these positions.
+In this section we describe the algorithmic and learning-based methods evaluated in this work. We first present the classical greedy heuristic used as a strong baseline. We then introduce a neural combinatorial framework for AGP solution construction, including the instance/solution encoding and two training paradigms: supervised learning and reinforcement learning.
 
-\subsection{Greedy Heuristic Baseline}
-The greedy algorithm serves as a baseline classical approach. Our implementation follows the general idea of covering the largest uncovered area first: at each step, place a guard at a location (typically a vertex of the polygon or another candidate point) that maximizes the newly covered area not yet seen by existing guards. The polygon is assumed to be polygonal and planar, and we compute the visibility polygon for each candidate guard position using standard computational geometry techniques. We repeat this process, adding one guard at a time, until the entire gallery area is covered. This heuristic does not guarantee a minimum guard set, but it often produces a solution that is reasonably close to optimal.
+\subsection{Greedy heuristic}
+The greedy heuristic is a classical, instance-specific algorithm that iteratively selects guard locations to maximize immediate coverage gain. We operate in the vertex-guard model: solutions are index sets $\pi\subseteq\{1,\dots,n\}$ and coverage is measured by $\Covf{\pi}{s}$ (see Section~1).
 
-We measure the performance of the greedy solution in terms of coverage and guard count. By construction, the greedy method continues until full coverage is achieved (100\% coverage of the polygon). However, the number of guards it uses can be larger than the optimal minimum. In our experiments, we found that the greedy algorithm's guard set size is on average about 1.17 times the optimal solution size, and never less than the optimum (as expected) nor more than twice the optimum in the instances tested. This aligns with the intuition that while greedy placement is not optimal, it is often within a factor of 2 of the minimum in practice. The greedy approach runs in polynomial time and was able to solve all test instances (polygons with up to a few hundred vertices) relatively quickly.
+At step $t$ the algorithm has a current index set $\pi_t$. The marginal gain of adding vertex index $i\notin\pi_t$ is
+\begin{equation}
+\Delta(i\mid \pi_t; s) \,=\, \Covf{\pi_t\cup\{i\}}{s} - \Covf{\pi_t}{s}.
+\end{equation}
+The greedy choice is
+\begin{equation}
+i_{t+1} \in \arg\max_{i\in\{1,\dots,n\}\setminus\pi_t} \Delta(i\mid\pi_t; s),
+\end{equation}
+and $\pi_{t+1}=\pi_t\cup\{i_{t+1}\}$. The procedure terminates when coverage reaches a threshold $\tau_c$ (typically 1), no vertex yields positive marginal gain, or a budget $B$ is reached. Ties are broken deterministically (e.g., by index order).
 
-\subsection{Reinforcement Learning Approach (REINFORCE)}
-For the reinforcement learning approach, we employ a neural network that incrementally constructs a set of guard positions, one guard at a time, similarly to how one might sequentially pick locations. We use a Pointer Network architecture \cite{Vinyals2015} that takes as input a representation of the polygon and outputs a sequence of points (guards). Each output step can be thought of as the network ``pointing'' to a location in the polygon to place a guard. The process continues until a stopping criterion is met (which can be learned or predefined, e.g., a maximum number of guards or a coverage threshold).
+The greedy method provides a simple, interpretable baseline with guaranteed monotone coverage increase per step; it requires visibility computations for all candidate vertices at every iteration and thus scales polynomially with $n$ depending on the visibility computation cost.
 
-Training this model is challenging because the optimal placement of guards is a combinatorial, non-differentiable objective. We therefore use a policy gradient reinforcement learning algorithm (REINFORCE \cite{Williams1992}) to train the network without direct supervised labels of where to place guards. The training is done on a distribution of random gallery instances (polygons), where after each episode (placement of a full guard sequence), the model receives a reward. The reward $R$ is designed to encourage maximal coverage and minimal number of guards, for example:
-\[ 
-R = \text{coverageFraction} - \alpha \times \frac{\text{numberOfGuards}}{\text{maxGuards}}, 
-\] 
-where the coverage fraction is the fraction of the polygon's area covered by the chosen guards, and the second term penalizes using more guards (with $\alpha$ being a weighting factor, and maxGuards a normalization constant or an estimate of an upper bound on guards). This reward structure balances the trade-off between coverage and using fewer guards. In practice, we normalize coverage to 1.0 for full coverage, and set $\alpha$ such that using the optimal number of guards for full coverage yields a high reward, while superfluous guards incur a penalty.
+\subsection{Neural combinatorial approach}
+We frame learning-based AGP solvers as neural combinatorial models that construct solutions sequentially. Our implementation follows the pointer-network style of sequence generation over the vertex set \cite{Vinyals2015}, with a specialized encoder for geometric input and a decoder that emits vertex indices or a termination ($\EOS$) token.
 
-We train the model on a set of training polygons (for instance, procedurally generated polygons or layouts) for a number of epochs. The training process gradually improves the policy, as indicated by increasing rewards and coverage. We observe that early in training, the model tends to place many guards (even covering redundant areas) to maximize coverage, whereas later it learns to be more efficient with guard placement. We applied curriculum training by increasing the complexity (size) of training polygons over time, which helped the model discover better strategies.
+\subsubsection{Instance and solution encoding}
+An instance is the polygonal region $s$ together with its ordered vertex sequence $V(s)=(x_1,\dots,x_n)$. We represent each vertex $x_i$ by its 2D coordinates and (optionally) auxiliary features (e.g., vertex internal angle, local concavity indicators). The encoder maps the set of vertex representations to a latent embedding per vertex; in practice we use a permutation-aware encoder (e.g., an RNN over the vertex order or a graph/transformer-style encoder) so that the decoder can attend over vertex embeddings.
 
-During evaluation (deployment), the trained RL model can produce a guard set for a new polygon instance by a forward pass through the network. Because of the stochastic nature of policy gradient training, the solution quality can vary between runs or different training sessions. We also note that the RL model does not always guarantee full coverage; it may terminate with a partial coverage solution if it has learned that adding more guards past a certain point yields diminishing reward. In our results, the best-trained RL model was able to cover on average around 82--90\% of the area of the gallery, with some solutions achieving 100% and some significantly less (in rare cases, under 10% if the model failed on a particularly complex layout). The number of guards used by the RL model's solutions was typically about 1.5 to 1.7 times the optimal guard count on average, though with a higher standard deviation and occasional outlier instances where the model either placed an excessive number of guards or too few (leading to poor coverage).
+A solution is an index sequence $\pi=(\pi_1,\dots,\pi_T)$ where each token $\pi_t\in\{1,\dots,n,\EOS\}$. The sequence induces the selected index set $\{\pi_t:\pi_t\ne\EOS\}$; repeated indices are idempotent and masking can be used to prevent duplicates when desired.
 
-It is possible to run the RL model multiple times on the same instance (or use a sampling/beam search approach) to generate multiple candidate solutions, and then select the best among them. In our study, we primarily evaluate the single-run output for fairness, but we also explored generating multiple solutions and using an auxiliary network to pick the best, as described next.
+\paragraph{Pointer network} Denote the encoder's per-vertex embeddings by
+$\{h_j\}_{j=1}^n$, computed from $V(s)=(x_1,\dots,x_n)$. The decoder defines an
+autoregressive distribution over index sequences by the chain rule
+\begin{equation}
+p_\theta(\pi\mid s) \,=\, \prod_{t=1}^{T} p_\theta(\pi_t\mid s,\pi_{<t}).
+\label{eq:chain-rule}
+\end{equation}
+At decoding step $t$ the decoder state is $d_t$ and each candidate index
+$j\in\{1,\dots,n\}$ is assigned an unnormalized score
+\begin{equation}
+u^t_j \,=\, v^\top \tanh(W_1 d_t + W_2 h_j), \qquad j=1,\dots,n,
+\label{eq:ptr-score}
+\end{equation}
+and the next-token distribution (including an explicit $\EOS$ choice) is
+computed with a softmax with temperature $\tau>0$
+\begin{equation}
+p_\theta(\pi_t=j\mid s,\pi_{<t}) \,=\, \mathrm{softmax}(u^t/\tau)_j.
+\label{eq:ptr-softmax}
+\end{equation}
+Invalid candidates (already-selected indices, padding) are masked before the
+softmax. This $p_\theta(\cdot\mid s)$ serves as the policy used by the
+supervised (maximum likelihood) and reinforcement-learning (REINFORCE)
+objectives below.
 
-\subsection{Supervised Learning Approach (CovNet Heuristic)}
+We mask invalid indices and the EOS during decoding, and optionally restrict or penalize repeated selections. The pointer network as a solution sampler can be used either as a direct generator (single rollout) or as a sampler producing multiple candidates later re-ranked by a learned or heuristic evaluator.
 
-We also experimented with a purely supervised approach where the model directly predicts a set of guard locations given a polygon, by training on the optimal guard sets of the training instances. For example, one can train a pointer network in a supervised manner (imitative learning) to output the sequence of guard positions used in an optimal solution. This requires a consistent ordering of guards in the solution for training, which is non-trivial because the optimal solution set has no inherent order. In practice, we sorted the guard positions by a heuristic criterion (e.g., left-to-right by coordinates) to create a target sequence for the pointer network. The supervised pointer network was then trained to output that sequence. While this approach did learn to predict reasonable guard positions for small polygons, it struggled to generalize to larger or more complex polygons not seen in training, often placing many extra guards in an attempt to cover the area. This resulted in high coverage but very large guard sets.
+Furthermore, we use the notation $\mathcal{D}$ to denote the instance source: either (i) the underlying distribution over polygon instances from which problems are sampled, or (ii) its empirical approximation (the finite training dataset) $\mathcal{S}_{\mathrm{train}}=\{s_i\}_{i=1}^N$ used in practice.
 
-Overall, the supervised learning approach (in either form) tends to prioritize coverage (since the training objective is to match or evaluate near-optimal coverage solutions), but without a direct mechanism to enforce minimality of the guard set, the learned models can end up using far more guards than necessary. In our tests on small polygons (similar in size to the training set), the supervised model's solutions cover about 87--95\% of the area on average, but the number of guards is several times the optimum (often an order of magnitude more for larger polygons). On larger polygons beyond the training distribution, the coverage achieved drops significantly (e.g., to around 59\% on average for very large polygons), indicating limits in the model's generalization.
+\subsubsection{Supervised learning}
+In the supervised paradigm we train the model to imitate example solutions (labels). Assuming a target mapping $s\mapsto \pi^*(s)$ (from optimal solutions), the training loss is the expected sequence-level negative log-likelihood:
+\begin{equation}
+J(\theta) \,=\, \mathbb{E}_{s\sim \mathcal{D}} \big[\, - \log p_\theta(\pi^*(s)\mid s) \,\big].
+\end{equation}
+unrolled with Eq.~\eqref{eq:chain-rule}. In practice, the expectation is minimized via its empirical average over the labeled training set.
+Supervised training requires labeled sequences; for vertex-guard AGP we obtain targets either from exact solvers (for small instances) or from greedy/high-quality heuristics. 
 
-\section{Experimental Setup}
-\label{sec:experiments}
-To evaluate and compare the three methods, we curated a set of test instances of the Art Gallery Problem. We used two categories of polygonal floorplans:
+\subsubsection{Reinforcement learning (REINFORCE)}
+To directly optimize coverage and guard-count trade-offs we adopt a policy-gradient formulation following \cite{Bello2016}. We use the stochastic policy $p_\theta(\pi\mid s)$ factorized as in Eq.~\eqref{eq:chain-rule}.
+ The task is maximizing expected reward. We denote by $R(\pi\mid s)$ the scalar reward assigned to sequence $\pi$ on instance $s$ (higher is better); in practice $R(\pi\mid s)$ combines coverage and guard-usage terms (see Eq.~\eqref{eq:reward-def}). The expected objective is
+\begin{equation}
+J(\theta)=\mathbb{E}_{s\sim\mathcal{D}}\,\mathbb{E}_{\pi\sim p_\theta(\cdot\mid s)}\big[ R(\pi\mid s) \big],
+\label{eq:exp-reward}
+\end{equation}
+Using the log-derivative trick (REINFORCE \cite{Williams1992}), the policy gradient is
+\begin{equation}
+\nabla_\theta J(\theta)=\mathbb{E}_{s,\pi}\big[ R(\pi\mid s)\,\nabla_\theta \log p_\theta(\pi\mid s) \big].
+\label{eq:reinforce}
+\end{equation}
+
+The Monte Carlo estimator in Eq.~\eqref{eq:reinforce} typically has high variance, which slows learning. A standard variance-reduction trick \cite{Barto} is to subtract any baseline $b(s)$ that does not depend on the sampled sequence $\pi$:
+\begin{equation}
+\nabla_\theta J(\theta) \,=\, \mathbb{E}_{s,\pi}\big[\, (R(\pi\mid s) - b(s))\, \nabla_\theta \log p_\theta(\pi\mid s) \,\big].
+\end{equation}
+ In practice we approximate $b(s)$ with a learned critic $b_\omega(s)$, yielding the empirical actor gradient in Eq.~\eqref{eq:mc-grad} and training the critic with the MSE loss in Eq.~\eqref{eq:critic-loss}.
+
+We use a smooth penalty-as-reward that trades off uncovered area and
+relative guard usage:
+\begin{equation}
+R(\pi\mid s) \,=\, -\Big[\, \big(1-\Covf{\pi}{s}+\eps\big)^{\alpha}\,\Big(\tfrac{|\pi|}{|V(s)|}+\eps\Big)^{p} \, + \, \delta\,\mathbf{1}\{\,1-\Covf{\pi}{s}>\delta_0\,\} \,\Big].
+\label{eq:reward-def}
+\end{equation}
+Here $\eps>0$ is a small smoothing constant to avoid zero gradients/numerical issues at the boundaries (coverage $=1$ or $|\pi|=0$); the exponent $p\ge1$ controls how strongly we penalize using many guards relative to uncovered area (larger $p$ increases the guard-count penalty); and the additive term $\delta\,\mathbf{1}\{1-\Covf{\pi}{s}>\delta_0\}$ imposes a fixed penalty whenever any area remains uncovered (tolerance $\delta_0$), pushing solutions toward full coverage. The exponent $\alpha\ge1$ similarly tunes sensitivity to uncovered area. Typical values: $\alpha,p\in[1,3]$, $\eps\in[10^{-6},10^{-3}]$, $\delta_0\approx10^{-6}$; $\delta$ is set large enough to discourage leaving tiny uncovered pockets.
+For training we use a Monte Carlo policy-gradient estimator with a learned state-value baseline (actor–critic). Drawing a batch $\{s_i\}_{i=1}^B$ and sampling one sequence per instance $\pi_i\sim p_\theta(\cdot\mid s_i)$, the gradient is approximated by
+\begin{equation}
+\nabla_\theta J(\theta) \;\approx\; \frac{1}{B} \sum_{i=1}^B \big( R(\pi_i\mid s_i) - b_\omega(s_i) \big)\, \nabla_\theta \log p_\theta(\pi_i\mid s_i).
+\label{eq:mc-grad}
+\end{equation}
+Accordingly, the empirical actor loss minimized on the batch is
+\begin{equation}
+\widehat{\mathcal{L}}(\theta) = -\frac{1}{B} \sum_{i=1}^B \big(R(\pi_i\mid s_i)-b_\omega(s_i)\big) \; \log p_\theta(\pi_i\mid s_i).
+\label{eq:emp-loss}
+\end{equation}
+Note $\log p_\theta(\pi\mid s)=\sum_{t=1}^{T} \log p_\theta(\pi_t\mid s,\pi_{<t})$ by the chain rule, linking this actor loss to the token-level cross-entropy used in supervised learning.
+The critic $b_\omega(s)$ is trained to regress the observed returns with a mean-squared error objective
+\begin{equation}
+\mathcal{L}_v(\omega) \,=\, \frac{1}{B} \sum_{i=1}^B \big( b_\omega(s_i) - R(\pi_i\mid s_i) \big)^2.
+\label{eq:critic-loss}
+\end{equation}
+
+
+\section{Experiments}
+
+
+\subsection*{Evaluation}
+We evaluate all three methods on public Art Gallery Problem vertex-guard instances from the AGPLIB library (AGPVG) curated by Couto, de Rezende, and de Souza\footnote{\url{https://www.ic.unicamp.br/~cid/Problem-instances/Art-Gallery/AGPVG/index.html}}. The library groups polygons into several classes and sizes; we focus on the following representative classes:
 \begin{itemize}
-    \item \textbf{Small/Training-distribution Instances}: Polygons with a number of vertices in the range of approximately 10 to 200. Many of these were used in training the learning-based models (especially for the supervised approach, and as part of the RL training regime up to a certain complexity). We also include additional instances in this size range for validation/testing that were not seen during training.
-    \item \textbf{Large/Generalization Instances}: Polygons with a larger number of vertices (200 to about 600) that were never seen by the models during training. These test the ability of the methods to handle more complex galleries. The greedy algorithm can handle these larger instances by design, but the learned models must generalize beyond their training scope.
+    \item Random simple polygons (non-orthogonal),
+    \item Random orthogonal polygons (axis-aligned edges),
+    \item Random von Koch (RvK) polygons, and
+    \item Complete von Koch (CvK) polygons.
 \end{itemize}
-
-We assume a guard can stand at any vertex of the polygon (which is a common assumption in art gallery problems, sometimes called the vertex guard problem). Thus, the candidate set of guard positions for each instance is the set of polygon vertices. All methods were constrained to choose guards only at vertices for a fair comparison and to simplify the problem (choosing arbitrary interior points is a more general problem).
+Instances are provided as simple polygons in a compact text format: an integer $n$ (number of vertices) followed by a counterclockwise sequence of $n$ vertex coordinates, each written as rational pairs ``int/int''. The full library spans from a few dozen up to several thousand vertices (e.g., 20–2500 in AGP2009a). In our experiments we use a curated subset consistent with our training/evaluation regime: training on up to roughly 100–200 vertices and evaluating within and beyond this range (``smaller'' 10–199 and ``larger'' 200–599 vertices bins reported below). Our splits comprise 8k training instances and 1.2k validation instances.
 
 For each instance, we computed the optimal solution (minimum number of guards for full coverage) using an exact method (formulated as an integer linear program and solved with a solver) for benchmarking purposes. This was feasible for the sizes of instances we considered, albeit computationally expensive; it provided a ground truth for the minimum guard count and an optimal coverage (which is always 100\% by definition of the problem).
 
 We evaluate the following metrics for each method on each test instance:
 \begin{itemize}
-    \item \textbf{Coverage}: The fraction of the polygon's area that is covered by the visibility regions of the selected guards. A coverage of 1 (or 100\%) means the entire polygon is observed. Coverage below 1 indicates some blind spots remain.
+    \item \textbf{Coverage}: The fraction of the polygon's area that is covered by the visibility regions of the selected guards. A coverage of 1 (or 100\%) means the entire polygon is observed. Coverage below 1 indicates some blind spots remain. 
     \item \textbf{Guard Set Size}: The number of guards placed by the method.
     \item \textbf{Relative Guard Set Size}: We normalize the guard count by some reference. In this paper, we use two normalizations: (a) relative to the number of vertices (i.e., guard count divided by $n$, the polygon vertex count), to indicate the fraction of vertices used as guards; and (b) relative to the optimal guard count (i.e., guard count divided by the minimum guard count for that instance). The latter ratio directly indicates how close a solution is to optimal in terms of guard count (values $\ge 1$, with 1.0 meaning optimal, 2.0 meaning twice as many guards as necessary, etc).
 \end{itemize}
 
-The greedy algorithm was implemented in Python with computational geometry libraries for visibility. The RL and supervised models were implemented using PyTorch. We trained the RL model on 1000 training polygons for 5--20 epochs (with various hyperparameter settings as discussed earlier) and evaluated it on a separate validation set of about 1200 polygons. The supervised CovNet was trained on a labeled dataset of about 1500 polygons (with solutions obtained from either optimal or high-quality greedy solutions) and tested on similar and larger polygons. For the supervised pointer network variant, we used 1000 small polygons with known optimal solutions for training.
+\subsection*{Implementation details}
+
+The greedy algorithm was implemented in Python with computational geometry libraries (scikit-geometry Python wrapper of CGAL) for visibility. The RL and supervised models were implemented using PyTorch. We trained both the RL and SL model up to 30 epochs (with various hyperparameter settings as discussed earlier) and evaluated it on a separate validation set. 
 
 We present aggregated results across the test sets. For the smaller instances, all methods are applicable. For the larger instances, we report results for greedy and the supervised model (the RL model was generally trained on instances up to a certain size and did not generalize well beyond that; one could retrain the RL model for larger instances, but we kept training sizes fixed to evaluate generalization).
+
+
+We assume a guard can stand at any vertex of the polygon (which is a common assumption in art gallery problems, sometimes called the vertex guard problem). Thus, the candidate set of guard positions for each instance is the set of polygon vertices. All methods were constrained to choose guards only at vertices for a fair comparison and to simplify the problem (choosing arbitrary interior points is a more general problem).
+
 
 \section{Results and Discussion}
 \label{sec:results}
 We report the performance of the greedy, reinforcement learning (RL), and supervised learning (SL) approaches on the test instances. Table~\ref{tab:small_results_summary} provides an overall summary of key metrics on the set of smaller (training-distribution) instances, comparing all three methods. Tables~\ref{tab:results_small} and \ref{tab:results_large} then give a more detailed breakdown of the supervised learning method's performance on small vs. large instances. Figures~\ref{fig:coverage_ratio_boxplot} and \ref{fig:demo_solutions} offer visualizations of the results and example solutions.
 
-\subsection{Performance on Smaller Instances (Within Training Distribution)}
-On polygons with up to 100--200 vertices, where the learned models were trained or at least had similar examples, we observed the following trends:
+\subsection{Performance overview}
+Across our validation set, we observed the following trends:
 \begin{itemize}
-    \item \textbf{Greedy:} By design, the greedy heuristic achieved \textbf{100\% coverage} on all instances. Its guard counts were reasonably low: on average $\sim18\%$ of the polygon's vertices were chosen as guards. In terms of optimality, greedy used about 1.17 times the minimum number of guards on average (see Table~\ref{tab:small_results_summary}), with the worst-case being 2.0 times the optimum in our dataset. This confirms that the greedy approach is a strong baseline for these instances, providing full coverage with relatively small redundancy in guards.
-    \item \textbf{Reinforcement Learning:} The RL approach, using a pointer network trained with REINFORCE, achieved high coverage on many instances but not all. On average, the coverage was around 82--90\% (depending on the specific trained model checkpoint). The best model (in terms of coverage) we obtained covered about 89.9\% of the area on average for the validation set. However, there was variance: some instances were fully covered by the RL solution (coverage = 1.0), while others were only partially covered (in a few outliers, $<10\%$ coverage, though those were rare failures). The RL model's guard usage tended to be higher than greedy in these cases. On average, the RL solutions used about 1.7 times the optimal number of guards (Table~\ref{tab:small_results_summary}). This is worse than the greedy's 1.17, indicating the RL learned policy does not yet match the efficiency of the classical heuristic. We also note a higher standard deviation in the RL method's relative guard count (occasionally the RL placed far too many guards due to idiosyncratic learned behavior for certain polygons, or conversely placed too few and left large areas uncovered).
-    \item \textbf{Supervised Learning:} The supervised approach on these small instances produced near-full coverage in most cases. As shown in Table~\ref{tab:results_small}, for instance size ranges 10--59, 60--99, and 100--199 vertices, the mean coverage of the SL method's solutions was 0.95, 0.93, and 0.87 respectively (averaging to about 0.89 overall). Many instances thus had almost complete coverage by the guards suggested by the network. However, this came at a great cost in terms of number of guards: the average guard set size was very large relative to optimum. In the smallest category (10--59 vertices), the SL method used on average 6.26 times the optimal number of guards; this ratio worsened for larger polygons in the same group (e.g., 19.89 times optimal for 100-199 vertices). The supervised model often selected a vast majority of vertices as guards, essentially erring on the side of covering everything with redundancy. While this ensures high coverage, it is highly suboptimal in guard count. The distribution of the coverage and guard count ratios for these instances is depicted in Figure~\ref{fig:coverage_ratio_boxplot}(a). We see that coverage is generally high (median near 1.0) for the SL method on small instances, but the ratio to optimum is extremely high (median well above 1, with large variance).
+    \item \textbf{Greedy:} Achieved \textbf{full coverage} on essentially all instances (polygon-level mean coverage $\approx 1.0$) with solutions close to optimal size (mean ratio $\approx$ \textbf{1.17}$\times$ optimum; see Table~\ref{tab:small_results_summary}).
+    \item \textbf{Reinforcement Learning (actor–critic):} Achieved high polygon-level coverage (mean $\approx$ \textbf{0.90}) with larger guard sets (mean ratio $\approx$ \textbf{3.49}$\times$ optimum) and higher variance across instances.
+    \item \textbf{Supervised Learning:} Achieved moderate coverage on average (mean $\approx$ \textbf{0.48}) and used about \textbf{3.37}$\times$ the optimal number of guards on average.
 \end{itemize}
 
 \begin{table}[!h]
 \centering
 \scriptsize
-\begin{tabular}{lccc}
-\toprule
-\textbf{Method} & \textbf{Average Coverage} & \textbf{Average \#Guards} & \textbf{Std. Dev. (coverage)} \\
+\begin{tabular}{lrrrrrr}
+	oprule
+ & \multicolumn{3}{c}{\textbf{Area coverage}} & \multicolumn{3}{c}{\textbf{Size ratio to optimum}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+	extbf{Method} & mean & median & std & mean & median & std \\
 \midrule
-Greedy & 1.000 & 1.17 $\times$ optimum & 0.0 \\
-REINFORCE & 0.82--0.90 & $\sim$1.7 $\times$ optimum & 0.20--0.28 \\
-Supervised & 0.89 & $\sim$10.0 $\times$ optimum & 0.07 \\
+Greedy & 1.000 & 1.000 & $\approx$0.000 & 1.172 & 1.154 & 0.125 \\
+REINFORCE (critic) & 0.904 & 0.998 & 0.197 & 3.493 & 3.307 & 3.136 \\
+Supervised & 0.482 & 0.478 & 0.315 & 3.368 & 3.080 & 4.059 \\
 \bottomrule
 \end{tabular}
-\caption{Summary of performance on small (up to 200-vertex) gallery instances. Greedy achieves perfect coverage with solutions close to optimal guard count. The RL approach has high but not complete coverage and uses more guards than optimal on average. The supervised approach achieves near-high coverage but uses an order of magnitude more guards than optimal. (For RL, a range is given due to variability between different training runs/models; we report the range covering the best models we obtained.)}
+\caption{Performance comparison on the validation set using coverage (fraction of polygon area observed) and guard-set size ratio (solution size divided by the optimal guard count). Means, medians, and standard deviations are reported. Greedy achieves full coverage with near-optimal guard counts; RL (actor–critic) reaches high coverage but uses larger guard sets on average; the supervised model attains moderate coverage and similar size ratios to RL on average.}
 \label{tab:small_results_summary}
 \end{table}
 
@@ -123,7 +239,7 @@ Supervised & 0.89 & $\sim$10.0 $\times$ optimum & 0.07 \\
 
 \vspace{1ex}
 
-\noindent \textbf{Example Solution Illustration:} Figure~\ref{fig:demo_solutions} provides a qualitative comparison on one gallery instance. The optimal solution (a) uses 17 guards to cover the polygon. The RL generator model produced several candidate solutions; one such candidate (b) used 16 guards and achieved 94\% coverage (missing a small area), which corresponds to 0.94 of the optimal guard count (since it used slightly fewer guards than the optimum) and 94\% area coverage. Other candidates (c--f) generated by the RL model demonstrate the trade-offs: some used far fewer guards (down to 10 guards in (f), which is 58\% of optimum) but consequently had much lower coverage (82\%), while others used 15 guards with moderate coverage (~89--93\%). In this example, the CovNet evaluator identified (b) as the best candidate, which is indeed very close to the optimal solution. This highlights that, given a good evaluator, the RL method can generate near-optimal solutions among its outputs, even if its single-run performance may vary.
+\noindent \textbf{Example Solution Illustration:} Figure~\ref{fig:demo_solutions} provides a qualitative comparison on one gallery instance. The optimal solution (a) uses 17 guards to cover the polygon. The RL generator model produced several candidate solutions; one such candidate (b) used 16 guards and achieved 94\% coverage (missing a small area), which corresponds to 0.94 of the optimal guard count (since it used slightly fewer guards than the optimum) and 94\% area coverage. Other candidates (c--f) generated by the RL model demonstrate the trade-offs: some used far fewer guards (down to 10 guards in (f), which is 58\% of optimum) but consequently had much lower coverage (82\%), while others used 15 guards with moderate coverage (~89--93\%). In this example, the supervised Pointer Network evaluator identified (b) as the best candidate, which is indeed very close to the optimal solution. This highlights that, given a good evaluator, the RL method can generate near-optimal solutions among its outputs, even if its single-run performance may vary.
 
 \begin{figure}[!h]
     \centering
@@ -137,7 +253,7 @@ Supervised & 0.89 & $\sim$10.0 $\times$ optimum & 0.07 \\
     \subfigure[Candidate 3: 15 guards, cov. 0.93]{\includegraphics[scale=0.4]{gfx/demo/cand3.png}}
     \hfill
     \subfigure[Candidate 4: 10 guards, cov. 0.82]{\includegraphics[scale=0.4]{gfx/demo/cand4.png}}
-    \caption{An example gallery instance demonstrating solutions by different methods. (a) shows the optimal solution with 17 guards (each guard's visibility region is implicitly indicated by coverage of the polygon). (b) shows a high-quality solution generated by the RL model (16 guards) which was selected by the CovNet evaluator as having the best predicted coverage (94\% coverage, very close to full). (c)--(f) show other candidate solutions generated by the RL model for the same instance, illustrating the range of outcomes (each subcaption lists the number of guards and achieved coverage). The supervised approach, in contrast, would typically place a guard at nearly every vertex for this instance (not shown here), achieving full coverage but with far more than 17 guards.}
+    \caption{An example gallery instance demonstrating solutions by different methods. (a) shows the optimal solution with 17 guards (each guard's visibility region is implicitly indicated by coverage of the polygon). (b) shows a high-quality solution generated by the RL model (16 guards) which was selected by the supervised Pointer Network evaluator as having the best predicted coverage (94\% coverage, very close to full). (c)--(f) show other candidate solutions generated by the RL model for the same instance, illustrating the range of outcomes (each subcaption lists the number of guards and achieved coverage). The supervised approach, in contrast, would typically place a guard at nearly every vertex for this instance (not shown here), achieving full coverage but with far more than 17 guards.}
     \label{fig:demo_solutions}
 \end{figure}
 
@@ -146,7 +262,7 @@ One concern for learning-based approaches is how well they generalize beyond the
 
 The RL model in its trained form did not directly generalize to significantly larger polygons if they were far beyond the training distribution (e.g., a model trained on up to 200-vertex polygons struggled on 500-vertex ones, often failing to cover large portions as it had not learned the strategies for much bigger spaces). In principle, one could train a separate RL model on larger instances or use curriculum learning to extend the range, but that was outside our current scope. Thus, we mainly rely on the supervised model for a learning approach on the larger instances.
 
-The supervised CovNet-based method was applied to the large instances. Here, the results were notably poorer in coverage. As summarized in Table~\ref{tab:results_large}, the mean coverage achieved by the supervised model on polygons with 400-500 vertices was around 0.59 (59\%), dropping from ~0.86-0.77 for moderately larger polygons (200-399 vertices). The performance gradually degrades as instance size grows beyond what the model saw in training. This indicates that the model did not fully capture a scale-invariant strategy for guard placement; instead, it likely overfit to patterns in smaller layouts. The number of guards it placed, however, remained extremely high relative to optimum (averaging 23-27 times the optimal guard count in these large cases). Essentially, the model was placing guards almost everywhere it could, yet still missing some spots because it had not learned how to systematically ensure full coverage in larger spaces.
+The supervised Pointer Network-based method was applied to the large instances. Here, the results were notably poorer in coverage. As summarized in Table~\ref{tab:results_large}, the mean coverage achieved by the supervised model on polygons with 400-500 vertices was around 0.59 (59\%), dropping from ~0.86-0.77 for moderately larger polygons (200-399 vertices). The performance gradually degrades as instance size grows beyond what the model saw in training. This indicates that the model did not fully capture a scale-invariant strategy for guard placement; instead, it likely overfit to patterns in smaller layouts. The number of guards it placed, however, remained extremely high relative to optimum (averaging 23-27 times the optimal guard count in these large cases). Essentially, the model was placing guards almost everywhere it could, yet still missing some spots because it had not learned how to systematically ensure full coverage in larger spaces.
 
 Table~\ref{tab:results_large} details these outcomes by binned polygon sizes. Figure~\ref{fig:coverage_ratio_boxplot}(b) illustrates the distribution of coverage and optimal ratio for the supervised method on these larger instances. In the box plot, we see a wide spread in coverage (some large instances were relatively well-covered, others very poorly) and consistently huge values for the guard count ratio (with minima still far above 1.0).
 
@@ -168,7 +284,7 @@ Table~\ref{tab:results_large} details these outcomes by binned polygon sizes. Fi
         \textit{(500--599)}    &     129 &           0.59 &          0.23 &       27.59 &       5.29 \\
         \bottomrule
     \end{tabular}
-\caption{Performance of the \textbf{supervised learning (CovNet) method} on two groups of instances: The top rows show results for smaller instances (10--199 vertices, totaling 1221 instances), and the bottom rows (in italics) show results for larger instances (200--599 vertices, 884 instances). \emph{Coverage} is the fraction of area covered by the guards chosen by the model, and \emph{Ratio to Optimum} is the number of guards used divided by the optimal number of guards for that instance. We observe high coverage and moderately low variance on smaller instances, at the expense of large redundant guard sets. On larger instances, coverage drops and the guard count ratio further increases, indicating poor scalability of the supervised model's approach.}
+\caption{Performance of the \textbf{supervised learning (supervised Pointer Network) method} on two groups of instances: The top rows show results for smaller instances (10--199 vertices, totaling 1221 instances), and the bottom rows (in italics) show results for larger instances (200--599 vertices, 884 instances). \emph{Coverage} is the fraction of area covered by the guards chosen by the model, and \emph{Ratio to Optimum} is the number of guards used divided by the optimal number of guards for that instance. We observe high coverage and moderately low variance on smaller instances, at the expense of large redundant guard sets. On larger instances, coverage drops and the guard count ratio further increases, indicating poor scalability of the supervised model's approach.}
 \label{tab:results_small}\label{tab:results_large}
 \end{table}
 

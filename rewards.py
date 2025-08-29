@@ -73,6 +73,42 @@ def smooth_reward(points: np.ndarray, solution: np.ndarray, name: str, length: i
     return ( (uncovered_area + eps)**alpha * ((n_guards/n_vertices + eps) ** p) )
 
 
+def enhanced_penalty(points: np.ndarray, solution: np.ndarray, name: str, length: int = None, alpha=1, p=2, delta=1.0, scale=1000):
+    """
+    Enhanced smooth penalty function for vertex guard optimization.
+    Note: This function returns penalties (lower values = better solutions).
+    Args:
+        points: np.ndarray, polygon vertices (N, 2)
+        solution: np.ndarray, indices of selected guards
+        name: str, instance name (unused)
+        length: int, number of real vertices (if points is padded)
+        alpha: float, exponent for uncovered area penalty (default: 1)
+        p: float, penalty exponent for guard usage (default: 2)
+        delta: float, penalty for non-full coverage (default: 1.0)
+        scale: float, scaling factor for base penalty (default: 1000)
+    Returns:
+        float: The computed penalty (lower is better).
+    """
+    eps = 1e-8
+    n_vertices = length if length is not None else len(points)
+    n_guards = len(solution)
+    
+    try:
+        coverage = evaluate_polygon_visibility_numpy_wo_gt(points, solution, name)
+        uncovered_area = 1.0 - coverage
+    except Exception:
+        print(f"Warning: visibility failed for guards {solution} in polygon {name}")
+        uncovered_area = 1.0
+
+    # Base penalty: scaled to make guard count differences meaningful
+    base_penalty = scale * ((uncovered_area + eps)**alpha * (n_guards/n_vertices + eps)**p)
+    
+    # Penalty for non-full coverage (instead of bonus for full coverage)
+    coverage_penalty = delta if abs(uncovered_area) > 1e-5 else 0
+    
+    return base_penalty + coverage_penalty
+
+
 def test_reward():
     reward = smooth_reward
     """Test the reward function with a simple polygon and guard sets, including an L-shaped polygon."""

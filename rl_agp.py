@@ -18,7 +18,7 @@ import sys
 import matplotlib.pyplot as plt
 #from rewards import linear_reward as reward  # Use the new reward function
 #from rewards import strict_reward as reward  # Use the strict reward function
-from rewards import smooth_reward as reward  # Use the smooth reward function
+from rewards import enhanced_penalty as reward  # Use the smooth reward function
 from functools import wraps, partial
 
 # use torch's nn and functional via existing torch import
@@ -343,7 +343,7 @@ def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
     if len(pred_sizes) > 0:
         size_stats = compute_stats(pred_sizes, "Predicted Solution Sizes")
         optimal_stats = compute_stats(true_sizes, "Optimal Solution Sizes")
-        coverage_stats = compute_stats(coverage_ratios, "Coverage Ratios (fraction of covered polygon area)")
+        coverage_stats = compute_stats(coverage_ratios, "Guard Set Coverage Ratios (fraction of optimal guards covered by predicted guards)")
         efficiency_stats = compute_stats(efficiency_ratios, "Efficiency Ratios (fraction of predicted guards that are optimal)")
         ratio_stats = compute_stats(size_ratios, "Size Ratios (predicted/optimal)")
         overlap_stats = compute_stats(overlap_counts, "Overlap Counts (absolute number of matching guards)")
