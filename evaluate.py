@@ -21,10 +21,24 @@ from models import create_actor
 from rewards import enhanced_penalty as reward_fn
 from utils import evaluate_polygon_visibility_numpy_wo_gt
 from rl_agp import BucketBatchSampler, get_lengths_from_dataset
-from train_value_net import SolutionValueNet, solution_collate_fn
+from train_value_net import SolutionValueNet, MultiTaskValueNet, solution_collate_fn
+from train_ranker import RankerNet
 from torch.nn.utils.rnn import pad_sequence
 from functools import partial
 
+
+def _flatten_lstm_parameters(module: torch.nn.Module):
+    """Recursively call flatten_parameters() on all LSTM modules.
+    Helps avoid PyTorch RNN contiguity warnings and improves performance.
+    Call this after moving the module to its device and after deepcopy/load_state.
+    """
+    for m in module.modules():
+        if isinstance(m, torch.nn.LSTM):
+            try:
+                m.flatten_parameters()
+            except Exception:
+                # Safe to ignore; PyTorch will still run, just less optimal
+                pass
 
 def find_best_value_net_checkpoint(checkpoints_dir='checkpoints'):
     """
@@ -43,13 +57,191 @@ def find_best_value_net_checkpoint(checkpoints_dir='checkpoints'):
     return checkpoints[0]
 
 
+def load_reward_predictor(model_path, embedding_size=128, hidden_size=None):
+    """
+    Load either a ranker network or value network for reward prediction.
+    Automatically detects the model type and hidden size from filename.
+    
+    Args:
+        model_path: Path to the model checkpoint
+        embedding_size: Embedding size (default: 128)  
+        hidden_size: Hidden size (auto-detected if None)
+        
+    Returns:
+        (model, device, model_info): Loaded model, device, and info dict
+    """
+    print(f"🔧 Loading reward predictor from: {model_path}")
+    
+    # Auto-detect hidden size from filename if not provided
+    if hidden_size is None:
+        import re
+        match = re.search(r'hidden_size(\d+)', os.path.basename(model_path))
+        if match:
+            hidden_size = int(match.group(1))
+            print(f"  Auto-detected hidden_size: {hidden_size}")
+        else:
+            hidden_size = 256  # Default fallback
+            print(f"  Using default hidden_size: {hidden_size}")
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    ckpt = torch.load(model_path, map_location=device)
+    
+    # Determine model type
+    model_type = 'unknown'
+    if 'ranker' in os.path.basename(model_path).lower():
+        model_type = 'ranker'
+    elif 'value_net' in os.path.basename(model_path).lower():
+        model_type = 'value_net'
+    
+    # Load model based on checkpoint format
+    if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+        state = ckpt['model_state_dict']
+        md = ckpt.get('metadata', {})
+        detected_type = md.get('model_type', model_type)
+        
+        if detected_type == 'multitask':
+            from train_value_net import MultiTaskValueNet
+            model = MultiTaskValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+            model_type = 'multitask_value_net'
+        elif detected_type == 'solution':
+            from train_value_net import SolutionValueNet
+            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+            model_type = 'solution_value_net'
+        elif detected_type == 'ranker' or model_type == 'ranker':
+            model = RankerNet(embedding_size=embedding_size, hidden_size=hidden_size)
+            model_type = 'ranker'
+        else:
+            # Fallback
+            from train_value_net import SolutionValueNet
+            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+            model_type = 'solution_value_net'
+        
+        model.load_state_dict(state, strict=False)
+    else:
+        # Legacy format - guess from filename
+        if model_type == 'ranker':
+            model = RankerNet(embedding_size=embedding_size, hidden_size=hidden_size)
+        else:
+            from train_value_net import SolutionValueNet
+            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+            model_type = 'solution_value_net'
+        model.load_state_dict(ckpt)
+    
+    model = model.to(device)
+    model.eval()
+    
+    model_info = {
+        'type': model_type,
+        'embedding_size': embedding_size,
+        'hidden_size': hidden_size,
+        'path': model_path
+    }
+    
+    print(f"✓ {model_type} loaded successfully")
+    print(f"  Architecture: embedding_size={embedding_size}, hidden_size={hidden_size}")
+    print(f"  Device: {device}")
+    
+    return model, device, model_info
+
+
+def predict_rewards(model, polygons, solutions, poly_lengths, sol_lengths):
+    """
+    Unified function to predict rewards using any model type (ranker, value_net, etc.)
+    
+    Args:
+        model: Loaded model (ranker or value network)
+        polygons: Batch of polygon coordinates
+        solutions: Batch of solution indices  
+        poly_lengths: Polygon lengths
+        sol_lengths: Solution lengths
+        
+    Returns:
+        tensor: Predicted rewards/scores
+    """
+    with torch.no_grad():
+        if hasattr(model, 'predict_reward'):
+            preds = model.predict_reward(polygons, solutions, poly_lengths, sol_lengths)
+        else:
+            preds = model(polygons, solutions, poly_lengths, sol_lengths)
+            # Handle dict output from MultiTaskValueNet
+            if isinstance(preds, dict):
+                preds = preds['reward']  # Use reward prediction
+    
+    return preds
+    
+    if not checkpoints:
+        return None
+    
+    # Sort by modification time (newest first)
+    checkpoints.sort(key=os.path.getmtime, reverse=True)
+    return checkpoints[0]
+
+
+def find_best_ranker_checkpoint(checkpoints_dir='checkpoints'):
+    """
+    Automatically find the best ranker network checkpoint in the checkpoints directory.
+    Looks for files matching pattern: ranker_net_*_best.pt
+    """
+    import glob
+    pattern = os.path.join(checkpoints_dir, 'ranker_net_*_best.pt')
+    checkpoints = glob.glob(pattern)
+    
+    if not checkpoints:
+        return None
+    
+    # Sort by modification time (newest first)
+    checkpoints.sort(key=os.path.getmtime, reverse=True)
+    return checkpoints[0]
+
+
+def find_best_rl_checkpoint(checkpoints_dir='checkpoints'):
+    """
+    Automatically find the best RL model checkpoint in the checkpoints directory.
+    Looks for files matching pattern: rl_agp_model_*_epochs*.pt
+    """
+    import glob
+    pattern = os.path.join(checkpoints_dir, 'rl_agp_model_*_epochs*.pt')
+    checkpoints = glob.glob(pattern)
+    
+    if not checkpoints:
+        return None
+    
+    # Sort by modification time (newest first)
+    checkpoints.sort(key=os.path.getmtime, reverse=True)
+    return checkpoints[0]
+
+
 def load_value_net(value_net_path, embedding_size=128, hidden_size=256):
     """Load the trained value network."""
     print(f"Loading value network from: {value_net_path}")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
-    model.load_state_dict(torch.load(value_net_path, map_location=device))
+    ckpt = torch.load(value_net_path, map_location=device)
+    # Backward compatibility: raw state_dict vs checkpoint with metadata
+    if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+        state = ckpt['model_state_dict']
+        md = ckpt.get('metadata', {})
+        # Try to infer model type by metadata; choose based on marker
+        model_type = md.get('model_type', 'ranker')
+        if model_type == 'multitask':
+            from train_value_net import MultiTaskValueNet
+            model = MultiTaskValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+        elif model_type == 'solution':
+            from train_value_net import SolutionValueNet
+            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+        elif model_type == 'ranker':
+            model = RankerNet(embedding_size=embedding_size, hidden_size=hidden_size)
+        else:
+            # Fallback: default to SolutionValueNet
+            from train_value_net import SolutionValueNet
+            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+        model.load_state_dict(state, strict=False)
+        # Attach helper for predict_reward if missing
+        model.predict_reward = getattr(model, 'predict_reward', None)
+    else:
+        from train_value_net import SolutionValueNet
+        model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+        model.load_state_dict(ckpt)
     model = model.to(device)
     model.eval()
     
@@ -91,40 +283,96 @@ def fast_active_search_with_value_net(actor, value_net, data_tensor, mask, lengt
         # Sample K solutions from actor
         for k in range(K):
             selected_idxs, _ = actor(data_tensor, padding_mask=mask, lengths=length_tensor)
-            solution = selected_idxs[0].cpu().numpy()  # Get first (and only) batch item
+            solution = selected_idxs[0]  # Get first (and only) batch item
+            
+            # Convert to numpy if it's a tensor, otherwise keep as is
+            if hasattr(solution, 'cpu'):
+                solution = solution.cpu().numpy()
+            elif isinstance(solution, (list, tuple)):
+                solution = np.array(solution)
+                
             # Filter to valid indices
-            solution = [idx for idx in solution if idx < length]
+            solution = sorted([idx for idx in solution if idx < length])
             solutions.append(solution)
         
-        # Batch predict rewards using value network (FAST!)
+        # Batch predict rewards using value network (FAST!) with empty-solution safety
         if len(solutions) > 0:
-            # Prepare batch data for value network
-            batch_polygons = data_tensor.repeat(len(solutions), 1, 1)  # [K, max_len, 2]
-            batch_solutions = pad_sequence([torch.tensor(sol, dtype=torch.long) for sol in solutions], 
-                                         batch_first=True, padding_value=0).to(device)
-            poly_lengths = torch.tensor([length] * len(solutions), dtype=torch.long, device=device)
-            sol_lengths = torch.tensor([len(sol) for sol in solutions], dtype=torch.long, device=device)
-            
-            # Get predicted rewards
-            predicted_rewards = value_net(batch_polygons, batch_solutions, poly_lengths, sol_lengths)
-            predicted_rewards = predicted_rewards.cpu().numpy()
-            
-            # Pick best solution according to value network
-            best_idx = np.argmin(predicted_rewards)
+            K_solutions = len(solutions)
+            predicted_rewards = np.full(K_solutions, np.inf, dtype=float)
+            valid_idxs = [i for i, sol in enumerate(solutions) if len(sol) > 0]
+            if len(valid_idxs) > 0:
+                # Prepare batch data only for non-empty solutions
+                batch_polygons = data_tensor.repeat(len(valid_idxs), 1, 1)  # [K_valid, max_len, 2]
+                batch_solutions = pad_sequence(
+                    [torch.tensor(solutions[i], dtype=torch.long) for i in valid_idxs],
+                    batch_first=True,
+                    padding_value=0,
+                ).to(device)
+                poly_lengths = torch.tensor([length] * len(valid_idxs), dtype=torch.long, device=device)
+                sol_lengths = torch.tensor([len(solutions[i]) for i in valid_idxs], dtype=torch.long, device=device)
+
+                # Get predicted rewards (support MultiTaskValueNet)
+                if hasattr(value_net, 'predict_reward'):
+                    preds = value_net.predict_reward(batch_polygons, batch_solutions, poly_lengths, sol_lengths)
+                else:
+                    preds = value_net(batch_polygons, batch_solutions, poly_lengths, sol_lengths)
+                    # Handle different model types: dict output (MultiTaskValueNet) vs tensor output
+                    if isinstance(preds, dict):
+                        preds = preds['reward']  # Use reward for evaluation
+                preds = preds.detach().cpu().numpy()
+                for j, i in enumerate(valid_idxs):
+                    predicted_rewards[i] = float(preds[j])
+
+            # Pick best solution according to value network (empties remain +inf)
+            best_idx = int(np.argmin(predicted_rewards))
             best_solution = solutions[best_idx]
-            best_pred_reward = predicted_rewards[best_idx]
+            best_pred_reward = float(predicted_rewards[best_idx])
             
             # Compute actual reward for validation
             real_points = data_tensor[0, :length].cpu().numpy()
             reward_func = partial(reward_fn, alpha=5.0, p=0.0)
             actual_reward = reward_func(real_points, best_solution, name, length=length)
             
-            prediction_error = abs(best_pred_reward - actual_reward)
+            # Compute coverage
+            try:
+                coverage = evaluate_polygon_visibility_numpy_wo_gt(real_points, best_solution, name)
+            except Exception:
+                coverage = 0.0
             
-            return best_solution, best_pred_reward, actual_reward, predicted_rewards, prediction_error
+            # Calculate statistics (compute reward variance from all predictions)
+            reward_variance = np.var(predicted_rewards[predicted_rewards != np.inf]) if np.sum(predicted_rewards != np.inf) > 1 else 0.0
+            
+            # Calculate prediction accuracy metrics
+            prediction_error = abs(best_pred_reward - actual_reward)
+            best_size = len(best_solution)
+            size_ratio = best_size / max(1, length) if length > 0 else 1.0
+            
+            return {
+                'best_reward': actual_reward,
+                'best_coverage': coverage,
+                'best_size': best_size,
+                'size_ratio': size_ratio,
+                'reward_variance': reward_variance,
+                'coverage_variance': 0.0,  # Not computed for fast evaluation
+                'pred_err_selected': prediction_error,
+                'pred_err_opt': prediction_error,  # Same since we only evaluate selected solution
+                'regret': 0.0,  # Would need to compute actual rewards for all K solutions
+                'correlation': 0.0  # Would need actual rewards for all K solutions
+            }
         else:
             # Fallback if no valid solutions
-            return [], 0.0, float('inf'), np.array([]), float('inf')
+            return {
+                'best_reward': float('inf'),
+                'best_coverage': 0.0,
+                'best_size': 0,
+                'size_ratio': 0.0,
+                'reward_variance': 0.0,
+                'coverage_variance': 0.0,
+                'pred_err_selected': 0.0,
+                'pred_err_opt': 0.0,
+                'regret': 0.0,
+                'correlation': 0.0
+            }
 
 
 def load_rl_model(checkpoint_path, embedding_size=128, hidden_size=128, n_glimpses=1, 
@@ -159,19 +407,22 @@ def load_rl_model(checkpoint_path, embedding_size=128, hidden_size=128, n_glimps
     # Move to GPU if available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
+    _flatten_lstm_parameters(model)
     model.eval()
     
     print(f"Model loaded on device: {device}")
     return model, device
 
 
-def active_search_train_on_instance(model, data_tensor, mask, length, name, K=64, B=8, lr=3e-4, alpha=0.9, device='cpu'):
+def active_search_train_on_instance(model, data_tensor, mask, length, name, K=64, B=8, lr=3e-4, alpha=0.9, device='cpu', no_geometry=False):
     """
     Bello et al. Active Search: policy-gradient fine-tuning on a single instance.
     Returns the best solution found and its metrics.
     """
     # Clone the model so global weights aren't modified
     as_model = copy.deepcopy(model)
+    as_model = as_model.to(device)
+    _flatten_lstm_parameters(as_model)
     as_model.train()
     optimizer = torch.optim.Adam(as_model.parameters(), lr=lr)
     
@@ -179,7 +430,7 @@ def active_search_train_on_instance(model, data_tensor, mask, length, name, K=64
     mask = mask.to(device)
     length_tensor = torch.tensor([length], dtype=torch.long, device=device)
     real_points = data_tensor[0, :length].detach().cpu().numpy()
-    reward_func = partial(reward_fn, alpha=5.0, p=0.0)
+    reward_func = None if no_geometry else partial(reward_fn, alpha=5.0, p=0.0)
     
     # Budget control
     samples_remaining = int(K)
@@ -197,9 +448,13 @@ def active_search_train_on_instance(model, data_tensor, mask, length, name, K=64
         # Sample batch
         for _ in range(batch):
             selected_idxs, log_probs = as_model(data_tensor, padding_mask=mask, lengths=length_tensor)
-            solution = [idx for idx in selected_idxs[0] if idx < length]
+            solution = sorted([idx for idx in selected_idxs[0] if idx < length])
             # skip degenerate empty solution by forcing EOS-only samples to empty
-            L = reward_func(real_points, solution, name, length=length)
+            if no_geometry:
+                # Geometry-free: use simple heuristic proxy (solution size) as loss if no value_net
+                L = float(len(solution))
+            else:
+                L = reward_func(real_points, solution, name, length=length)
             losses.append(float(L))
             log_probs_list.append(log_probs.squeeze())  # shape: ()
             sols.append(solution)
@@ -221,16 +476,110 @@ def active_search_train_on_instance(model, data_tensor, mask, length, name, K=64
             optimizer.step()
     
     # Compute coverage for best solution
-    try:
-        best_coverage = float(evaluate_polygon_visibility_numpy_wo_gt(real_points, best_solution, name))
-    except Exception:
-        best_coverage = 0.0
+    if no_geometry:
+        best_coverage = float('nan')
+    else:
+        try:
+            best_coverage = float(evaluate_polygon_visibility_numpy_wo_gt(real_points, best_solution, name))
+        except Exception:
+            best_coverage = 0.0
     
     return best_solution, best_reward, best_coverage
 
 
-def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha=0.9, device='cpu'):
-    """Run Active Search training per instance and report aggregated stats."""
+def active_search_train_proxy_on_instance(model, value_net, data_tensor, mask, length, name, K=64, B=8, lr=3e-4, alpha=0.9, device='cpu', no_geometry=False):
+    """
+    Active Search using value_net predictions as proxy rewards for REINFORCE.
+    Avoids calling the expensive true reward; gradients are computed on predicted reward.
+    """
+    as_model = copy.deepcopy(model)
+    as_model = as_model.to(device)
+    _flatten_lstm_parameters(as_model)
+    as_model.train()
+    value_net = value_net.to(device)
+    value_net.eval()
+    optimizer = torch.optim.Adam(as_model.parameters(), lr=lr)
+
+    data_tensor = data_tensor.to(device)
+    mask = mask.to(device)
+    length_tensor = torch.tensor([length], dtype=torch.long, device=device)
+    
+    samples_remaining = int(K)
+    best_solution = []
+    best_pred_reward = float('inf')
+    
+    while samples_remaining > 0:
+        batch = min(B, samples_remaining)
+        samples_remaining -= batch
+        log_probs_list = []
+        proxy_losses = None
+        sols = []
+        # Sample batch
+        for _ in range(batch):
+            selected_idxs, log_probs = as_model(data_tensor, padding_mask=mask, lengths=length_tensor)
+            solution = [idx for idx in selected_idxs[0] if idx < length]
+            sols.append(solution)
+            log_probs_list.append(log_probs.squeeze())
+        # Predict rewards for batch solutions (skip empties and assign penalty)
+        if len(sols) > 0:
+            batch_size = len(sols)
+            empty_penalty = 10.0  # large loss so empties are not selected
+            proxy_losses = torch.full((batch_size,), empty_penalty, dtype=torch.float32, device=device)
+            valid_idxs = [i for i, s in enumerate(sols) if len(s) > 0]
+            if len(valid_idxs) > 0:
+                batch_polygons = data_tensor.repeat(len(valid_idxs), 1, 1)
+                batch_solutions = pad_sequence(
+                    [torch.tensor(sols[i], dtype=torch.long) for i in valid_idxs],
+                    batch_first=True,
+                    padding_value=0,
+                ).to(device)
+                poly_lengths = torch.tensor([length] * len(valid_idxs), dtype=torch.long, device=device)
+                sol_lengths = torch.tensor([len(sols[i]) for i in valid_idxs], dtype=torch.long, device=device)
+                with torch.no_grad():
+                    if hasattr(value_net, 'predict_reward'):
+                        preds = value_net.predict_reward(batch_polygons, batch_solutions, poly_lengths, sol_lengths)
+                    else:
+                        preds = value_net(batch_polygons, batch_solutions, poly_lengths, sol_lengths)
+                        # Handle different model types: dict output (MultiTaskValueNet) vs tensor output
+                        if isinstance(preds, dict):
+                            preds = preds['reward']  # Use reward for evaluation
+                preds = preds.detach().float()
+                # scatter back into full proxy_losses
+                proxy_losses[torch.tensor(valid_idxs, dtype=torch.long, device=device)] = preds
+            # Update incumbent based on predicted loss (considering penalties for empties)
+            min_idx = int(torch.argmin(proxy_losses).item())
+            if float(proxy_losses[min_idx]) < best_pred_reward:
+                best_pred_reward = float(proxy_losses[min_idx])
+                best_solution = sols[min_idx]
+        # Policy gradient step on proxy loss
+        if len(log_probs_list) > 0 and proxy_losses is not None:
+            L_tensor = proxy_losses.to(device)
+            lp_tensor = torch.stack(log_probs_list)
+            mean_L = L_tensor.mean().item()
+            # EMA over proxy loss
+            b = mean_L  # simple moving baseline per step is fine here
+            advantage = L_tensor - b
+            pg_loss = (advantage * lp_tensor).mean()
+            optimizer.zero_grad()
+            pg_loss.backward()
+            torch.nn.utils.clip_grad_norm_(as_model.parameters(), 1.0)
+            optimizer.step()
+
+    # Compute coverage estimate for the best proxy-selected solution
+    real_points = data_tensor[0, :length].detach().cpu().numpy()
+    if no_geometry:
+        best_coverage = float('nan')
+    else:
+        try:
+            best_coverage = float(evaluate_polygon_visibility_numpy_wo_gt(real_points, best_solution, name))
+        except Exception:
+            best_coverage = 0.0
+    return best_solution, best_pred_reward, best_coverage
+
+def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha=0.9, device='cpu', use_proxy=False, value_net=None, no_geometry=False):
+    """Run Active Search training per instance and report aggregated stats.
+    If use_proxy=True, uses value_net predictions as proxy rewards (no true reward calls).
+    """
     import time
     model.eval()
     lengths = get_lengths_from_dataset(dataset)
@@ -245,9 +594,32 @@ def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha
         length = lengths[0]
         name = batch_names[0]
         # Run AS on this instance
-        best_solution, best_reward, best_coverage = active_search_train_on_instance(
-            model, data_tensor, instance_mask, length, name, K=K, B=B, lr=lr, alpha=alpha, device=device
-        )
+        if use_proxy:
+            if value_net is None:
+                raise ValueError("--as-proxy requires a loaded value_net (use --value-net-path or auto)")
+            # Run AS with proxy rewards (no true reward calls inside)
+            best_solution, _proxy_best, _proxy_cov = active_search_train_proxy_on_instance(
+                model, value_net, data_tensor, instance_mask, length, name, K=K, B=B, lr=lr, alpha=alpha, device=device, no_geometry=no_geometry
+            )
+            # For metrics, compute TRUE reward and coverage once for the selected solution
+            if not no_geometry:
+                real_points = data_tensor[0, :length].detach().cpu().numpy()
+                reward_func = partial(reward_fn, alpha=5.0, p=0.0)
+                try:
+                    best_reward = float(reward_func(real_points, best_solution, name, length=length))
+                except Exception:
+                    best_reward = float('inf')
+                try:
+                    best_coverage = float(evaluate_polygon_visibility_numpy_wo_gt(real_points, best_solution, name))
+                except Exception:
+                    best_coverage = 0.0
+            else:
+                best_reward = float(len(best_solution))
+                best_coverage = float('nan')
+        else:
+            best_solution, best_reward, best_coverage = active_search_train_on_instance(
+                model, data_tensor, instance_mask, length, name, K=K, B=B, lr=lr, alpha=alpha, device=device, no_geometry=no_geometry
+            )
         # Read optimal size for ratio if available
         base_name = os.path.splitext(os.path.basename(name))[0]
         opt_sol_path = os.path.join(val_dir, f"{base_name}.solution")
@@ -288,7 +660,7 @@ def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha
         'num_instances': len(all_best_rewards),
         'K': K,
         'best_reward_stats': compute_stats(all_best_rewards),
-        'best_coverage_stats': compute_stats(all_best_coverages),
+    'best_coverage_stats': compute_stats(all_best_coverages),
         'best_size_stats': compute_stats(all_best_sizes),
         'size_ratio_stats': compute_stats(all_size_ratios),
         'use_value_net': False,
@@ -298,7 +670,7 @@ def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha
     return results
 
 
-def active_search_single_instance(model, data_tensor, mask, length, name, K=10, device='cpu', value_net=None):
+def active_search_single_instance(model, data_tensor, mask, length, name, K=10, device='cpu', value_net=None, no_geometry=False):
     """
     Perform active search on a single instance.
     Sample K solutions and return the best one (lowest reward).
@@ -346,16 +718,19 @@ def active_search_single_instance(model, data_tensor, mask, length, name, K=10, 
             
             # Convert to numpy for reward computation
             real_points = data_tensor[0, :length].cpu().numpy()
-            real_solution = [idx for idx in solution if idx < length]
+            real_solution = sorted([idx for idx in solution if idx < length])
             
             # Compute reward (smaller is better)
-            r = reward_fn(real_points, real_solution, name, length=length)
-            
-            # Compute polygon coverage
-            try:
-                coverage = evaluate_polygon_visibility_numpy_wo_gt(real_points, real_solution, name)
-            except:
-                coverage = 0.0
+            if no_geometry:
+                r = float(len(real_solution))
+                coverage = float('nan')
+            else:
+                r = reward_fn(real_points, real_solution, name, length=length)
+                # Compute polygon coverage
+                try:
+                    coverage = evaluate_polygon_visibility_numpy_wo_gt(real_points, real_solution, name)
+                except:
+                    coverage = 0.0
             
             solutions.append(real_solution)
             rewards.append(r)
@@ -382,6 +757,10 @@ def active_search_single_instance(model, data_tensor, mask, length, name, K=10, 
 
             with torch.no_grad():
                 preds = value_net(batch_polygons, batch_solutions, poly_lengths, sol_lengths)
+                # Handle different model types: dict output (MultiTaskValueNet) vs tensor output (RankerNet/SolutionValueNet)
+                if isinstance(preds, dict):
+                    # MultiTaskValueNet returns {'reward': tensor, 'coverage': tensor}
+                    preds = preds['reward']  # Use reward for evaluation
                 preds = preds.detach().cpu().numpy()
             for j, i in enumerate(valid_idxs):
                 predicted_values[i] = float(preds[j])
@@ -418,7 +797,209 @@ def active_search_single_instance(model, data_tensor, mask, length, name, K=10, 
     return best_solution, best_reward, best_coverage, rewards, coverages, pred_err_selected, pred_err_opt, regret, corr
 
 
-def evaluate_with_active_search(model, dataset, val_dir, K=10, batch_size=1, device='cpu', value_net=None, use_value_net=False):
+def evaluate_with_sampling(model, dataset, val_dir, K=10, device='cpu', value_net=None, use_value_net=False, no_geometry=False):
+    """
+    Evaluate the model using simple sampling (no active search).
+    
+    Args:
+        model: Trained RL model
+        dataset: Validation dataset
+        val_dir: Directory containing .solution files for optimal comparison
+        K: Number of solutions to sample per instance
+        device: Device to run on
+        value_net: Optional trained value network for solution selection
+        use_value_net: Whether to use value network for solution selection
+        no_geometry: Skip geometry-based reward computations
+    
+    Returns:
+        results: Dictionary with evaluation results
+    """
+    import time
+    
+    evaluation_type = "Value Network Sampling" if use_value_net else "Standard Sampling"
+    print(f"\n--- {evaluation_type} Evaluation (K={K}) on {len(dataset)} validation samples ---")
+    
+    model.eval()
+    
+    # Use bucket sampler for consistent batching
+    lengths = get_lengths_from_dataset(dataset)
+    batch_sampler = BucketBatchSampler(lengths, batch_size=1, shuffle=False, bucket_size=10)
+    loader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collate_fn, 
+                       pin_memory=True, num_workers=0)
+    
+    all_best_rewards = []
+    all_best_coverages = []
+    all_best_sizes = []
+    all_size_ratios = []
+    all_reward_variances = []
+    all_coverage_variances = []
+    all_pred_err_selected = []
+    all_pred_err_opt = []
+    all_regrets = []
+    all_corrs = []
+    
+    start_time = time.time()
+    
+    for batch_idx, (batch_data, mask, lengths, batch_names) in enumerate(loader):
+        batch_data, mask = batch_data.to(device), mask.to(device)
+        
+        # Process single instance
+        data_tensor = batch_data[0:1]  # [1, max_len, 2]
+        instance_mask = mask[0:1]  # [1, max_len]
+        length = lengths[0]  # lengths is a list, not tensor
+        name = batch_names[0]
+        
+        if use_value_net and value_net is not None:
+            # Use value network for fast sampling evaluation
+            result = fast_active_search_with_value_net(
+                model, value_net, data_tensor, instance_mask, length, name, K, device
+            )
+        else:
+            # Use standard sampling evaluation
+            result = standard_sampling_single_instance(
+                model, data_tensor, instance_mask, length, name, K, device, no_geometry
+            )
+        
+        # Collect results
+        all_best_rewards.append(result['best_reward'])
+        all_best_coverages.append(result['best_coverage']) 
+        all_best_sizes.append(result['best_size'])
+        all_size_ratios.append(result['size_ratio'])
+        all_reward_variances.append(result.get('reward_variance', 0.0))
+        all_coverage_variances.append(result.get('coverage_variance', 0.0))
+        all_pred_err_selected.append(result.get('pred_err_selected', 0.0))
+        all_pred_err_opt.append(result.get('pred_err_opt', 0.0))
+        all_regrets.append(result.get('regret', 0.0))
+        all_corrs.append(result.get('correlation', 0.0))
+        
+        print(f"Instance {batch_idx+1}/{len(dataset)}: {name} - Best reward: {result['best_reward']:.4f}, Coverage: {result['best_coverage']:.4f}")
+    
+    total_time = time.time() - start_time
+    
+    # Calculate statistics
+    def safe_stats(values):
+        """Calculate statistics safely handling NaN values"""
+        clean_values = [v for v in values if not (np.isnan(v) or np.isinf(v))]
+        if not clean_values:
+            return {'mean': 0.0, 'std': 0.0, 'min': 0.0, 'max': 0.0, 'median': 0.0}
+        
+        return {
+            'mean': float(np.mean(clean_values)),
+            'std': float(np.std(clean_values)),
+            'min': float(np.min(clean_values)),
+            'max': float(np.max(clean_values)),
+            'median': float(np.median(clean_values))
+        }
+    
+    results = {
+        'evaluation_type': evaluation_type,
+        'num_instances': len(dataset),
+        'K': K,
+        'total_time': total_time,
+        'avg_time_per_instance': total_time / len(dataset),
+        'best_rewards': safe_stats(all_best_rewards),
+        'best_coverages': safe_stats(all_best_coverages),
+        'best_sizes': safe_stats(all_best_sizes),
+        'size_ratios': safe_stats(all_size_ratios),
+        'reward_variances': safe_stats(all_reward_variances),
+        'coverage_variances': safe_stats(all_coverage_variances),
+        'pred_err_selected': safe_stats(all_pred_err_selected),
+        'pred_err_opt': safe_stats(all_pred_err_opt),
+        'regrets': safe_stats(all_regrets),
+        'correlations': safe_stats(all_corrs),
+        'raw_results': {
+            'best_rewards': all_best_rewards,
+            'best_coverages': all_best_coverages,
+            'best_sizes': all_best_sizes,
+            'size_ratios': all_size_ratios
+        }
+    }
+    
+    return results
+
+
+def standard_sampling_single_instance(model, data_tensor, mask, length, name, K, device, no_geometry=False):
+    """
+    Standard sampling evaluation for a single instance.
+    Sample K solutions and pick the best one based on true rewards.
+    """
+    solutions = []
+    rewards = []
+    coverages = []
+    
+    # Sample K solutions
+    for _ in range(K):
+        with torch.no_grad():
+            selected_idxs, log_probs = model(data_tensor, mask, lengths=torch.tensor([length], device=device))
+            solution = selected_idxs[0]  # Get first batch item
+            
+            # Convert to numpy if it's a tensor, otherwise keep as is
+            if hasattr(solution, 'cpu'):
+                solution = solution.cpu().numpy()
+            elif isinstance(solution, (list, tuple)):
+                solution = np.array(solution)
+            
+            # Remove EOS token and padding
+            if length < len(solution):
+                solution = solution[:length+1]  # Keep up to EOS
+            eos_pos = np.where(solution == length)[0]
+            if len(eos_pos) > 0:
+                solution = solution[:eos_pos[0]]  # Remove EOS and everything after
+            
+            solutions.append(solution)
+    
+    # Evaluate all solutions
+    polygon_coords = data_tensor[0, :length, :].cpu().numpy()
+    
+    for solution in solutions:
+        if not no_geometry and len(solution) > 0:
+            reward = reward_fn(polygon_coords, solution, name, length=length)
+            # Compute coverage separately
+            try:
+                coverage = evaluate_polygon_visibility_numpy_wo_gt(polygon_coords, solution, name)
+            except Exception:
+                coverage = 0.0
+        else:
+            reward = 0.0
+            coverage = 1.0
+        
+        rewards.append(reward)
+        coverages.append(coverage)
+    
+    # Find best solution
+    if len(rewards) > 0:
+        best_idx = np.argmin(rewards)
+        best_reward = rewards[best_idx]
+        best_coverage = coverages[best_idx]
+        best_solution = solutions[best_idx]
+        best_size = len(best_solution)
+    else:
+        best_reward = float('inf')
+        best_coverage = 0.0
+        best_size = 0
+    
+    # Calculate statistics
+    reward_variance = np.var(rewards) if len(rewards) > 1 else 0.0
+    coverage_variance = np.var(coverages) if len(coverages) > 1 else 0.0
+    
+    # Size ratio (compared to polygon size as rough optimal estimate)
+    size_ratio = best_size / max(1, length) if length > 0 else 1.0
+    
+    return {
+        'best_reward': best_reward,
+        'best_coverage': best_coverage,
+        'best_size': best_size,
+        'size_ratio': size_ratio,
+        'reward_variance': reward_variance,
+        'coverage_variance': coverage_variance,
+        'regret': 0.0,  # No regret calculation in simple sampling
+        'correlation': 0.0,  # No prediction correlation in simple sampling
+        'pred_err_selected': 0.0,
+        'pred_err_opt': 0.0
+    }
+
+
+def evaluate_with_active_search(model, dataset, val_dir, K=10, batch_size=1, device='cpu', value_net=None, use_value_net=False, no_geometry=False):
     """
     Evaluate the model on validation dataset using active search.
     
@@ -477,7 +1058,7 @@ def evaluate_with_active_search(model, dataset, val_dir, K=10, batch_size=1, dev
         
         # Perform active search
         best_solution, best_reward, best_coverage, all_rewards, all_coverages, pred_err_selected, pred_err_opt, regret, corr = \
-            active_search_single_instance(model, data_tensor, instance_mask, length, name, K, device, value_net)
+            active_search_single_instance(model, data_tensor, instance_mask, length, name, K, device, value_net, no_geometry)
         
         instance_time = time.time() - instance_start
         total_time += instance_time
@@ -502,8 +1083,9 @@ def evaluate_with_active_search(model, dataset, val_dir, K=10, batch_size=1, dev
         all_best_coverages.append(best_coverage)
         all_best_sizes.append(len(best_solution))
         all_size_ratios.append(size_ratio)
-        all_reward_variances.append(np.var(all_rewards))
-        all_coverage_variances.append(np.var(all_coverages))
+        if not no_geometry:
+            all_reward_variances.append(np.var(all_rewards))
+            all_coverage_variances.append(np.var(all_coverages))
         
         # Collect value net quality metrics if using value network
         if pred_err_selected is not None:
@@ -597,11 +1179,32 @@ def evaluate_with_active_search(model, dataset, val_dir, K=10, batch_size=1, dev
     return results_summary
 
 
-def print_results(results):
+def print_results(results, args=None):
     """Print evaluation results in a nice format."""
-    use_value_net = results.get('use_value_net', False)
-    search_type = "Fast" if use_value_net else "Standard"
-    print(f"\n=== {search_type.upper()} ACTIVE SEARCH EVALUATION RESULTS (K={results['K']}) ===")
+    # Use new simplified proxy argument structure
+    if args and hasattr(args, 'proxy'):
+        proxy = args.proxy
+        mode = getattr(args, 'mode', 'sampling')
+    else:
+        # Backward compatibility fallback
+        use_value_net = results.get('use_value_net', False)
+        use_ranker = results.get('use_ranker', False)
+        if use_ranker:
+            proxy = 'ranker'
+        elif use_value_net:
+            proxy = 'value_net'
+        else:
+            proxy = 'reward'
+        mode = 'sampling'
+    
+    if proxy == 'ranker':
+        search_type = "Ranker"
+    elif proxy == 'value_net':
+        search_type = "Value Net"
+    else:
+        search_type = "Standard"
+    
+    print(f"\n=== {search_type.upper()} {mode.upper()} EVALUATION RESULTS (K={results['K']}) ===")
     print(f"Number of instances: {results['num_instances']}")
     
     # Print timing information
@@ -611,8 +1214,9 @@ def print_results(results):
         print(f"\nTiming Information:")
         print(f"  Total evaluation time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
         print(f"  Average time per instance: {avg_time:.3f} seconds")
-        if use_value_net:
-            print(f"  🚀 Using value network for fast evaluation!")
+        if proxy in ['value_net', 'ranker']:
+            network_name = "ranker network" if proxy == 'ranker' else "value network"
+            print(f"  🚀 Using {network_name} for fast evaluation!")
         else:
             print(f"  ⏳ Using standard evaluation (computing actual rewards for all K samples)")
     
@@ -628,13 +1232,13 @@ def print_results(results):
             print(f"  Q75: {stats['q75']:.4f}")
             print(f"  IQR: {stats['iqr']:.4f}")
     
-    print_stat_section(results['best_reward_stats'], "Best Reward Statistics")
-    print_stat_section(results['best_coverage_stats'], "Best Coverage Statistics") 
-    print_stat_section(results['best_size_stats'], "Best Solution Size Statistics")
-    print_stat_section(results['size_ratio_stats'], "Size Ratio Statistics (best/optimal)")
+    print_stat_section(results.get('best_rewards', results.get('best_reward_stats', {})), "Best Reward Statistics")
+    print_stat_section(results.get('best_coverages', results.get('best_coverage_stats', {})), "Best Coverage Statistics") 
+    print_stat_section(results.get('best_sizes', results.get('best_size_stats', {})), "Best Solution Size Statistics")
+    print_stat_section(results.get('size_ratios', results.get('size_ratio_stats', {})), "Size Ratio Statistics (best/optimal)")
     
     # Print value net quality stats if using value network
-    if use_value_net:
+    if proxy == 'value_net':
         if 'pred_err_selected_stats' in results:
             print_stat_section(results['pred_err_selected_stats'], "|pred(selected) - true(selected)|")
         if 'pred_err_opt_stats' in results:
@@ -664,55 +1268,57 @@ def main():
     
     parser = argparse.ArgumentParser(description='Evaluate RL AGP model with active search')
     parser.add_argument('--checkpoint', type=str, 
-                       default='checkpoints/rl_agp_model_embedding_size128_hidden_size128_n_glimpses1_tanh_exploration10_temperature1.0_use_tanhTrue_epochs30.pt',
-                       help='Path to model checkpoint')
+                       default='auto',
+                       help='Path to model checkpoint ("auto" to auto-detect best RL checkpoint)')
     parser.add_argument('--val-dir', type=str, 
                        default=os.path.join(DATASET_PATH, "dev"),
                        help='Directory with validation .pol files')
-    parser.add_argument('--K', type=int, default=10,
+    parser.add_argument('--K', type=int, default=1,
                        help='Number of solutions to sample per instance')
     parser.add_argument('--max-instances', type=int, default=None,
                        help='Maximum number of instances to evaluate (for testing)')
     parser.add_argument('--normalize', action='store_true', default=True,
                        help='Normalize coordinates')
-    parser.add_argument('--output', type=str, default='results/active_search_evaluation_K={K}.json',
+    parser.add_argument('--output', type=str, default='results/sampling_evaluation_K={K}.json',
                        help='Output file for results (K will be replaced with actual value)')
+    parser.add_argument('--no-geometry', action='store_true',
+                       help='Disable all geometry-based computations (true rewards and coverage). Useful for fully geometry-free RL demos.')
     
-    # Active Search (test-time training) parameters
-    parser.add_argument('--use-as', action='store_true',
-                       help='Use Active Search test-time training on each instance')
-    parser.add_argument('--as-batch-size', type=int, default=8,
-                       help='Batch size B for Active Search (solutions per gradient step)')
-    parser.add_argument('--as-lr', type=float, default=3e-4,
-                       help='Learning rate for Active Search Adam optimizer')
-    parser.add_argument('--as-alpha', type=float, default=0.9,
-                       help='EMA baseline alpha for Active Search (0.9-0.99)')
+    # === CORE EVALUATION PARAMETERS ===
+    # Evaluation Mode: What strategy to use
+    parser.add_argument('--mode', choices=['sampling', 'search'], default='sampling',
+                       help='Evaluation mode: "sampling" (sample K solutions, pick best) or "search" (active search with test-time training)')
     
-    # Value network parameters
-    parser.add_argument('--use-value-net', action='store_true',
-                       help='Use trained value network for fast active search')
-    parser.add_argument('--value-net-path', type=str, 
-                       default='auto',
-                       help='Path to trained value network ("auto" to auto-detect best checkpoint)')
-    parser.add_argument('--value-net-embedding-size', type=int, default=128,
-                       help='Embedding size for value network (should match training)')
-    parser.add_argument('--value-net-hidden-size', type=int, default=256,
-                       help='Hidden size for value network (should match training)')
-    parser.add_argument('--value-net-fallback', action='store_true', default=True,
-                       help='Fall back to standard evaluation if value network fails')
+    # Evaluation Proxy: How to evaluate/rank solutions  
+    parser.add_argument('--proxy', choices=['reward', 'value_net', 'ranker'], default='reward',
+                       help='Evaluation proxy: "reward" (true geometry), "value_net" (trained value network), "ranker" (trained ranker)')
     
-    # Model architecture parameters (should match training)
-    parser.add_argument('--embedding-size', type=int, default=128)
-    parser.add_argument('--hidden-size', type=int, default=128)
-    parser.add_argument('--n-glimpses', type=int, default=1)
-    parser.add_argument('--tanh-exploration', type=int, default=10)
-    parser.add_argument('--use-tanh', action='store_true', default=True)
-    parser.add_argument('--temperature', type=float, default=1.0)
+    # Proxy model path (auto-detected if not specified)
+    parser.add_argument('--proxy-path', type=str, default='auto',
+                       help='Path to proxy model checkpoint ("auto" to auto-detect best)')
+
+    args = parser.parse_args()    # === ARGUMENT VALIDATION AND CLEANUP ===
+    # Simplify the logic - convert old-style args to new style for backward compatibility
+    if hasattr(args, 'use_as') and args.use_as:
+        args.mode = 'search'
+    if hasattr(args, 'use_value_net') and args.use_value_net:
+        args.proxy = 'value_net'
+    if hasattr(args, 'use_ranker') and args.use_ranker:
+        args.proxy = 'ranker'
     
-    args = parser.parse_args()
+    # Set proxy path from old arguments if available
+    if hasattr(args, 'value_net_path') and args.proxy == 'value_net' and args.proxy_path == 'auto':
+        args.proxy_path = args.value_net_path
+    if hasattr(args, 'ranker_path') and args.proxy == 'ranker' and args.proxy_path == 'auto':
+        args.proxy_path = args.ranker_path
+    
+    print(f"🎯 Evaluation Mode: {args.mode.upper()}")
+    print(f"🔧 Evaluation Proxy: {args.proxy.upper()}")
+    if args.proxy != 'reward':
+        print(f"📁 Proxy Model Path: {args.proxy_path}")
     
     # Load validation dataset
-    print(f"Loading validation dataset from: {args.val_dir}")
+    print(f"\nLoading validation dataset from: {args.val_dir}")
     val_files = [os.path.join(args.val_dir, f) for f in os.listdir(args.val_dir) if f.endswith('.pol')]
     if args.max_instances:
         val_files = val_files[:args.max_instances]
@@ -722,94 +1328,118 @@ def main():
     print(f"Loaded {len(val_dataset)} validation instances")
     
     # Load model
-    model, device = load_rl_model(
-        args.checkpoint,
-        embedding_size=args.embedding_size,
-        hidden_size=args.hidden_size,
-        n_glimpses=args.n_glimpses,
-        tanh_exploration=args.tanh_exploration,
-        use_tanh=args.use_tanh,
-        temperature=args.temperature
-    )
+    checkpoint_path = args.checkpoint
+    if checkpoint_path == 'auto':
+        auto_checkpoint = find_best_rl_checkpoint()
+        if auto_checkpoint:
+            checkpoint_path = auto_checkpoint
+            print(f"🔍 Auto-detected RL model: {checkpoint_path}")
+        else:
+            raise FileNotFoundError("No RL model checkpoints found in 'checkpoints/' directory")
     
-    # Load value network if requested
-    value_net = None
-    if args.use_value_net:
-        # Auto-detect value network if needed
-        value_net_path = args.value_net_path
-        if value_net_path == 'auto':
-            auto_path = find_best_value_net_checkpoint()
-            if auto_path:
-                value_net_path = auto_path
-                print(f"🔍 Auto-detected value network: {value_net_path}")
-            else:
-                print("✗ No value network checkpoints found in 'checkpoints/' directory")
-                if args.value_net_fallback:
-                    print("  Falling back to standard active search")
-                    args.use_value_net = False
-                else:
-                    raise FileNotFoundError("No value network checkpoints found and fallback disabled")
+    model, device = load_rl_model(checkpoint_path)
+    
+    # === LOAD PROXY MODEL (if needed) ===
+    proxy_model = None
+    if args.proxy != 'reward':
+        print(f"\n🔧 Loading {args.proxy} proxy model...")
         
-        if args.use_value_net and os.path.exists(value_net_path):
-            try:
-                value_net, _ = load_value_net(value_net_path, 
-                                            embedding_size=args.value_net_embedding_size,
-                                            hidden_size=args.value_net_hidden_size)
-                print(f"✓ Value network loaded successfully from {value_net_path}")
-                print(f"  Architecture: embedding_size={args.value_net_embedding_size}, hidden_size={args.value_net_hidden_size}")
-            except Exception as e:
-                print(f"✗ Error loading value network: {e}")
-                if args.value_net_fallback:
-                    print("  Falling back to standard active search")
-                    args.use_value_net = False
+        # Auto-detect proxy path if needed
+        if args.proxy_path == 'auto':
+            if args.proxy == 'value_net':
+                auto_path = find_best_value_net_checkpoint()
+                if auto_path:
+                    args.proxy_path = auto_path
+                    print(f"🔍 Auto-detected value network: {auto_path}")
                 else:
-                    raise
-        elif args.use_value_net:
-            print(f"✗ Value network not found at {value_net_path}")
-            if args.value_net_fallback:
-                print("  Falling back to standard active search")
-                args.use_value_net = False
-            else:
-                raise FileNotFoundError(f"Value network not found: {value_net_path}")
+                    print("✗ No value network checkpoints found")
+                    print("  Falling back to reward-based evaluation")
+                    args.proxy = 'reward'
+            elif args.proxy == 'ranker':
+                auto_path = find_best_ranker_checkpoint()
+                if auto_path:
+                    args.proxy_path = auto_path
+                    print(f"🔍 Auto-detected ranker network: {auto_path}")
+                else:
+                    print("✗ No ranker network checkpoints found")
+                    print("  Falling back to reward-based evaluation")
+                    args.proxy = 'reward'
+        
+        # Load proxy model if we have a valid path
+        if args.proxy != 'reward' and os.path.exists(args.proxy_path):
+            try:
+                proxy_model, _, model_info = load_reward_predictor(args.proxy_path)
+                print(f"✓ {args.proxy} loaded successfully")
+                
+            except Exception as e:
+                print(f"✗ Error loading {args.proxy}: {e}")
+                print("  Falling back to reward-based evaluation")
+                args.proxy = 'reward'
+                proxy_model = None
+        elif args.proxy != 'reward':
+            print(f"✗ Proxy model not found at {args.proxy_path}")
+            print("  Falling back to reward-based evaluation")
+            args.proxy = 'reward'
+            proxy_model = None
     
-    # Evaluate with chosen strategy
-    if args.use_as:
+    # === EVALUATE WITH CHOSEN STRATEGY ===
+    if args.mode == 'search':
+        # Active Search with test-time training
+        print("🚀 Using Active Search with test-time training")
         results = evaluate_with_as_training(
             model, val_dataset, args.val_dir,
             K=args.K,
-            B=args.as_batch_size,
-            lr=args.as_lr,
-            alpha=args.as_alpha,
-            device=device
+            device=device,
+            value_net=proxy_model,
+            no_geometry=args.no_geometry
         )
+        training_method = 'search_' + args.proxy
     else:
-        results = evaluate_with_active_search(model, val_dataset, args.val_dir, K=args.K, device=device,
-                                            value_net=value_net, use_value_net=args.use_value_net)
+        # Default: Simple sampling evaluation
+        use_proxy = args.proxy != 'reward'
+        if use_proxy:
+            print(f"🎯 Using sampling with {args.proxy} for solution selection")
+        else:
+            print("🎲 Using simple sampling evaluation")
+            
+        results = evaluate_with_sampling(
+            model, val_dataset, args.val_dir, 
+            K=args.K, 
+            device=device,
+            value_net=proxy_model, 
+            use_value_net=use_proxy, 
+            no_geometry=args.no_geometry
+        )
+        
+        training_method = 'sampling_' + args.proxy
     
     # Print results
-    print_results(results)
+    print_results(results, args)
     
-    # Prepare results for saving (match RL evaluation format)
-    if args.use_as:
-        training_method = 'active_search_training'
-    else:
-        method_suffix = "_fast" if args.use_value_net else "_standard"
-        training_method = f'active_search_rl{method_suffix}'
+    # Prepare results for saving
     results_summary = {
         'args': vars(args),
         'K': args.K,
-        'use_value_net': args.use_value_net,
+        'mode': args.mode,
+        'proxy': args.proxy,
         'num_instances': results['num_instances'],
         'training_method': training_method,
-        'best_reward_stats': results['best_reward_stats'],
-        'best_coverage_stats': results['best_coverage_stats'], 
-        'best_size_stats': results['best_size_stats'],
-        'size_ratio_stats': results['size_ratio_stats']
+        'evaluation_type': results.get('evaluation_type', training_method),
+        'total_time': results.get('total_time', 0.0),
+        'avg_time_per_instance': results.get('avg_time_per_instance', 0.0),
+        'best_rewards': results.get('best_rewards', results.get('best_reward_stats', {})),
+        'best_coverages': results.get('best_coverages', results.get('best_coverage_stats', {})), 
+        'best_sizes': results.get('best_sizes', results.get('best_size_stats', {})),
+        'size_ratios': results.get('size_ratios', results.get('size_ratio_stats', {}))
     }
     
-    # Add prediction error stats if using value network
-    if args.use_value_net and 'prediction_error_stats' in results:
+    # Add additional stats if available
+    if 'prediction_error_stats' in results:
         results_summary['prediction_error_stats'] = results['prediction_error_stats']
+    if 'regrets' in results:
+        results_summary['regrets'] = results['regrets']
+    if 'correlations' in results:
+        results_summary['correlations'] = results['correlations']
     
     # Generate output filename with K value
     output_file = args.output.replace('{K}', str(args.K))

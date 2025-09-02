@@ -17,7 +17,7 @@ from dataset import Dataset, agp_read_samples, collate_fn
 
 
 # Global configuration
-USE_CUDA = True
+USE_CUDA = torch.cuda.is_available()
 
 
 

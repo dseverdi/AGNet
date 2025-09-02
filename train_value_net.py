@@ -27,6 +27,56 @@ from rl_agp import BucketBatchSampler, get_lengths_from_dataset
 from functools import partial
 
 
+class RankerNet(nn.Module):
+    """
+    Simple ranker that outputs a scalar score s(x, S) for a polygon x and guard set S.
+    Higher score = better solution. For compatibility with evaluate.py (which expects
+    lower-is-better rewards), this module provides predict_reward = -score.
+    """
+    def __init__(self, embedding_size=128, hidden_size=256, max_vertices=1000):
+        super().__init__()
+        self.polygon_encoder = nn.LSTM(2, embedding_size, batch_first=True)
+        self.guard_embedding = nn.Embedding(max_vertices, embedding_size)
+        self.solution_encoder = nn.LSTM(embedding_size, embedding_size, batch_first=True)
+        # Add two simple meta features: |S|/N and N_norm
+        fusion_in = embedding_size * 2 + 2
+        self.backbone = nn.Sequential(
+            nn.Linear(fusion_in, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+        )
+        self.score_head = nn.Linear(hidden_size, 1)
+
+    def forward(self, polygon_coords, guard_indices, polygon_lengths, solution_lengths):
+        # Encode polygon
+        packed_poly = pack_padded_sequence(polygon_coords, polygon_lengths.cpu(), batch_first=True, enforce_sorted=False)
+        _, (poly_hidden, _) = self.polygon_encoder(packed_poly)
+        poly_features = poly_hidden[-1]
+        # Encode solution
+        guard_embeds = self.guard_embedding(guard_indices)
+        packed_sol = pack_padded_sequence(guard_embeds, solution_lengths.cpu(), batch_first=True, enforce_sorted=False)
+        _, (sol_hidden, _) = self.solution_encoder(packed_sol)
+        sol_features = sol_hidden[-1]
+        # Meta
+        n_vertices = polygon_lengths.to(polygon_coords.device).float()
+        n_guards = solution_lengths.to(polygon_coords.device).float()
+        n_ratio = torch.where(n_vertices > 0, n_guards / n_vertices, torch.zeros_like(n_vertices))
+        N_norm = torch.clamp(n_vertices / 1000.0, 0.0, 1.0)
+        meta = torch.stack([n_ratio, N_norm], dim=1)
+        # Fuse
+        h = self.backbone(torch.cat([poly_features, sol_features, meta], dim=1))
+        score = self.score_head(h).squeeze(-1)
+        return score
+
+    # Compatibility: evaluate.py expects a lower-is-better reward-like value
+    def predict_reward(self, polygon_coords, guard_indices, polygon_lengths, solution_lengths):
+        score = self.forward(polygon_coords, guard_indices, polygon_lengths, solution_lengths)
+        return -score
+
+
 def compute_simple_metrics(predictions, targets):
     """Compute simple regression metrics without sklearn."""
     predictions_np = predictions.detach().cpu().numpy()
@@ -187,6 +237,64 @@ class SolutionValueNet(nn.Module):
         return reward_pred.squeeze(-1)
 
 
+class MultiTaskValueNet(nn.Module):
+    """
+    Multi-task value net: predicts coverage in [0,1] and reward (scalar).
+    Adds simple meta features [n_guards/N, N_norm] for stability.
+    """
+    def __init__(self, embedding_size=128, hidden_size=256, max_vertices=1000):
+        super().__init__()
+
+        # Polygon and solution encoders
+        self.polygon_encoder = nn.LSTM(2, embedding_size, batch_first=True)
+        self.guard_embedding = nn.Embedding(max_vertices, embedding_size)
+        self.solution_encoder = nn.LSTM(embedding_size, embedding_size, batch_first=True)
+
+        # Fusion backbone with meta features
+        fusion_in = embedding_size * 2 + 2
+        self.backbone = nn.Sequential(
+            nn.Linear(fusion_in, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+        )
+        # Heads
+        self.reward_head = nn.Linear(hidden_size, 1)
+        self.coverage_head = nn.Sequential(nn.Linear(hidden_size, 1), nn.Sigmoid())
+
+    def forward(self, polygon_coords, guard_indices, polygon_lengths, solution_lengths):
+        device = polygon_coords.device
+        # Encode polygon
+        packed_poly = pack_padded_sequence(polygon_coords, polygon_lengths.cpu(), batch_first=True, enforce_sorted=False)
+        _, (poly_hidden, _) = self.polygon_encoder(packed_poly)
+        poly_features = poly_hidden[-1]
+        # Encode solution
+        guard_embeds = self.guard_embedding(guard_indices)
+        packed_sol = pack_padded_sequence(guard_embeds, solution_lengths.cpu(), batch_first=True, enforce_sorted=False)
+        _, (sol_hidden, _) = self.solution_encoder(packed_sol)
+        sol_features = sol_hidden[-1]
+        # Meta features
+        n_vertices = polygon_lengths.to(device).float()
+        n_guards = solution_lengths.to(device).float()
+        n_ratio = torch.where(n_vertices > 0, n_guards / n_vertices, torch.zeros_like(n_vertices))
+        N_norm = torch.clamp(n_vertices / 1000.0, 0.0, 1.0)
+        meta = torch.stack([n_ratio, N_norm], dim=1)
+        # Fuse
+        h = self.backbone(torch.cat([poly_features, sol_features, meta], dim=1))
+        reward = self.reward_head(h).squeeze(-1)
+        coverage = self.coverage_head(h).squeeze(-1)
+        return { 'reward': reward, 'coverage': coverage }
+
+    @staticmethod
+    def reward_from_coverage(coverage, n_ratio, alpha=5.0, p=0.0, delta=1.0, scale=1000.0, tol=1e-5, k=100.0):
+        uncovered = torch.clamp(1.0 - coverage, 0.0, 1.0)
+        base = scale * (uncovered.pow(alpha) * (n_ratio + 1e-8).pow(p))
+        gate = torch.sigmoid(torch.tensor(k, device=coverage.device) * (uncovered - tol))
+        return base + delta * gate
+
+
 class SolutionDataset(Dataset):
     """Dataset for (polygon, solution, reward) triplets."""
     
@@ -203,13 +311,15 @@ class SolutionDataset(Dataset):
             torch.tensor(item['solution'], dtype=torch.long),
             torch.tensor(item['reward'], dtype=torch.float32),
             item['polygon_length'],
-            item['solution_length']
+            item['solution_length'],
+            item.get('coverage', None),
+            item.get('polygon_name', None),
         )
 
 
 def solution_collate_fn(batch):
     """Collate function for solution dataset."""
-    polygons, solutions, rewards, poly_lengths, sol_lengths = zip(*batch)
+    polygons, solutions, rewards, poly_lengths, sol_lengths, coverages, names = zip(*batch)
     
     # Pad sequences
     polygons_padded = pad_sequence(polygons, batch_first=True, padding_value=0.0)
@@ -217,8 +327,28 @@ def solution_collate_fn(batch):
     rewards_tensor = torch.stack(rewards)
     poly_lengths_tensor = torch.tensor(poly_lengths, dtype=torch.long)
     sol_lengths_tensor = torch.tensor(sol_lengths, dtype=torch.long)
-    
-    return polygons_padded, solutions_padded, rewards_tensor, poly_lengths_tensor, sol_lengths_tensor
+    # Coverage tensors
+    cov_vals = []
+    cov_mask = []
+    for c in coverages:
+        if c is None:
+            cov_vals.append(0.0)
+            cov_mask.append(0)
+        else:
+            cov_vals.append(float(c))
+            cov_mask.append(1)
+    coverage_tensor = torch.tensor(cov_vals, dtype=torch.float32)
+    coverage_mask = torch.tensor(cov_mask, dtype=torch.bool)
+    return (
+        polygons_padded,
+        solutions_padded,
+        rewards_tensor,
+        poly_lengths_tensor,
+        sol_lengths_tensor,
+        coverage_tensor,
+        coverage_mask,
+        names,
+    )
 
 
 def load_trained_actor(checkpoint_path, embedding_size=128, hidden_size=128, n_glimpses=1, 
@@ -294,14 +424,23 @@ def generate_training_data(actor_model, dataset, num_samples_per_polygon=100, de
                             if idx not in seen:
                                 seen.add(idx)
                                 clamped.append(idx)
-                        solution = clamped
+                        # Canonicalize as sorted set to remove order-variance for value_net
+                        solution = sorted(clamped)
                     
                     if len(solution) == 0:
                         # If still empty, skip
                         continue
                     
-                    # Compute exact reward (expensive)
-                    reward = reward_func(polygon_coords, solution, polygon_name, length=polygon_length)
+                    # Compute exact reward and coverage
+                    try:
+                        reward = reward_func(polygon_coords, solution, polygon_name, length=polygon_length)
+                    except Exception:
+                        reward = float('inf')
+                    try:
+                        from utils import evaluate_polygon_visibility_numpy_wo_gt
+                        coverage = float(evaluate_polygon_visibility_numpy_wo_gt(polygon_coords, solution, polygon_name))
+                    except Exception:
+                        coverage = 0.0
                     
                     training_data.append({
                         'polygon': polygon_coords,
@@ -309,7 +448,8 @@ def generate_training_data(actor_model, dataset, num_samples_per_polygon=100, de
                         'reward': reward,
                         'polygon_length': polygon_length,
                         'solution_length': len(solution),
-                        'polygon_name': polygon_name
+                        'polygon_name': polygon_name,
+                        'coverage': coverage,
                     })
                     
                 except Exception as e:
@@ -323,8 +463,134 @@ def generate_training_data(actor_model, dataset, num_samples_per_polygon=100, de
     return training_data
 
 
+def evaluate_value_net_performance(model, test_data, device, r_mean, r_std, max_samples=1000):
+    """Evaluate value network performance with comprehensive metrics"""
+    if not test_data:
+        return {}
+    
+    model.eval()
+    test_dataset = SolutionDataset(test_data[:max_samples])
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, collate_fn=solution_collate_fn)
+    
+    all_predictions = []
+    all_targets = []
+    all_raw_predictions = []  # Before denormalization
+    polygon_stats = {}
+    
+    with torch.no_grad():
+        eval_pbar = tqdm(test_loader, desc="Evaluating value network performance", leave=False)
+        for batch in eval_pbar:
+            polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
+            polygon_coords = polygon_coords.to(device)
+            guard_indices = guard_indices.to(device)
+            poly_lengths = poly_lengths.to(device)
+            sol_lengths = sol_lengths.to(device)
+            
+            if isinstance(model, MultiTaskValueNet):
+                out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                raw_pred = out['reward']
+            elif isinstance(model, RankerNet):
+                raw_pred = -model(polygon_coords, guard_indices, poly_lengths, sol_lengths)  # Convert score to reward
+            else:
+                raw_pred = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+            
+            # Denormalize predictions
+            pred = torch.expm1(raw_pred * r_std + r_mean)
+            
+            # Collect data for analysis
+            for i, name in enumerate(names):
+                pred_val = pred[i].item()
+                target_val = rewards[i].item()
+                raw_pred_val = raw_pred[i].item()
+                
+                all_predictions.append(pred_val)
+                all_targets.append(target_val)
+                all_raw_predictions.append(raw_pred_val)
+                
+                if name not in polygon_stats:
+                    polygon_stats[name] = {'predictions': [], 'targets': [], 'raw_predictions': []}
+                polygon_stats[name]['predictions'].append(pred_val)
+                polygon_stats[name]['targets'].append(target_val)
+                polygon_stats[name]['raw_predictions'].append(raw_pred_val)
+    
+    # Calculate comprehensive metrics
+    all_predictions = np.array(all_predictions)
+    all_targets = np.array(all_targets)
+    all_raw_predictions = np.array(all_raw_predictions)
+    
+    # Overall metrics
+    mae, r2, rmse, correlation = compute_simple_metrics(torch.tensor(all_predictions), torch.tensor(all_targets))
+    
+    # Raw space metrics (normalized)
+    raw_mae = np.mean(np.abs(all_raw_predictions - np.log1p(all_targets)))
+    raw_correlation = np.corrcoef(all_raw_predictions, np.log1p(all_targets))[0, 1] if len(all_raw_predictions) > 1 else 0.0
+    
+    # Per-polygon statistics
+    polygon_metrics = {}
+    for name, stats in polygon_stats.items():
+        if len(stats['predictions']) > 1:
+            poly_mae = np.mean(np.abs(np.array(stats['predictions']) - np.array(stats['targets'])))
+            poly_corr = np.corrcoef(stats['predictions'], stats['targets'])[0, 1] if len(stats['predictions']) > 1 else 0.0
+            polygon_metrics[name] = {
+                'mae': float(poly_mae),
+                'correlation': float(poly_corr),
+                'num_samples': len(stats['predictions'])
+            }
+    
+    # Prediction distribution analysis
+    pred_percentiles = np.percentile(all_predictions, [5, 25, 50, 75, 95])
+    target_percentiles = np.percentile(all_targets, [5, 25, 50, 75, 95])
+    
+    performance_stats = {
+        'num_samples': len(all_predictions),
+        'overall_metrics': {
+            'mae': float(mae),
+            'rmse': float(rmse),
+            'r2_score': float(r2),
+            'correlation': float(correlation),
+            'raw_mae': float(raw_mae),
+            'raw_correlation': float(raw_correlation)
+        },
+        'prediction_stats': {
+            'mean': float(np.mean(all_predictions)),
+            'std': float(np.std(all_predictions)),
+            'min': float(np.min(all_predictions)),
+            'max': float(np.max(all_predictions)),
+            'percentiles': {
+                '5th': float(pred_percentiles[0]),
+                '25th': float(pred_percentiles[1]),
+                '50th': float(pred_percentiles[2]),
+                '75th': float(pred_percentiles[3]),
+                '95th': float(pred_percentiles[4])
+            }
+        },
+        'target_stats': {
+            'mean': float(np.mean(all_targets)),
+            'std': float(np.std(all_targets)),
+            'min': float(np.min(all_targets)),
+            'max': float(np.max(all_targets)),
+            'percentiles': {
+                '5th': float(target_percentiles[0]),
+                '25th': float(target_percentiles[1]),
+                '50th': float(target_percentiles[2]),
+                '75th': float(target_percentiles[3]),
+                '95th': float(target_percentiles[4])
+            }
+        },
+        'normalization_info': {
+            'r_mean': float(r_mean),
+            'r_std': float(r_std)
+        },
+        'polygon_metrics': polygon_metrics,
+        'num_polygons_evaluated': len(polygon_stats)
+    }
+    
+    return performance_stats
+
+
 def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=0.1, 
-                    embedding_size=128, hidden_size=256):
+                    embedding_size=128, hidden_size=256, target='multi', use_phys_loss=True,
+                    lambda_cov=0.5, lambda_phys=0.4, lambda_reg=0.5, lambda_rank=0.0):
     """Train the solution-aware value network"""
     print(f"Training value network on {len(training_data)} samples...")
     
@@ -348,9 +614,19 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
     
     # Create model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size).to(device)
+    # Reward normalization (log1p)
+    rewards_all = np.array([np.log1p(item['reward']) for item in training_data], dtype=np.float64)
+    r_mean = float(rewards_all.mean())
+    r_std = float(rewards_all.std() + 1e-8)
+    # Model selection
+    if target == 'rank':
+        model = RankerNet(embedding_size=embedding_size, hidden_size=hidden_size).to(device)
+    elif target in ['coverage', 'multi']:
+        model = MultiTaskValueNet(embedding_size=embedding_size, hidden_size=hidden_size).to(device)
+    else:
+        model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
+    mse = nn.MSELoss()
     
     # Statistics tracking
     train_losses = []
@@ -366,7 +642,8 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
     patience_counter = 0
     
     # Generate checkpoint filename similar to rl_agp.py and sl_agp.py
-    checkpoint_name = f"value_net_embedding_size{embedding_size}_hidden_size{hidden_size}_epochs{epochs}.pt"
+    prefix = 'ranker_net' if target == 'rank' else 'value_net'
+    checkpoint_name = f"{prefix}_embedding_size{embedding_size}_hidden_size{hidden_size}_epochs{epochs}.pt"
     best_checkpoint_path = os.path.join('checkpoints', checkpoint_name.replace('.pt', '_best.pt'))
     final_checkpoint_path = os.path.join('checkpoints', checkpoint_name)
     
@@ -384,13 +661,69 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
         train_predictions = []
         train_targets = []
         
-        for batch in train_loader:
-            polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths = \
-                [x.to(device) for x in batch]
-            
-            # Forward pass
-            pred_rewards = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
-            loss = criterion(pred_rewards, rewards)
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} - Training", leave=False)
+        for batch in train_pbar:
+            polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
+            polygon_coords = polygon_coords.to(device)
+            guard_indices = guard_indices.to(device)
+            rewards = rewards.to(device)
+            poly_lengths = poly_lengths.to(device)
+            sol_lengths = sol_lengths.to(device)
+            coverage = coverage.to(device)
+            cov_mask = cov_mask.to(device)
+            y_reward = (torch.log1p(rewards) - r_mean) / r_std
+
+            if isinstance(model, RankerNet):
+                # Pairwise logistic ranking loss within each polygon (names)
+                model_out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                # Build pairs (i,j) where names[i]==names[j]
+                pair_loss = torch.tensor(0.0, device=device)
+                pair_count = 0
+                # Group indices by polygon name
+                groups = {}
+                for idx, nm in enumerate(names):
+                    groups.setdefault(nm, []).append(idx)
+                for nm, idxs in groups.items():
+                    if len(idxs) < 2:
+                        continue
+                    # Use all pairs i<j; if too many, subsample up to 32 pairs
+                    pairs = [(i, j) for ii, i in enumerate(idxs) for j in idxs[ii+1:]]
+                    if len(pairs) > 32:
+                        # random subsample without replacement
+                        rand_idx = np.random.choice(len(pairs), size=32, replace=False)
+                        pairs = [pairs[k] for k in rand_idx]
+                    for i, j in pairs:
+                        # Better solution has LOWER true reward; we want higher score for better
+                        y = torch.sign(rewards[j] - rewards[i])  # +1 if r_j>r_i (i better), -1 if r_j<r_i
+                        s_i = model_out[i]
+                        s_j = model_out[j]
+                        # logistic ranking loss: log(1 + exp(-y*(s_i - s_j)))
+                        pair_loss = pair_loss + F.softplus(-y * (s_i - s_j))
+                        pair_count += 1
+                if pair_count == 0:
+                    loss = torch.tensor(0.0, device=device)
+                else:
+                    loss = pair_loss / pair_count
+                pr = -model_out  # pseudo reward for metrics accumulation (lower is better)
+            elif isinstance(model, MultiTaskValueNet):
+                out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                pr = out['reward']
+                pc = out['coverage']
+                loss = torch.tensor(0.0, device=device)
+                if target in ('reward', 'multi'):
+                    loss = loss + lambda_reg * mse(pr, y_reward)
+                if target in ('coverage', 'multi') and cov_mask.any():
+                    loss = loss + lambda_cov * mse(pc[cov_mask], coverage[cov_mask])
+                if use_phys_loss:
+                    n_vertices = poly_lengths.float()
+                    n_guards = sol_lengths.float()
+                    n_ratio = torch.where(n_vertices > 0, n_guards / n_vertices, torch.zeros_like(n_vertices))
+                    r_from_c = MultiTaskValueNet.reward_from_coverage(pc, n_ratio)
+                    y_reward_raw = torch.expm1(y_reward * r_std + r_mean)
+                    loss = loss + lambda_phys * mse(r_from_c, y_reward_raw)
+            else:
+                pr = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                loss = mse(pr, y_reward)
             
             # Backward pass
             optimizer.zero_grad()
@@ -398,14 +731,21 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
             optimizer.step()
             
             train_loss += loss.item()
-            train_predictions.append(pred_rewards.detach())
+            train_predictions.append(pr.detach())
             train_targets.append(rewards.detach())
+            
+            # Update progress bar
+            train_pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
         
         # Compute training metrics
-        train_loss /= len(train_loader)
-        train_preds_tensor = torch.cat(train_predictions)
-        train_targets_tensor = torch.cat(train_targets)
-        train_mae, train_r2, _, _ = compute_simple_metrics(train_preds_tensor, train_targets_tensor)
+        train_loss /= max(1, len(train_loader))
+        train_preds_tensor = torch.cat(train_predictions) if len(train_predictions) > 0 else torch.tensor([], device=device)
+        train_targets_tensor = torch.cat(train_targets) if len(train_targets) > 0 else torch.tensor([], device=device)
+        if train_preds_tensor.numel() > 0:
+            train_pred_raw = torch.expm1(train_preds_tensor * r_std + r_mean)
+            train_mae, train_r2, _, _ = compute_simple_metrics(train_pred_raw, train_targets_tensor)
+        else:
+            train_mae, train_r2 = 0.0, 0.0
         
         # Validation phase
         model.eval()
@@ -414,21 +754,66 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
         val_targets = []
         
         with torch.no_grad():
-            for batch in val_loader:
-                polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths = \
-                    [x.to(device) for x in batch]
-                
-                pred_rewards = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
-                loss = criterion(pred_rewards, rewards)
-                val_loss += loss.item()
-                val_predictions.append(pred_rewards)
+            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} - Validation", leave=False)
+            for batch in val_pbar:
+                polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
+                polygon_coords = polygon_coords.to(device)
+                guard_indices = guard_indices.to(device)
+                rewards = rewards.to(device)
+                poly_lengths = poly_lengths.to(device)
+                sol_lengths = sol_lengths.to(device)
+                coverage = coverage.to(device)
+                cov_mask = cov_mask.to(device)
+
+                if isinstance(model, RankerNet):
+                    scores = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                    # No regression val loss; approximate with pairwise loss like train
+                    pair_loss = torch.tensor(0.0, device=device)
+                    pair_count = 0
+                    groups = {}
+                    for idx, nm in enumerate(names):
+                        groups.setdefault(nm, []).append(idx)
+                    for nm, idxs in groups.items():
+                        if len(idxs) < 2:
+                            continue
+                        pairs = [(i, j) for ii, i in enumerate(idxs) for j in idxs[ii+1:]]
+                        if len(pairs) > 64:
+                            rand_idx = np.random.choice(len(pairs), size=64, replace=False)
+                            pairs = [pairs[k] for k in rand_idx]
+                        for i, j in pairs:
+                            y = torch.sign(rewards[j] - rewards[i])
+                            pair_loss = pair_loss + F.softplus(-y * (scores[i] - scores[j]))
+                            pair_count += 1
+                    if pair_count > 0:
+                        val_loss += (pair_loss / pair_count).item()
+                    val_predictions.append(-scores)
+                elif isinstance(model, MultiTaskValueNet):
+                    out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                    pr = out['reward']
+                    if target in ('reward','multi'):
+                        loss = mse(pr, (torch.log1p(rewards) - r_mean) / r_std)
+                        val_loss += loss.item()
+                    val_predictions.append(pr)
+                else:
+                    pr = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                    loss = mse(pr, (torch.log1p(rewards) - r_mean) / r_std)
+                    val_loss += loss.item()
+                    val_predictions.append(pr)
                 val_targets.append(rewards)
+                
+                # Update validation progress bar
+                if 'loss' in locals():
+                    val_pbar.set_postfix({'Val Loss': f'{loss.item():.4f}'})
         
         # Compute validation metrics
-        val_loss /= len(val_loader)
-        val_preds_tensor = torch.cat(val_predictions)
-        val_targets_tensor = torch.cat(val_targets)
-        val_mae, val_r2, _, _ = compute_simple_metrics(val_preds_tensor, val_targets_tensor)
+        val_loss /= max(1, len(val_loader))
+        val_preds_tensor = torch.cat(val_predictions) if len(val_predictions) > 0 else torch.tensor([], device=device)
+        val_targets_tensor = torch.cat(val_targets) if len(val_targets) > 0 else torch.tensor([], device=device)
+        if val_preds_tensor.numel() > 0:
+            val_pred_raw = torch.expm1(val_preds_tensor * r_std + r_mean)
+            val_mae, val_r2, _, _ = compute_simple_metrics(val_pred_raw, val_targets_tensor)
+        else:
+            val_mae, val_r2 = 0.0, 0.0
         
         # Record epoch time
         epoch_time = time.time() - epoch_start_time
@@ -452,77 +837,150 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            # Save best model to checkpoints folder
-            torch.save(model.state_dict(), best_checkpoint_path)
+            # Save best model to checkpoints folder with metadata
+            meta = {
+                'model_type': 'ranker' if isinstance(model, RankerNet) else ('multitask' if isinstance(model, MultiTaskValueNet) else 'solution'),
+                'embedding_size': embedding_size,
+                'hidden_size': hidden_size,
+                'target': target,
+            }
+            torch.save({'model_state_dict': model.state_dict(), 'metadata': meta}, best_checkpoint_path)
             print(f"  → New best model saved to {best_checkpoint_path}")
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch+1}")
-                break
+                # Exit epoch loop
+                early_stop = True
+                
+                # Save final and jump out
+                meta = {
+                    'model_type': 'ranker' if isinstance(model, RankerNet) else ('multitask' if isinstance(model, MultiTaskValueNet) else 'solution'),
+                    'embedding_size': embedding_size,
+                    'hidden_size': hidden_size,
+                    'target': target,
+                }
+                torch.save({'model_state_dict': model.state_dict(), 'metadata': meta}, final_checkpoint_path)
+                print(f"Final model saved to {final_checkpoint_path}")
+                # Prepare evaluation with current best
+                best_obj = torch.load(best_checkpoint_path, map_location='cpu')
+                best_state = best_obj['model_state_dict'] if isinstance(best_obj, dict) and 'model_state_dict' in best_obj else best_obj
+                model.load_state_dict(best_state)
+                best_epoch = np.argmin(val_losses)
+                print_training_statistics(train_losses, val_losses, train_maes, val_maes, 
+                                         train_r2s, val_r2s, epoch_times, best_epoch)
+                print("\n" + "="*60)
+                print("FINAL MODEL EVALUATION ON VALIDATION SET")
+                print("="*60)
+                model.eval()
+                all_predictions = []
+                all_targets = []
+                with torch.no_grad():
+                    for batch in val_loader:
+                        polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
+                        polygon_coords = polygon_coords.to(device)
+                        guard_indices = guard_indices.to(device)
+                        rewards = rewards.to(device)
+                        poly_lengths = poly_lengths.to(device)
+                        sol_lengths = sol_lengths.to(device)
+                        if isinstance(model, MultiTaskValueNet):
+                            out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                            pr = out['reward']
+                        else:
+                            pr = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                        all_predictions.extend((torch.expm1(pr * r_std + r_mean)).cpu().numpy())
+                        all_targets.extend(rewards.cpu().numpy())
+                all_predictions_np = np.array(all_predictions)
+                all_targets_np = np.array(all_targets)
+                final_mae, final_r2, final_rmse, correlation = compute_simple_metrics(
+                    torch.tensor(all_predictions_np), torch.tensor(all_targets_np)
+                )
+                print(f"\nFINAL VALIDATION METRICS:")
+                print(f"  Mean Absolute Error (MAE): {final_mae:.6f}")
+                print(f"  Root Mean Square Error (RMSE): {final_rmse:.6f}")
+                print(f"  R² Score: {final_r2:.6f}")
+                print(f"  Correlation Coefficient: {correlation:.6f}")
+                print(f"  Mean Prediction: {np.mean(all_predictions_np):.6f}")
+                print(f"  Mean Target: {np.mean(all_targets_np):.6f}")
+                print(f"  Std Prediction: {np.std(all_predictions_np):.6f}")
+                print(f"  Std Target: {np.std(all_targets_np):.6f}")
+                print("="*60)
+                return model, best_checkpoint_path, final_checkpoint_path
     
-    # Save final model to checkpoints folder
-    torch.save(model.state_dict(), final_checkpoint_path)
+    # Save final model
+    meta = {
+        'model_type': 'ranker' if isinstance(model, RankerNet) else ('multitask' if isinstance(model, MultiTaskValueNet) else 'solution'),
+        'embedding_size': embedding_size,
+        'hidden_size': hidden_size,
+        'target': target,
+    }
+    torch.save({'model_state_dict': model.state_dict(), 'metadata': meta}, final_checkpoint_path)
     print(f"Final model saved to {final_checkpoint_path}")
-    
-    # Load best model for evaluation
-    model.load_state_dict(torch.load(best_checkpoint_path))
-    
-    # Print comprehensive training statistics
+
+    # Load best and evaluate
+    best_obj = torch.load(best_checkpoint_path, map_location='cpu')
+    best_state = best_obj['model_state_dict'] if isinstance(best_obj, dict) and 'model_state_dict' in best_obj else best_obj
+    model.load_state_dict(best_state)
     best_epoch = np.argmin(val_losses)
     print_training_statistics(train_losses, val_losses, train_maes, val_maes, 
                              train_r2s, val_r2s, epoch_times, best_epoch)
-    
-    # Print final model evaluation on validation set
     print("\n" + "="*60)
     print("FINAL MODEL EVALUATION ON VALIDATION SET")
     print("="*60)
-    
     model.eval()
     all_predictions = []
     all_targets = []
-    
     with torch.no_grad():
         for batch in val_loader:
-            polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths = \
-                [x.to(device) for x in batch]
-            
-            pred_rewards = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
-            all_predictions.extend(pred_rewards.cpu().numpy())
+            polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
+            polygon_coords = polygon_coords.to(device)
+            guard_indices = guard_indices.to(device)
+            rewards = rewards.to(device)
+            poly_lengths = poly_lengths.to(device)
+            sol_lengths = sol_lengths.to(device)
+            if isinstance(model, RankerNet):
+                scores = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                pr = -scores
+            elif isinstance(model, MultiTaskValueNet):
+                out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                pr = out['reward']
+            else:
+                pr = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+            all_predictions.extend((torch.expm1(pr * r_std + r_mean)).cpu().numpy())
             all_targets.extend(rewards.cpu().numpy())
-    
-    all_predictions = np.array(all_predictions)
-    all_targets = np.array(all_targets)
-    
-    # Compute final metrics
+    all_predictions_np = np.array(all_predictions)
+    all_targets_np = np.array(all_targets)
     final_mae, final_r2, final_rmse, correlation = compute_simple_metrics(
-        torch.tensor(all_predictions), torch.tensor(all_targets)
+        torch.tensor(all_predictions_np), torch.tensor(all_targets_np)
     )
-    
     print(f"\nFINAL VALIDATION METRICS:")
     print(f"  Mean Absolute Error (MAE): {final_mae:.6f}")
     print(f"  Root Mean Square Error (RMSE): {final_rmse:.6f}")
     print(f"  R² Score: {final_r2:.6f}")
     print(f"  Correlation Coefficient: {correlation:.6f}")
-    print(f"  Mean Prediction: {np.mean(all_predictions):.6f}")
-    print(f"  Mean Target: {np.mean(all_targets):.6f}")
-    print(f"  Std Prediction: {np.std(all_predictions):.6f}")
-    print(f"  Std Target: {np.std(all_targets):.6f}")
-    
-    # Prediction quality assessment
-    if final_r2 > 0.9:
-        quality = "Excellent"
-    elif final_r2 > 0.7:
-        quality = "Good"
-    elif final_r2 > 0.5:
-        quality = "Fair"
-    else:
-        quality = "Poor"
-    
-    print(f"\nMODEL QUALITY ASSESSMENT: {quality}")
+    print(f"  Mean Prediction: {np.mean(all_predictions_np):.6f}")
+    print(f"  Mean Target: {np.mean(all_targets_np):.6f}")
+    print(f"  Std Prediction: {np.std(all_predictions_np):.6f}")
+    print(f"  Std Target: {np.std(all_targets_np):.6f}")
     print("="*60)
     
-    return model, best_checkpoint_path, final_checkpoint_path
+    # Compile training statistics
+    training_stats = {
+        'train_losses': [float(x) for x in train_losses],
+        'val_losses': [float(x) for x in val_losses],
+        'train_maes': [float(x) for x in train_maes],
+        'val_maes': [float(x) for x in val_maes],
+        'train_r2s': [float(x) for x in train_r2s],
+        'val_r2s': [float(x) for x in val_r2s],
+        'epoch_times': [float(x) for x in epoch_times],
+        'epochs_completed': len(train_losses),
+        'best_epoch': int(np.argmin(val_losses)) + 1,
+        'early_stopped': len(train_losses) < epochs,
+        'training_time': float(sum(epoch_times)),
+        'normalization': {'r_mean': r_mean, 'r_std': r_std}
+    }
+    
+    return model, best_checkpoint_path, final_checkpoint_path, training_stats
 
 
 def main():
@@ -549,7 +1007,7 @@ def main():
                        help='Number of solutions to sample per polygon')
     parser.add_argument('--max-polygons', type=int, default=None,
                        help='Maximum number of polygons to use (for testing)')
-    parser.add_argument('--data-file', type=str, default='value_net_training_data.pkl',
+    parser.add_argument('--data-file', type=str, default='data/value_net_training_data.pkl',
                        help='File to save/load training data')
     
     # Training parameters
@@ -557,8 +1015,20 @@ def main():
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--val-split', type=float, default=0.1)
-    parser.add_argument('--output', type=str, default='value_net.pt',
+    parser.add_argument('--output', type=str, default='checkpoints/value_net.pt',
                        help='Output file for trained model (in addition to checkpoints)')
+    parser.add_argument('--target', choices=['reward','coverage','multi'], default='multi')
+    parser.add_argument('--use-phys-loss', action='store_true', default=True)
+    parser.add_argument('--lambda-cov', type=float, default=0.5)
+    parser.add_argument('--lambda-phys', type=float, default=0.4)
+    parser.add_argument('--lambda-reg', type=float, default=0.5)
+    parser.add_argument('--lambda-rank', type=float, default=0.0)
+    
+    # Evaluation and output arguments
+    parser.add_argument('--stats-output', type=str, default='checkpoints/value_net_training_stats.json',
+                       help='Output file for training statistics JSON')
+    parser.add_argument('--evaluate', action='store_true', default=True,
+                       help='Run comprehensive evaluation after training')
     
     # Value network architecture parameters
     parser.add_argument('--value-embedding-size', type=int, default=128,
@@ -632,22 +1102,96 @@ def main():
         print(f"Loaded {len(training_data)} training samples")
         
         # Train value network
-        model, best_checkpoint_path, final_checkpoint_path = train_value_net(
+        model, best_checkpoint_path, final_checkpoint_path, training_stats = train_value_net(
             training_data,
             epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr,
             val_split=args.val_split,
             embedding_size=args.value_embedding_size,
-            hidden_size=args.value_hidden_size
+            hidden_size=args.value_hidden_size,
+            target=args.target,
+            use_phys_loss=args.use_phys_loss,
+            lambda_cov=args.lambda_cov,
+            lambda_phys=args.lambda_phys,
+            lambda_reg=args.lambda_reg,
+            lambda_rank=args.lambda_rank,
         )
         
         # Also save final model to specified location for backward compatibility
         torch.save(model.state_dict(), args.output)
+        
+        # Compile comprehensive statistics
+        stats = {
+            'training_configuration': {
+                'epochs': args.epochs,
+                'batch_size': args.batch_size,
+                'learning_rate': args.lr,
+                'val_split': args.val_split,
+                'embedding_size': args.value_embedding_size,
+                'hidden_size': args.value_hidden_size,
+                'target': args.target,
+                'use_phys_loss': args.use_phys_loss,
+                'lambda_cov': args.lambda_cov,
+                'lambda_phys': args.lambda_phys,
+                'lambda_reg': args.lambda_reg,
+                'lambda_rank': args.lambda_rank,
+                'num_training_samples': len(training_data),
+            },
+            'training_stats': training_stats,
+            'model_paths': {
+                'best_model': best_checkpoint_path,
+                'final_model': final_checkpoint_path,
+                'output_copy': args.output
+            },
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        
+        # Evaluate value network performance if requested
+        if args.evaluate:
+            print("\n=== EVALUATION PHASE ===")
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = model.to(device)
+            
+            # Use validation split for internal evaluation
+            split_idx = int(len(training_data) * (1 - args.val_split))
+            val_data = training_data[split_idx:]
+            
+            # Internal value network performance evaluation
+            print("Evaluating value network performance on validation data...")
+            value_performance = evaluate_value_net_performance(
+                model, val_data, device, 
+                training_stats['normalization']['r_mean'], 
+                training_stats['normalization']['r_std']
+            )
+            stats['value_performance'] = value_performance
+        else:
+            stats['value_performance'] = {'evaluated': False, 'reason': 'Evaluation disabled'}
+        
+        # Save comprehensive statistics to JSON
+        print(f"\nSaving comprehensive training and evaluation statistics to {args.stats_output}")
+        with open(args.stats_output, 'w') as f:
+            json.dump(stats, f, indent=2)
+        
+        print(f"\n=== SUMMARY ===")
+        print(f"Training completed in {training_stats['training_time']:.1f}s over {training_stats['epochs_completed']} epochs")
+        if training_stats['early_stopped']:
+            print(f"Early stopping triggered, best model at epoch {training_stats['best_epoch']}")
+        
+        if args.evaluate and 'value_performance' in stats and stats['value_performance'].get('evaluated', True):
+            vp = stats['value_performance']
+            print(f"Value Network Performance:")
+            print(f"  - MAE: {vp['overall_metrics']['mae']:.4f}")
+            print(f"  - RMSE: {vp['overall_metrics']['rmse']:.4f}")
+            print(f"  - R² Score: {vp['overall_metrics']['r2_score']:.4f}")
+            print(f"  - Correlation: {vp['overall_metrics']['correlation']:.4f}")
+            print(f"  - Evaluated on {vp['num_samples']} samples from {vp['num_polygons_evaluated']} polygons")
+        
         print(f"\nCheckpoint summary:")
         print(f"  Best model saved to: {best_checkpoint_path}")
         print(f"  Final model saved to: {final_checkpoint_path}")
         print(f"  Copy also saved to: {args.output} (for backward compatibility)")
+        print(f"All statistics saved to: {args.stats_output}")
 
 
 if __name__ == "__main__":
