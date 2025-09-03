@@ -9,6 +9,7 @@ Loads a trained RL model and evaluates it on validation instances using active s
 import os
 import copy
 import argparse
+import time
 import torch
 import numpy as np
 import json
@@ -999,6 +1000,114 @@ def standard_sampling_single_instance(model, data_tensor, mask, length, name, K,
     }
 
 
+def evaluate_with_qlearning(dataset, val_dir, device='cpu', no_geometry=False, 
+                           max_episodes=50, verbose=False):
+    """
+    Evaluate using Q-learning tabular approach on validation dataset.
+    
+    Args:
+        dataset: Validation dataset
+        val_dir: Directory containing .pol files
+        device: Device (unused for Q-learning)
+        no_geometry: Whether to disable geometry computations
+        max_episodes: Maximum episodes for Q-learning training per instance
+        verbose: Whether to print progress
+        
+    Returns:
+        dict: Evaluation results
+    """
+    from qlearning_agp import evaluate_qlearning_single_instance
+    
+    all_best_rewards = []
+    all_best_coverages = []
+    all_best_sizes = []
+    all_size_ratios = []
+    all_training_times = []
+    all_cache_hit_rates = []
+    
+    start_time = time.time()
+    
+    print(f"--- Optimized Q-Learning Evaluation on {len(dataset)} validation samples ---")
+    
+    for i, sample in enumerate(dataset.samples):
+        polygon_coords = sample.data
+        instance_name = sample.name
+        
+        print(f"Instance {i+1}/{len(dataset)}: {instance_name}")
+        
+        # Run Q-learning on this instance with optimized parameters
+        result = evaluate_qlearning_single_instance(
+            polygon_coords, instance_name,
+            max_episodes=max_episodes,
+            max_steps_per_episode=15,  # Reduced steps for faster evaluation
+            target_coverage=0.95,  # Stop early at 90% coverage
+            patience=20,  # Reduced patience
+            verbose=False  # Reduce verbosity for batch evaluation
+        )
+        
+        # Collect results
+        all_best_rewards.append(result['best_coverage'])  # Coverage is our reward
+        all_best_coverages.append(result['best_coverage'])
+        all_best_sizes.append(result['best_size'])
+        all_size_ratios.append(result['size_ratio'])
+        all_training_times.append(result['training_time'])
+        all_cache_hit_rates.append(result['cache_stats']['hit_rate'])
+        
+        if verbose:
+            print(f"  Coverage: {result['best_coverage']:.4f}, "
+                  f"Solution size: {result['best_size']}, "
+                  f"Training time: {result['training_time']:.2f}s, "
+                  f"Cache hit rate: {result['cache_stats']['hit_rate']*100:.1f}%")
+    
+    evaluation_time = time.time() - start_time
+    avg_time = evaluation_time / len(dataset)
+    avg_training_time = np.mean(all_training_times)
+    avg_cache_hit_rate = np.mean(all_cache_hit_rates)
+    
+    # Compute statistics
+    def compute_stats(values):
+        if not values:
+            return {}
+        values = np.array(values)
+        return {
+            'mean': float(np.mean(values)),
+            'median': float(np.median(values)),
+            'std': float(np.std(values)),
+            'min': float(np.min(values)),
+            'max': float(np.max(values)),
+            'q25': float(np.percentile(values, 25)),
+            'q75': float(np.percentile(values, 75)),
+            'iqr': float(np.percentile(values, 75) - np.percentile(values, 25))
+        }
+    
+    results = {
+        'num_instances': len(dataset),
+        'K': 1,  # Q-learning finds one solution per instance
+        'evaluation_time': evaluation_time,
+        'avg_time_per_instance': avg_time,
+        'avg_training_time_per_instance': avg_training_time,
+        'avg_cache_hit_rate': avg_cache_hit_rate,
+        'best_reward_stats': compute_stats(all_best_rewards),
+        'best_coverage_stats': compute_stats(all_best_coverages),
+        'best_size_stats': compute_stats(all_best_sizes),
+        'size_ratio_stats': compute_stats(all_size_ratios),
+        'training_time_stats': compute_stats(all_training_times),
+        'cache_hit_rate_stats': compute_stats(all_cache_hit_rates),
+        # Q-learning specific stats
+        'method': 'qlearning_optimized',
+        'max_episodes': max_episodes,
+        'optimization_features': [
+            'visibility_region_caching',
+            'precomputed_guard_visibility',
+            'incremental_coverage_computation',
+            'early_stopping',
+            'reduced_episodes_and_steps'
+        ]
+    }
+    
+    return results
+
+
 def evaluate_with_active_search(model, dataset, val_dir, K=10, batch_size=1, device='cpu', value_net=None, use_value_net=False, no_geometry=False):
     """
     Evaluate the model on validation dataset using active search.
@@ -1279,15 +1388,15 @@ def main():
                        help='Maximum number of instances to evaluate (for testing)')
     parser.add_argument('--normalize', action='store_true', default=True,
                        help='Normalize coordinates')
-    parser.add_argument('--output', type=str, default='results/sampling_evaluation_K={K}.json',
-                       help='Output file for results (K will be replaced with actual value)')
+    parser.add_argument('--output', type=str, default=None,
+                       help='Output file for results. If not specified, will be auto-generated based on mode and parameters.')
     parser.add_argument('--no-geometry', action='store_true',
                        help='Disable all geometry-based computations (true rewards and coverage). Useful for fully geometry-free RL demos.')
     
     # === CORE EVALUATION PARAMETERS ===
     # Evaluation Mode: What strategy to use
-    parser.add_argument('--mode', choices=['sampling', 'search'], default='sampling',
-                       help='Evaluation mode: "sampling" (sample K solutions, pick best) or "search" (active search with test-time training)')
+    parser.add_argument('--mode', choices=['sampling', 'search', 'qlearning'], default='sampling',
+                       help='Evaluation mode: "sampling" (sample K solutions, pick best), "search" (active search with test-time training), or "qlearning" (Q-learning tabular approach)')
     
     # Evaluation Proxy: How to evaluate/rank solutions  
     parser.add_argument('--proxy', choices=['reward', 'value_net', 'ranker'], default='reward',
@@ -1383,9 +1492,38 @@ def main():
             proxy_model = None
     
     # === EVALUATE WITH CHOSEN STRATEGY ===
-    if args.mode == 'search':
+    if args.mode == 'qlearning':
+        # Q-learning tabular approach (no neural network needed)
+        print("🧠 Using optimized Q-learning tabular approach")
+        print("📋 Q-Learning Configuration:")
+        print(f"  • Max episodes per instance: 1000")
+        print(f"  • Max steps per episode: 15") 
+        print(f"  • Target coverage: 90%")
+        print(f"  • Learning rate: 0.1")
+        print(f"  • Epsilon decay: 0.995 → 0.01")
+        print(f"  • Early stopping: enabled")
+        print(f"  • Visibility region caching: enabled")
+        print(f"  • State representation: number of guards")
+        print(f"  • Action space: toggle guard at vertex")
+        results = evaluate_with_qlearning(
+            val_dataset, args.val_dir,
+            device=device,
+            no_geometry=args.no_geometry,
+            max_episodes=1000,
+            verbose=True
+        )
+        training_method = 'qlearning_optimized'
+    elif args.mode == 'search':
         # Active Search with test-time training
         print("🚀 Using Active Search with test-time training")
+        print("📋 Active Search Configuration:")
+        print(f"  • Model: {os.path.basename(checkpoint_path)}")
+        print(f"  • Proxy for ranking: {args.proxy}")
+        print(f"  • Solutions per instance (K): {args.K}")
+        print(f"  • Test-time gradient steps: enabled")
+        print(f"  • Policy gradient optimization: REINFORCE")
+        if args.proxy != 'reward':
+            print(f"  • Proxy model: {os.path.basename(args.proxy_path)}")
         results = evaluate_with_as_training(
             model, val_dataset, args.val_dir,
             K=args.K,
@@ -1397,10 +1535,43 @@ def main():
     else:
         # Default: Simple sampling evaluation
         use_proxy = args.proxy != 'reward'
+        print("🎲 Using sampling evaluation")
+        print("📋 Sampling Configuration:")
+        print(f"  • Model: {os.path.basename(checkpoint_path)}")
+        print(f"  • Solutions per instance (K): {args.K}")
+        print(f"  • Evaluation proxy: {args.proxy}")
         if use_proxy:
-            print(f"🎯 Using sampling with {args.proxy} for solution selection")
+            print(f"  • Proxy model: {os.path.basename(args.proxy_path)}")
+            print(f"  • Selection strategy: best predicted {args.proxy}")
         else:
-            print("🎲 Using simple sampling evaluation")
+            print(f"  • Selection strategy: best true reward")
+        
+        # Extract model architecture info from filename or checkpoint
+        try:
+            if hasattr(model, 'embedding_size'):
+                print(f"  • Model architecture: {model.embedding_size}d embeddings, {model.hidden_size}d hidden")
+            else:
+                # Try to extract from filename
+                import re
+                filename = os.path.basename(checkpoint_path)
+                emb_match = re.search(r'embedding_size(\d+)', filename)
+                hid_match = re.search(r'hidden_size(\d+)', filename)
+                if emb_match and hid_match:
+                    print(f"  • Model architecture: {emb_match.group(1)}d embeddings, {hid_match.group(1)}d hidden")
+            
+            if hasattr(model, 'n_glimpses'):
+                print(f"  • Attention glimpses: {model.n_glimpses}")
+            elif 'n_glimpses' in filename:
+                glimpse_match = re.search(r'n_glimpses(\d+)', filename)
+                if glimpse_match:
+                    print(f"  • Attention glimpses: {glimpse_match.group(1)}")
+        except Exception:
+            pass
+        
+        if use_proxy:
+            print(f"🎯 Using {args.proxy} for solution selection")
+        else:
+            print("🎲 Using true rewards for solution selection")
             
         results = evaluate_with_sampling(
             model, val_dataset, args.val_dir, 
@@ -1441,8 +1612,20 @@ def main():
     if 'correlations' in results:
         results_summary['correlations'] = results['correlations']
     
-    # Generate output filename with K value
-    output_file = args.output.replace('{K}', str(args.K))
+    # Generate mode-specific output filename if not provided
+    if args.output is None:
+        if args.mode == 'qlearning':
+            output_file = f'results/qlearning_evaluation.json'
+        elif args.mode == 'search':
+            output_file = f'results/search_evaluation_{args.proxy}_K={args.K}.json'
+        else:  # sampling mode
+            output_file = f'results/sampling_evaluation_{args.proxy}_K={args.K}.json'
+    else:
+        # Use user-provided filename, replace placeholders
+        output_file = args.output.replace('{K}', str(args.K))
+        output_file = output_file.replace('{mode}', args.mode)
+        output_file = output_file.replace('{proxy}', args.proxy)
+    
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
     # Convert numpy types to native Python types for JSON serialization
