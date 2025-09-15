@@ -917,11 +917,14 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
     torch.save({'model_state_dict': model.state_dict(), 'metadata': meta}, final_checkpoint_path)
     print(f"Final model saved to {final_checkpoint_path}")
 
-    # Load best and evaluate
-    best_obj = torch.load(best_checkpoint_path, map_location='cpu')
-    best_state = best_obj['model_state_dict'] if isinstance(best_obj, dict) and 'model_state_dict' in best_obj else best_obj
-    model.load_state_dict(best_state)
-    best_epoch = np.argmin(val_losses)
+    # Load best and evaluate (only if epochs > 0)
+    if epochs > 0:
+        best_obj = torch.load(best_checkpoint_path, map_location='cpu')
+        best_state = best_obj['model_state_dict'] if isinstance(best_obj, dict) and 'model_state_dict' in best_obj else best_obj
+        model.load_state_dict(best_state)
+        best_epoch = np.argmin(val_losses)
+    else:
+        best_epoch = 0  # No training, so epoch 0
     print_training_statistics(train_losses, val_losses, train_maes, val_maes, 
                              train_r2s, val_r2s, epoch_times, best_epoch)
     print("\n" + "="*60)
@@ -1029,6 +1032,8 @@ def main():
                        help='Output file for training statistics JSON')
     parser.add_argument('--evaluate', action='store_true', default=True,
                        help='Run comprehensive evaluation after training')
+    parser.add_argument('--load-model', type=str, default=None,
+                       help='Path to pre-trained model to load for evaluation (skips training if provided)')
     
     # Value network architecture parameters
     parser.add_argument('--value-embedding-size', type=int, default=128,
@@ -1117,6 +1122,13 @@ def main():
             lambda_reg=args.lambda_reg,
             lambda_rank=args.lambda_rank,
         )
+        
+        # Load pre-trained model if specified
+        if args.load_model:
+            print(f"Loading pre-trained model from {args.load_model}")
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = model.to(device)
+            model.load_state_dict(torch.load(args.load_model, map_location=device))
         
         # Also save final model to specified location for backward compatibility
         torch.save(model.state_dict(), args.output)

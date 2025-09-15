@@ -13,8 +13,11 @@ import time
 import torch
 import numpy as np
 import json
+import pickle
+import sys
 from dotenv import load_dotenv
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 # Import from project files
 from dataset import Dataset, agp_read_samples, collate_fn
@@ -166,7 +169,7 @@ def predict_rewards(model, polygons, solutions, poly_lengths, sol_lengths):
             preds = model(polygons, solutions, poly_lengths, sol_lengths)
             # Handle dict output from MultiTaskValueNet
             if isinstance(preds, dict):
-                preds = preds['reward']  # Use reward prediction
+                preds = preds['coverage']  # Use coverage prediction (normalized [0,1])
     
     return preds
     
@@ -357,8 +360,8 @@ def fast_active_search_with_value_net(actor, value_net, data_tensor, mask, lengt
                 'coverage_variance': 0.0,  # Not computed for fast evaluation
                 'pred_err_selected': prediction_error,
                 'pred_err_opt': prediction_error,  # Same since we only evaluate selected solution
-                'regret': 0.0,  # Would need to compute actual rewards for all K solutions
-                'correlation': 0.0  # Would need actual rewards for all K solutions
+                'regret': 0.0  # Would need to compute actual rewards for all K solutions
+                # 'correlation': 0.0  # Would need actual rewards for all K solutions
             }
         else:
             # Fallback if no valid solutions
@@ -1001,7 +1004,7 @@ def standard_sampling_single_instance(model, data_tensor, mask, length, name, K,
 
 
 def evaluate_with_qlearning(dataset, val_dir, device='cpu', no_geometry=False, 
-                           max_episodes=50, verbose=False):
+                           max_episodes=50, max_steps_per_episode=30, target_coverage=1.0, verbose=False):
     """
     Evaluate using Q-learning tabular approach on validation dataset.
     
@@ -1011,6 +1014,7 @@ def evaluate_with_qlearning(dataset, val_dir, device='cpu', no_geometry=False,
         device: Device (unused for Q-learning)
         no_geometry: Whether to disable geometry computations
         max_episodes: Maximum episodes for Q-learning training per instance
+        max_steps_per_episode: Maximum steps per episode for Q-learning
         verbose: Whether to print progress
         
     Returns:
@@ -1039,8 +1043,8 @@ def evaluate_with_qlearning(dataset, val_dir, device='cpu', no_geometry=False,
         result = evaluate_qlearning_single_instance(
             polygon_coords, instance_name,
             max_episodes=max_episodes,
-            max_steps_per_episode=15,  # Reduced steps for faster evaluation
-            target_coverage=0.95,  # Stop early at 90% coverage
+            max_steps_per_episode=max_steps_per_episode,  # Use parameter instead of hardcoded 30
+                target_coverage=target_coverage,  # Stop early when reaching target_coverage
             patience=20,  # Reduced patience
             verbose=False  # Reduce verbosity for batch evaluation
         )
@@ -1096,6 +1100,8 @@ def evaluate_with_qlearning(dataset, val_dir, device='cpu', no_geometry=False,
         # Q-learning specific stats
         'method': 'qlearning_optimized',
         'max_episodes': max_episodes,
+        'max_steps_per_episode': max_steps_per_episode,
+    'target_coverage': target_coverage,
         'optimization_features': [
             'visibility_region_caching',
             'precomputed_guard_visibility',
@@ -1104,6 +1110,217 @@ def evaluate_with_qlearning(dataset, val_dir, device='cpu', no_geometry=False,
             'reduced_episodes_and_steps'
         ]
     }
+    
+    return results
+
+
+def evaluate_with_value_net(model_path='auto', data_file='data/value_net_training_data.pkl', 
+                           max_instances=None, batch_size=32):
+    """
+    Evaluate a value network on prediction accuracy.
+    
+    Args:
+        model_path: Path to value network checkpoint
+        data_file: Path to training data pickle file
+        max_instances: Maximum number of instances to evaluate
+        batch_size: Batch size for evaluation
+        
+    Returns:
+        dict: Evaluation results
+    """
+    import pickle
+    from train_value_net import solution_collate_fn
+    import re
+    
+    print(f"🧠 Evaluating Value Network Performance")
+    
+    # Auto-detect model if needed
+    if model_path == 'auto':
+        model_path = find_best_value_net_checkpoint()
+        if not model_path:
+            raise FileNotFoundError("No value network checkpoints found in 'checkpoints/' directory")
+        print(f"🔍 Auto-detected value network: {model_path}")
+    
+    # Auto-detect embedding and hidden sizes from checkpoint
+    print("🔍 Auto-detecting model architecture...")
+    embedding_size = None
+    hidden_size = None
+    
+    # First try to read from checkpoint metadata
+    try:
+        device_temp = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        ckpt = torch.load(model_path, map_location=device_temp)
+        if isinstance(ckpt, dict) and 'metadata' in ckpt:
+            meta = ckpt['metadata']
+            if 'embedding_size' in meta:
+                embedding_size = meta['embedding_size']
+                print(f"  Found embedding_size in metadata: {embedding_size}")
+            if 'hidden_size' in meta:
+                hidden_size = meta['hidden_size']
+                print(f"  Found hidden_size in metadata: {hidden_size}")
+    except Exception as e:
+        print(f"  Could not read metadata: {e}")
+    
+    # Fallback: parse from filename
+    filename = os.path.basename(model_path)
+    if embedding_size is None:
+        match = re.search(r'embedding_size(\d+)', filename)
+        if match:
+            embedding_size = int(match.group(1))
+            print(f"  Auto-detected embedding_size from filename: {embedding_size}")
+        else:
+            embedding_size = 128  # Default
+            print(f"  Using default embedding_size: {embedding_size}")
+    
+    if hidden_size is None:
+        match = re.search(r'hidden_size(\d+)', filename)
+        if match:
+            hidden_size = int(match.group(1))
+            print(f"  Auto-detected hidden_size from filename: {hidden_size}")
+        else:
+            hidden_size = 256  # Default
+            print(f"  Using default hidden_size: {hidden_size}")
+    
+    # Load model
+    model, device, model_info = load_reward_predictor(model_path, embedding_size=embedding_size, hidden_size=hidden_size)
+    print(f"✓ Loaded {model_info['type']} model")
+    
+    # Load validation data
+    print(f"📂 Loading validation data from: {data_file}")
+    with open(data_file, 'rb') as f:
+        training_data = pickle.load(f)
+    print(f"📊 Loaded {len(training_data)} training samples")
+    
+    # Use validation split (last 10% of data)
+    split_idx = int(len(training_data) * 0.9)
+    val_data = training_data[split_idx:]
+    
+    if max_instances and max_instances < len(val_data):
+        val_data = val_data[:max_instances]
+        print(f"🎯 Limited to {max_instances} instances")
+    
+    print(f"🔬 Evaluating on {len(val_data)} validation samples")
+    
+    # Create dataset and dataloader
+    from train_value_net import SolutionDataset
+    val_dataset = SolutionDataset(val_data)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, 
+                           collate_fn=solution_collate_fn)
+    
+    # Evaluation
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    all_coverages_pred = []
+    all_coverages_true = []
+    
+    start_time = time.time()
+    
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(val_loader):
+            polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
+            polygon_coords = polygon_coords.to(device)
+            guard_indices = guard_indices.to(device)
+            rewards = rewards.to(device)
+            poly_lengths = poly_lengths.to(device)
+            sol_lengths = sol_lengths.to(device)
+            coverage = coverage.to(device)
+            
+            # Get predictions
+            if hasattr(model, 'predict_reward'):
+                preds = model.predict_reward(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+            else:
+                preds = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                # Handle dict output from MultiTaskValueNet
+                if isinstance(preds, dict):
+                    # Store coverage predictions if available
+                    if 'coverage' in preds:
+                        all_coverages_pred.extend(preds['coverage'].cpu().numpy())
+                        all_coverages_true.extend(coverage.cpu().numpy())
+                    preds = preds['reward']  # Use reward prediction
+            
+            all_predictions.extend(preds.cpu().numpy())
+            all_targets.extend(rewards.cpu().numpy())
+            
+            if batch_idx % 10 == 0:
+                print(f"  Processed batch {batch_idx+1}/{len(val_loader)}")
+    
+    evaluation_time = time.time() - start_time
+    
+    # Convert to numpy arrays
+    predictions = np.array(all_predictions)
+    targets = np.array(all_targets)
+    
+    # Compute metrics
+    def compute_simple_metrics(predictions, targets):
+        # Mean Absolute Error
+        mae = np.mean(np.abs(predictions - targets))
+        
+        # R² Score
+        ss_res = np.sum((targets - predictions) ** 2)
+        ss_tot = np.sum((targets - np.mean(targets)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+        
+        # Root Mean Square Error
+        rmse = np.sqrt(np.mean((predictions - targets) ** 2))
+        
+        # Correlation coefficient
+        correlation = np.corrcoef(targets, predictions)[0, 1] if len(targets) > 1 else 0
+        
+        return mae, r2, rmse, correlation
+    
+    mae, r2, rmse, correlation = compute_simple_metrics(predictions, targets)
+    
+    # Coverage metrics if available
+    coverage_metrics = {}
+    if all_coverages_pred and all_coverages_true:
+        cov_pred = np.array(all_coverages_pred)
+        cov_true = np.array(all_coverages_true)
+        cov_mae, cov_r2, cov_rmse, cov_corr = compute_simple_metrics(cov_pred, cov_true)
+        coverage_metrics = {
+            'mae': float(cov_mae),
+            'r2_score': float(cov_r2),
+            'rmse': float(cov_rmse),
+            'correlation': float(cov_corr)
+        }
+    
+    results = {
+        'evaluation_type': 'Value Network Evaluation',
+        'model_info': model_info,
+        'num_instances': len(val_data),
+        'total_time': evaluation_time,
+        'avg_time_per_instance': evaluation_time / len(val_data),
+        'reward_prediction_metrics': {
+            'mae': float(mae),
+            'r2_score': float(r2),
+            'rmse': float(rmse),
+            'correlation': float(correlation),
+            'mean_prediction': float(np.mean(predictions)),
+            'mean_target': float(np.mean(targets)),
+            'std_prediction': float(np.std(predictions)),
+            'std_target': float(np.std(targets))
+        },
+        'coverage_prediction_metrics': coverage_metrics,
+        'data_info': {
+            'total_samples': len(training_data),
+            'validation_samples': len(val_data),
+            'validation_split': split_idx / len(training_data)
+        }
+    }
+    
+    # Print summary
+    print(f"\n🎯 Value Network Evaluation Results:")
+    print(f"  • Model: {model_info['type']}")
+    print(f"  • Samples evaluated: {len(val_data)}")
+    print(f"  • Evaluation time: {evaluation_time:.2f}s")
+    print(f"  • Reward Prediction MAE: {mae:.4f}")
+    print(f"  • Reward Prediction RMSE: {rmse:.4f}")
+    print(f"  • Reward Prediction R²: {r2:.4f}")
+    print(f"  • Reward Prediction Correlation: {correlation:.4f}")
+    
+    if coverage_metrics:
+        print(f"  • Coverage Prediction MAE: {coverage_metrics['mae']:.4f}")
+        print(f"  • Coverage Prediction R²: {coverage_metrics['r2_score']:.4f}")
     
     return results
 
@@ -1290,8 +1507,12 @@ def evaluate_with_active_search(model, dataset, val_dir, K=10, batch_size=1, dev
 
 def print_results(results, args=None):
     """Print evaluation results in a nice format."""
+    # Check for value_net mode first (direct evaluation, no K samples)
+    if args and hasattr(args, 'mode') and args.mode == 'value_net':
+        mode = 'value_net'
+        proxy = 'value_net'
     # Use new simplified proxy argument structure
-    if args and hasattr(args, 'proxy'):
+    elif args and hasattr(args, 'proxy'):
         proxy = args.proxy
         mode = getattr(args, 'mode', 'sampling')
     else:
@@ -1313,22 +1534,6 @@ def print_results(results, args=None):
     else:
         search_type = "Standard"
     
-    print(f"\n=== {search_type.upper()} {mode.upper()} EVALUATION RESULTS (K={results['K']}) ===")
-    print(f"Number of instances: {results['num_instances']}")
-    
-    # Print timing information
-    if 'evaluation_time' in results:
-        total_time = results['evaluation_time']
-        avg_time = results.get('avg_time_per_instance', 0)
-        print(f"\nTiming Information:")
-        print(f"  Total evaluation time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
-        print(f"  Average time per instance: {avg_time:.3f} seconds")
-        if proxy in ['value_net', 'ranker']:
-            network_name = "ranker network" if proxy == 'ranker' else "value network"
-            print(f"  🚀 Using {network_name} for fast evaluation!")
-        else:
-            print(f"  ⏳ Using standard evaluation (computing actual rewards for all K samples)")
-    
     def print_stat_section(stats, title):
         if all(key in stats for key in ['mean', 'median', 'std', 'min', 'max', 'q25', 'q75', 'iqr']):
             print(f"\n{title}:")
@@ -1340,6 +1545,89 @@ def print_results(results, args=None):
             print(f"  Q25: {stats['q25']:.4f}")
             print(f"  Q75: {stats['q75']:.4f}")
             print(f"  IQR: {stats['iqr']:.4f}")
+    
+    # Handle Q-learning mode specially
+    if mode == 'qlearning':
+        print(f"\n=== Q-LEARNING TABULAR EVALUATION RESULTS ===")
+        print(f"Number of instances: {results['num_instances']}")
+        
+        # Print Q-learning specific timing information
+        if 'evaluation_time' in results:
+            total_time = results['evaluation_time']
+            avg_time = results.get('avg_time_per_instance', 0)
+            avg_training_time = results.get('avg_training_time_per_instance', 0)
+            avg_cache_hit_rate = results.get('avg_cache_hit_rate', 0)
+            print(f"\nTiming Information:")
+            print(f"  Total evaluation time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
+            print(f"  Average time per instance: {avg_time:.3f} seconds")
+            print(f"  Average training time per instance: {avg_training_time:.3f} seconds")
+            print(f"  Average cache hit rate: {avg_cache_hit_rate*100:.1f}%")
+            print(f"  🧠 Tabular Q-learning (no neural networks)")
+        
+        # Print Q-learning specific stats
+        if 'training_time_stats' in results:
+            print_stat_section(results['training_time_stats'], "Training Time Statistics (per instance)")
+        if 'cache_hit_rate_stats' in results:
+            print(f"\nCache Hit Rate Statistics:")
+            cache_stats = results['cache_hit_rate_stats']
+            print(f"  Mean: {cache_stats['mean']*100:.1f}%")
+            print(f"  Median: {cache_stats['median']*100:.1f}%")
+            print(f"  Std: {cache_stats['std']*100:.1f}%")
+            print(f"  Min: {cache_stats['min']*100:.1f}%")
+            print(f"  Max: {cache_stats['max']*100:.1f}%")
+        
+        # Print optimization features
+        if 'optimization_features' in results:
+            print(f"\nOptimization Features:")
+            for feature in results['optimization_features']:
+                print(f"  ✓ {feature}")
+        
+        # Print method info
+        if 'method' in results:
+            print(f"\nMethod: {results['method']}")
+        if 'max_episodes' in results:
+            print(f"Max Episodes: {results['max_episodes']}")
+        if 'max_steps_per_episode' in results:
+            print(f"Max Steps per Episode: {results['max_steps_per_episode']}")
+    
+    # Handle value_net mode specially (direct evaluation, no K samples)
+    elif mode == 'value_net':
+        print(f"\n=== VALUE NETWORK EVALUATION RESULTS ===")
+        if 'num_samples' in results:
+            print(f"Number of samples evaluated: {results['num_samples']}")
+        if 'num_instances' in results:
+            print(f"Number of instances: {results['num_instances']}")
+        
+        # Print evaluation metrics
+        if 'mae' in results:
+            print(f"\nEvaluation Metrics:")
+            print(f"  MAE: {results['mae']:.4f}")
+            print(f"  RMSE: {results['rmse']:.4f}")
+            print(f"  R² Score: {results['r2']:.4f}")
+            print(f"  Correlation: {results['correlation']:.4f}")
+        
+        # Print timing information
+        if 'evaluation_time' in results:
+            total_time = results['evaluation_time']
+            print(f"\nTiming Information:")
+            print(f"  Total evaluation time: {total_time:.2f} seconds")
+            print(f"  🧠 Value network evaluation completed!")
+    else:
+        print(f"\n=== {search_type.upper()} {mode.upper()} EVALUATION RESULTS (K={results['K']}) ===")
+        print(f"Number of instances: {results['num_instances']}")
+        
+        # Print timing information
+        if 'evaluation_time' in results:
+            total_time = results['evaluation_time']
+            avg_time = results.get('avg_time_per_instance', 0)
+            print(f"\nTiming Information:")
+            print(f"  Total evaluation time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
+            print(f"  Average time per instance: {avg_time:.3f} seconds")
+            if proxy in ['value_net', 'ranker']:
+                network_name = "ranker network" if proxy == 'ranker' else "value network"
+                print(f"  🚀 Using {network_name} for fast evaluation!")
+            else:
+                print(f"  ⏳ Using standard evaluation (computing actual rewards for all K samples)")
     
     print_stat_section(results.get('best_rewards', results.get('best_reward_stats', {})), "Best Reward Statistics")
     print_stat_section(results.get('best_coverages', results.get('best_coverage_stats', {})), "Best Coverage Statistics") 
@@ -1368,236 +1656,412 @@ def print_results(results, args=None):
         print(f"  Mean Coverage Variance: {results['coverage_diversity_stats']['mean']:.6f}")
 
 
+def evaluate_with_value_net(model_path='auto', data_file='data/value_net_training_data.pkl', max_instances=None, batch_size=32):
+    """
+    Evaluate value network performance on training data.
+    
+    Args:
+        model_path: Path to value network checkpoint
+        data_file: Path to pickle file with training data
+        max_instances: Maximum number of instances to evaluate
+        batch_size: Batch size for evaluation
+        
+    Returns:
+        dict: Evaluation results
+    """
+    print(f"🔧 Loading value network from: {model_path}")
+    
+    # Auto-detect model path if needed
+    if model_path == 'auto':
+        auto_path = find_best_value_net_checkpoint()
+        if auto_path:
+            model_path = auto_path
+            print(f"🔍 Auto-detected value network: {model_path}")
+        else:
+            raise FileNotFoundError("No value network checkpoints found")
+    
+    # Load model
+    model, device, model_info = load_reward_predictor(model_path)
+    print(f"✓ Loaded {model_info['type']} on {device}")
+    
+    # Load data
+    print(f"📂 Loading data from: {data_file}")
+    with open(data_file, 'rb') as f:
+        training_data = pickle.load(f)
+    
+    if max_instances:
+        training_data = training_data[:max_instances]
+    
+    print(f"📊 Evaluating on {len(training_data)} samples")
+    
+    # Create dataset and dataloader
+    from train_value_net import SolutionDataset, solution_collate_fn
+    dataset = SolutionDataset(training_data)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=solution_collate_fn)
+    
+    # Evaluation
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    all_names = []
+    
+    start_time = time.time()
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Evaluating value network"):
+            polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
+            
+            polygon_coords = polygon_coords.to(device)
+            guard_indices = guard_indices.to(device)
+            rewards = rewards.to(device)
+            poly_lengths = poly_lengths.to(device)
+            sol_lengths = sol_lengths.to(device)
+            
+            # Predict coverage (normalized [0,1])
+            predictions = predict_rewards(model, polygon_coords, guard_indices, poly_lengths, sol_lengths)
+            
+            # Use coverage as targets (normalized [0,1])
+            targets = coverage.to(device)
+            
+            # Convert to numpy
+            predictions_np = predictions.cpu().numpy()
+            targets_np = targets.cpu().numpy()
+            
+            all_predictions.extend(predictions_np)
+            all_targets.extend(targets_np)
+            all_names.extend(names)
+    
+    evaluation_time = time.time() - start_time
+    
+    # Compute metrics
+    all_predictions = np.array(all_predictions)
+    all_targets = np.array(all_targets)
+    
+    # Basic metrics
+    mae = np.mean(np.abs(all_predictions - all_targets))
+    mse = np.mean((all_predictions - all_targets) ** 2)
+    rmse = np.sqrt(mse)
+    r2 = 1 - (np.sum((all_targets - all_predictions) ** 2) / np.sum((all_targets - np.mean(all_targets)) ** 2))
+    
+    # Correlation
+    if len(all_predictions) > 1:
+        correlation = np.corrcoef(all_predictions, all_targets)[0, 1]
+    else:
+        correlation = 0.0
+    
+    # Per-instance statistics
+    unique_names = list(set(all_names))
+    per_instance_stats = {}
+    for name in unique_names:
+        mask = [n == name for n in all_names]
+        preds = all_predictions[mask]
+        targets = all_targets[mask]
+        if len(preds) > 0:
+            per_instance_stats[name] = {
+                'mae': float(np.mean(np.abs(preds - targets))),
+                'rmse': float(np.sqrt(np.mean((preds - targets) ** 2))),
+                'correlation': float(np.corrcoef(preds, targets)[0, 1]) if len(preds) > 1 else 0.0,
+                'num_samples': len(preds)
+            }
+    
+    results = {
+        'model_path': model_path,
+        'model_type': model_info['type'],
+        'data_file': data_file,
+        'num_samples': len(training_data),
+        'num_instances': len(unique_names),
+        'evaluation_time': evaluation_time,
+        'overall_metrics': {
+            'mae': float(mae),
+            'rmse': float(rmse),
+            'r2_score': float(r2),
+            'correlation': float(correlation),
+            'mean_prediction': float(np.mean(all_predictions)),
+            'mean_target': float(np.mean(all_targets)),
+            'std_prediction': float(np.std(all_predictions)),
+            'std_target': float(np.std(all_targets))
+        },
+        'per_instance_stats': per_instance_stats,
+        'raw_predictions': all_predictions.tolist(),
+        'raw_targets': all_targets.tolist(),
+        'instance_names': all_names
+    }
+    
+    print("📈 Value Network Evaluation Results:")
+    print(f"  • MAE: {mae:.4f}")
+    print(f"  • RMSE: {rmse:.4f}")
+    print(f"  • R² Score: {r2:.4f}")
+    print(f"  • Correlation: {correlation:.4f}")
+    print(f"  • Evaluated on {len(training_data)} samples from {len(unique_names)} instances")
+    print(f"  • Evaluation time: {evaluation_time:.2f}s")
+    
+    return results
+
+
+def validate_validation_directory(val_dir):
+    """
+    Validate that the validation directory exists and contains .pol files.
+    
+    Args:
+        val_dir: Path to validation directory
+        
+    Returns:
+        list: List of .pol files found
+        
+    Raises:
+        SystemExit: If validation fails
+    """
+    print(f"🔍 Validating validation directory: {val_dir}")
+    
+    # Check if directory exists
+    if not os.path.exists(val_dir):
+        print(f"❌ Error: Validation directory does not exist: {val_dir}")
+        print(f"   Please check that the path is correct and the directory exists.")
+        print(f"   The default validation directory is DATASET_PATH/dev/ from your .env file.")
+        print(f"   Make sure DATASET_PATH points to a directory containing a 'dev/' subdirectory with .pol files.")
+        sys.exit(1)
+    
+    # Check if it's actually a directory
+    if not os.path.isdir(val_dir):
+        print(f"❌ Error: Path is not a directory: {val_dir}")
+        print(f"   Please provide a valid directory path containing .pol files.")
+        sys.exit(1)
+    
+    # Get list of .pol files
+    try:
+        all_files = os.listdir(val_dir)
+        pol_files = [f for f in all_files if f.endswith('.pol')]
+    except PermissionError:
+        print(f"❌ Error: Permission denied accessing directory: {val_dir}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error: Failed to read directory {val_dir}: {e}")
+        sys.exit(1)
+    
+    # Check if any .pol files found
+    if len(pol_files) == 0:
+        print(f"❌ Error: No .pol files found in directory: {val_dir}")
+        print(f"   Found {len(all_files)} total files: {all_files[:10]}{'...' if len(all_files) > 10 else ''}")
+        print(f"   Make sure the directory contains polygon (.pol) files for evaluation.")
+        sys.exit(1)
+    
+    print(f"✅ Found {len(pol_files)} .pol files in {val_dir}")
+    return [os.path.join(val_dir, f) for f in pol_files]
+
+
 def main():
     # Load environment variables
     load_dotenv()
     DATASET_PATH = os.getenv("DATASET_PATH")
     if not DATASET_PATH:
         raise EnvironmentError("DATASET_PATH environment variable must be set in .env file.")
-    
-    parser = argparse.ArgumentParser(description='Evaluate RL AGP model with active search')
-    parser.add_argument('--checkpoint', type=str, 
-                       default='auto',
-                       help='Path to model checkpoint ("auto" to auto-detect best RL checkpoint)')
-    parser.add_argument('--val-dir', type=str, 
-                       default=os.path.join(DATASET_PATH, "dev"),
-                       help='Directory with validation .pol files')
-    parser.add_argument('--K', type=int, default=1,
-                       help='Number of solutions to sample per instance')
-    parser.add_argument('--max-instances', type=int, default=None,
-                       help='Maximum number of instances to evaluate (for testing)')
-    parser.add_argument('--normalize', action='store_true', default=True,
-                       help='Normalize coordinates')
-    parser.add_argument('--output', type=str, default=None,
-                       help='Output file for results. If not specified, will be auto-generated based on mode and parameters.')
-    parser.add_argument('--no-geometry', action='store_true',
-                       help='Disable all geometry-based computations (true rewards and coverage). Useful for fully geometry-free RL demos.')
-    
-    # === CORE EVALUATION PARAMETERS ===
-    # Evaluation Mode: What strategy to use
-    parser.add_argument('--mode', choices=['sampling', 'search', 'qlearning'], default='sampling',
-                       help='Evaluation mode: "sampling" (sample K solutions, pick best), "search" (active search with test-time training), or "qlearning" (Q-learning tabular approach)')
-    
-    # Evaluation Proxy: How to evaluate/rank solutions  
-    parser.add_argument('--proxy', choices=['reward', 'value_net', 'ranker'], default='reward',
-                       help='Evaluation proxy: "reward" (true geometry), "value_net" (trained value network), "ranker" (trained ranker)')
-    
-    # Proxy model path (auto-detected if not specified)
-    parser.add_argument('--proxy-path', type=str, default='auto',
-                       help='Path to proxy model checkpoint ("auto" to auto-detect best)')
 
-    args = parser.parse_args()    # === ARGUMENT VALIDATION AND CLEANUP ===
-    # Simplify the logic - convert old-style args to new style for backward compatibility
-    if hasattr(args, 'use_as') and args.use_as:
-        args.mode = 'search'
-    if hasattr(args, 'use_value_net') and args.use_value_net:
-        args.proxy = 'value_net'
-    if hasattr(args, 'use_ranker') and args.use_ranker:
-        args.proxy = 'ranker'
-    
-    # Set proxy path from old arguments if available
-    if hasattr(args, 'value_net_path') and args.proxy == 'value_net' and args.proxy_path == 'auto':
-        args.proxy_path = args.value_net_path
-    if hasattr(args, 'ranker_path') and args.proxy == 'ranker' and args.proxy_path == 'auto':
-        args.proxy_path = args.ranker_path
-    
-    print(f"🎯 Evaluation Mode: {args.mode.upper()}")
-    print(f"🔧 Evaluation Proxy: {args.proxy.upper()}")
-    if args.proxy != 'reward':
-        print(f"📁 Proxy Model Path: {args.proxy_path}")
-    
-    # Load validation dataset
-    print(f"\nLoading validation dataset from: {args.val_dir}")
-    val_files = [os.path.join(args.val_dir, f) for f in os.listdir(args.val_dir) if f.endswith('.pol')]
-    if args.max_instances:
-        val_files = val_files[:args.max_instances]
-    
-    val_samples = agp_read_samples(val_files, normalize=args.normalize)
-    val_dataset = Dataset(val_samples)
-    print(f"Loaded {len(val_dataset)} validation instances")
-    
-    # Load model
-    checkpoint_path = args.checkpoint
-    if checkpoint_path == 'auto':
-        auto_checkpoint = find_best_rl_checkpoint()
-        if auto_checkpoint:
-            checkpoint_path = auto_checkpoint
-            print(f"🔍 Auto-detected RL model: {checkpoint_path}")
-        else:
-            raise FileNotFoundError("No RL model checkpoints found in 'checkpoints/' directory")
-    
-    model, device = load_rl_model(checkpoint_path)
-    
-    # === LOAD PROXY MODEL (if needed) ===
-    proxy_model = None
-    if args.proxy != 'reward':
-        print(f"\n🔧 Loading {args.proxy} proxy model...")
-        
-        # Auto-detect proxy path if needed
-        if args.proxy_path == 'auto':
-            if args.proxy == 'value_net':
-                auto_path = find_best_value_net_checkpoint()
-                if auto_path:
-                    args.proxy_path = auto_path
-                    print(f"🔍 Auto-detected value network: {auto_path}")
-                else:
-                    print("✗ No value network checkpoints found")
-                    print("  Falling back to reward-based evaluation")
-                    args.proxy = 'reward'
-            elif args.proxy == 'ranker':
-                auto_path = find_best_ranker_checkpoint()
-                if auto_path:
-                    args.proxy_path = auto_path
-                    print(f"🔍 Auto-detected ranker network: {auto_path}")
-                else:
-                    print("✗ No ranker network checkpoints found")
-                    print("  Falling back to reward-based evaluation")
-                    args.proxy = 'reward'
-        
-        # Load proxy model if we have a valid path
-        if args.proxy != 'reward' and os.path.exists(args.proxy_path):
-            try:
-                proxy_model, _, model_info = load_reward_predictor(args.proxy_path)
-                print(f"✓ {args.proxy} loaded successfully")
-                
-            except Exception as e:
-                print(f"✗ Error loading {args.proxy}: {e}")
-                print("  Falling back to reward-based evaluation")
-                args.proxy = 'reward'
-                proxy_model = None
-        elif args.proxy != 'reward':
-            print(f"✗ Proxy model not found at {args.proxy_path}")
-            print("  Falling back to reward-based evaluation")
-            args.proxy = 'reward'
-            proxy_model = None
-    
-    # === EVALUATE WITH CHOSEN STRATEGY ===
+    parser = argparse.ArgumentParser(description='Evaluate RL AGP model with active search')
+    subparsers = parser.add_subparsers(dest='mode', required=True, help='Evaluation mode')
+
+    # Q-learning subparser
+    ql_parser = subparsers.add_parser('qlearning', help='Q-learning tabular approach')
+    ql_parser.add_argument('--val-dir', type=str, default=os.path.join(DATASET_PATH, "dev"), help='Directory with validation .pol files')
+    ql_parser.add_argument('--max-episodes', type=int, default=1000, help='Maximum episodes for Q-learning training per instance')
+    ql_parser.add_argument('--max-steps', type=int, default=30, help='Maximum steps per episode for Q-learning')
+    ql_parser.add_argument('--target-coverage', type=float, default=0.9, help='Target coverage threshold for early stopping (0.0-1.0)')
+    ql_parser.add_argument('--max-instances', type=int, default=None, help='Maximum number of instances to evaluate (for testing)')
+    ql_parser.add_argument('--normalize', action='store_true', default=True, help='Normalize coordinates')
+    ql_parser.add_argument('--output', type=str, default=None, help='Output file for results.')
+    ql_parser.add_argument('--no-geometry', action='store_true', help='Disable all geometry-based computations.')
+
+    # Sampling/search subparser
+    ss_parser = subparsers.add_parser('sampling', help='Sample K solutions, pick best')
+    ss_parser.add_argument('--checkpoint', type=str, default='auto', help='Path to model checkpoint')
+    ss_parser.add_argument('--val-dir', type=str, default=os.path.join(DATASET_PATH, "dev"), help='Directory with validation .pol files')
+    ss_parser.add_argument('--K', type=int, default=1, help='Number of solutions to sample per instance')
+    ss_parser.add_argument('--max-instances', type=int, default=None, help='Maximum number of instances to evaluate')
+    ss_parser.add_argument('--normalize', action='store_true', default=True, help='Normalize coordinates')
+    ss_parser.add_argument('--output', type=str, default=None, help='Output file for results.')
+    ss_parser.add_argument('--no-geometry', action='store_true', help='Disable all geometry-based computations.')
+    ss_parser.add_argument('--proxy', choices=['reward', 'value_net', 'ranker'], default='reward', help='Evaluation proxy')
+    ss_parser.add_argument('--proxy-path', type=str, default='auto', help='Path to proxy model checkpoint')
+
+    # Add 'search' mode as an alias for sampling (or duplicate if needed)
+    search_parser = subparsers.add_parser('search', help='Active search with test-time training')
+    for arg in ss_parser._actions:
+        if arg.dest != 'help':
+            search_parser._add_action(arg)
+
+    # Value network evaluation subparser
+    vn_parser = subparsers.add_parser('value_net', help='Evaluate value network performance')
+    vn_parser.add_argument('--model-path', type=str, default='auto', help='Path to value network checkpoint')
+    vn_parser.add_argument('--data-file', type=str, default='data/value_net_training_data.pkl', help='Path to training data pickle file')
+    vn_parser.add_argument('--max-instances', type=int, default=None, help='Maximum number of instances to evaluate')
+    vn_parser.add_argument('--batch-size', type=int, default=32, help='Batch size for evaluation')
+    vn_parser.add_argument('--output', type=str, default='results/value_net_evaluation_all.json', help='Output file for results')
+
+    args = parser.parse_args()
+
+    # Now, use args.mode to select logic and only use relevant arguments
+    print(f"📂 Using validation directory: {args.val_dir}")
+    results = None
+    training_method = None
+
     if args.mode == 'qlearning':
+        # Prepare validation dataset for Q-learning
+        val_files = validate_validation_directory(args.val_dir)
+        if args.max_instances:
+            val_files = val_files[:args.max_instances]
+        val_samples = agp_read_samples(val_files, normalize=args.normalize)
+        
+        # Validate that samples were loaded successfully
+        if len(val_samples) == 0:
+            print(f"❌ Error: No valid samples could be loaded from {len(val_files)} files")
+            print(f"   This might indicate corrupted .pol files or parsing errors.")
+            sys.exit(1)
+        
+        print(f"✅ Successfully loaded {len(val_samples)} validation samples")
+        val_dataset = Dataset(val_samples)
+
         # Q-learning tabular approach (no neural network needed)
         print("🧠 Using optimized Q-learning tabular approach")
         print("📋 Q-Learning Configuration:")
-        print(f"  • Max episodes per instance: 1000")
-        print(f"  • Max steps per episode: 15") 
-        print(f"  • Target coverage: 90%")
+        print(f"  • Max episodes per instance: {args.max_episodes}")
+        print(f"  • Max steps per episode: {args.max_steps}")
+        print(f"  • Target coverage: {args.target_coverage if hasattr(args, 'target_coverage') else 0.9}")
         print(f"  • Learning rate: 0.1")
         print(f"  • Epsilon decay: 0.995 → 0.01")
         print(f"  • Early stopping: enabled")
         print(f"  • Visibility region caching: enabled")
         print(f"  • State representation: number of guards")
         print(f"  • Action space: toggle guard at vertex")
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         results = evaluate_with_qlearning(
             val_dataset, args.val_dir,
             device=device,
             no_geometry=args.no_geometry,
-            max_episodes=1000,
+            max_episodes=args.max_episodes,
+            max_steps_per_episode=args.max_steps,
+            target_coverage=getattr(args, 'target_coverage', 0.9),
             verbose=True
         )
         training_method = 'qlearning_optimized'
-    elif args.mode == 'search':
-        # Active Search with test-time training
-        print("🚀 Using Active Search with test-time training")
-        print("📋 Active Search Configuration:")
-        print(f"  • Model: {os.path.basename(checkpoint_path)}")
-        print(f"  • Proxy for ranking: {args.proxy}")
-        print(f"  • Solutions per instance (K): {args.K}")
-        print(f"  • Test-time gradient steps: enabled")
-        print(f"  • Policy gradient optimization: REINFORCE")
-        if args.proxy != 'reward':
-            print(f"  • Proxy model: {os.path.basename(args.proxy_path)}")
-        results = evaluate_with_as_training(
-            model, val_dataset, args.val_dir,
-            K=args.K,
-            device=device,
-            value_net=proxy_model,
-            no_geometry=args.no_geometry
-        )
-        training_method = 'search_' + args.proxy
-    else:
-        # Default: Simple sampling evaluation
-        use_proxy = args.proxy != 'reward'
-        print("🎲 Using sampling evaluation")
-        print("📋 Sampling Configuration:")
-        print(f"  • Model: {os.path.basename(checkpoint_path)}")
-        print(f"  • Solutions per instance (K): {args.K}")
-        print(f"  • Evaluation proxy: {args.proxy}")
-        if use_proxy:
-            print(f"  • Proxy model: {os.path.basename(args.proxy_path)}")
-            print(f"  • Selection strategy: best predicted {args.proxy}")
-        else:
-            print(f"  • Selection strategy: best true reward")
+
+    elif args.mode in ['sampling', 'search']:
+        # Prepare validation dataset
+        val_files = validate_validation_directory(args.val_dir)
+        if args.max_instances:
+            val_files = val_files[:args.max_instances]
+        val_samples = agp_read_samples(val_files, normalize=args.normalize)
         
-        # Extract model architecture info from filename or checkpoint
-        try:
-            if hasattr(model, 'embedding_size'):
-                print(f"  • Model architecture: {model.embedding_size}d embeddings, {model.hidden_size}d hidden")
+        # Validate that samples were loaded successfully
+        if len(val_samples) == 0:
+            print(f"❌ Error: No valid samples could be loaded from {len(val_files)} files")
+            print(f"   This might indicate corrupted .pol files or parsing errors.")
+            sys.exit(1)
+        
+        print(f"✅ Successfully loaded {len(val_samples)} validation samples")
+        val_dataset = Dataset(val_samples)
+
+        # Load RL model
+        checkpoint_path = getattr(args, 'checkpoint', 'auto')
+        if checkpoint_path == 'auto':
+            auto_checkpoint = find_best_rl_checkpoint()
+            if auto_checkpoint:
+                checkpoint_path = auto_checkpoint
+                print(f"🔍 Auto-detected RL model: {checkpoint_path}")
             else:
-                # Try to extract from filename
-                import re
-                filename = os.path.basename(checkpoint_path)
-                emb_match = re.search(r'embedding_size(\d+)', filename)
-                hid_match = re.search(r'hidden_size(\d+)', filename)
-                if emb_match and hid_match:
-                    print(f"  • Model architecture: {emb_match.group(1)}d embeddings, {hid_match.group(1)}d hidden")
-            
-            if hasattr(model, 'n_glimpses'):
-                print(f"  • Attention glimpses: {model.n_glimpses}")
-            elif 'n_glimpses' in filename:
-                glimpse_match = re.search(r'n_glimpses(\d+)', filename)
-                if glimpse_match:
-                    print(f"  • Attention glimpses: {glimpse_match.group(1)}")
-        except Exception:
-            pass
-        
-        if use_proxy:
-            print(f"🎯 Using {args.proxy} for solution selection")
+                raise FileNotFoundError("No RL model checkpoints found in 'checkpoints/' directory")
+
+        model, device = load_rl_model(checkpoint_path)
+
+        # Load proxy model if requested
+        proxy_model = None
+        if getattr(args, 'proxy', 'reward') != 'reward':
+            print(f"\n🔧 Loading {args.proxy} proxy model...")
+            if getattr(args, 'proxy_path', 'auto') == 'auto':
+                if args.proxy == 'value_net':
+                    auto_path = find_best_value_net_checkpoint()
+                    if auto_path:
+                        args.proxy_path = auto_path
+                        print(f"🔍 Auto-detected value network: {auto_path}")
+                    else:
+                        print("✗ No value network checkpoints found")
+                        print("  Falling back to reward-based evaluation")
+                        args.proxy = 'reward'
+                elif args.proxy == 'ranker':
+                    auto_path = find_best_ranker_checkpoint()
+                    if auto_path:
+                        args.proxy_path = auto_path
+                        print(f"🔍 Auto-detected ranker network: {auto_path}")
+                    else:
+                        print("✗ No ranker network checkpoints found")
+                        print("  Falling back to reward-based evaluation")
+                        args.proxy = 'reward'
+
+            if args.proxy != 'reward' and os.path.exists(args.proxy_path):
+                try:
+                    proxy_model, _, model_info = load_reward_predictor(args.proxy_path)
+                    print(f"✓ {args.proxy} loaded successfully")
+                except Exception as e:
+                    print(f"✗ Error loading {args.proxy}: {e}")
+                    print("  Falling back to reward-based evaluation")
+                    args.proxy = 'reward'
+                    proxy_model = None
+            elif args.proxy != 'reward':
+                print(f"✗ Proxy model not found at {args.proxy_path}")
+                print("  Falling back to reward-based evaluation")
+                args.proxy = 'reward'
+                proxy_model = None
+
+        if args.mode == 'search':
+            print("🚀 Using Active Search with test-time training")
+            results = evaluate_with_as_training(
+                model, val_dataset, args.val_dir,
+                K=getattr(args, 'K', 10),
+                device=device,
+                value_net=proxy_model,
+                no_geometry=args.no_geometry
+            )
+            training_method = 'search_' + getattr(args, 'proxy', 'reward')
         else:
-            print("🎲 Using true rewards for solution selection")
-            
-        results = evaluate_with_sampling(
-            model, val_dataset, args.val_dir, 
-            K=args.K, 
-            device=device,
-            value_net=proxy_model, 
-            use_value_net=use_proxy, 
-            no_geometry=args.no_geometry
+            print("🎲 Using sampling evaluation")
+            results = evaluate_with_sampling(
+                model, val_dataset, args.val_dir,
+                K=getattr(args, 'K', 1),
+                device=device,
+                value_net=proxy_model,
+                use_value_net=(getattr(args, 'proxy', 'reward') != 'reward'),
+                no_geometry=args.no_geometry
+            )
+            training_method = 'sampling_' + getattr(args, 'proxy', 'reward')
+    
+    elif args.mode == 'value_net':
+        print("🧠 Evaluating value network performance")
+        results = evaluate_with_value_net(
+            model_path=getattr(args, 'model_path', 'auto'),
+            data_file=getattr(args, 'data_file', 'data/value_net_training_data.pkl'),
+            max_instances=getattr(args, 'max_instances', None),
+            batch_size=getattr(args, 'batch_size', 32)
         )
-        
-        training_method = 'sampling_' + args.proxy
+        training_method = 'value_net_evaluation'
     
     # Print results
     print_results(results, args)
     
-    # Prepare results for saving
+    # Prepare results for saving (use safe access for mode-specific args)
+    k_val = getattr(args, 'K', None)
+    proxy_val = getattr(args, 'proxy', 'reward')
+    output_arg = getattr(args, 'output', None)
+
     results_summary = {
         'args': vars(args),
-        'K': args.K,
+        'K': k_val,
         'mode': args.mode,
-        'proxy': args.proxy,
+        'proxy': proxy_val,
         'num_instances': results['num_instances'],
         'training_method': training_method,
         'evaluation_type': results.get('evaluation_type', training_method),
         'total_time': results.get('total_time', 0.0),
         'avg_time_per_instance': results.get('avg_time_per_instance', 0.0),
+        'overall_metrics': results.get('overall_metrics', {}),
         'best_rewards': results.get('best_rewards', results.get('best_reward_stats', {})),
         'best_coverages': results.get('best_coverages', results.get('best_coverage_stats', {})), 
         'best_sizes': results.get('best_sizes', results.get('best_size_stats', {})),
@@ -1613,18 +2077,20 @@ def main():
         results_summary['correlations'] = results['correlations']
     
     # Generate mode-specific output filename if not provided
-    if args.output is None:
+    if output_arg is None:
         if args.mode == 'qlearning':
             output_file = f'results/qlearning_evaluation.json'
         elif args.mode == 'search':
-            output_file = f'results/search_evaluation_{args.proxy}_K={args.K}.json'
+            output_file = f'results/search_evaluation_{proxy_val}_K={k_val}.json'
+        elif args.mode == 'value_net':
+            output_file = f'results/value_net_evaluation_all.json'
         else:  # sampling mode
-            output_file = f'results/sampling_evaluation_{args.proxy}_K={args.K}.json'
+            output_file = f'results/sampling_evaluation_{proxy_val}_K={k_val}.json'
     else:
         # Use user-provided filename, replace placeholders
-        output_file = args.output.replace('{K}', str(args.K))
+        output_file = output_arg.replace('{K}', str(k_val))
         output_file = output_file.replace('{mode}', args.mode)
-        output_file = output_file.replace('{proxy}', args.proxy)
+        output_file = output_file.replace('{proxy}', proxy_val)
     
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
@@ -1651,5 +2117,5 @@ def main():
     print(f"\nResults saved to: {output_file}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
