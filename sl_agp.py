@@ -584,7 +584,7 @@ def main():
         )
         print("Model created.")
 
-        size = args.train_size
+        size = args.train_size or args.max_instances
         if size is None:
             small_train_dataset = train_dataset
         else:
@@ -625,12 +625,28 @@ def main():
         total_time = time.time() - start_time
         avg_time_per_instance = total_time / len(small_val_dataset) if len(small_val_dataset) > 0 else 0
         print("Evaluation complete.")
+        print(f"Timing: total {total_time:.3f}s, avg {avg_time_per_instance:.4f}s/instance")
+        
+        # Print evaluation results summary
+        print("\n📊 EVALUATION RESULTS:")
+        print(f"  • Samples evaluated: {len(small_val_dataset)}")
+        print(f"  • Total evaluation time: {total_time:.3f}s")
+        print(f"  • Average time per instance: {avg_time_per_instance:.4f}s")
+        
+        # Print statistics if available
+        if 'stats' in eval_results and eval_results['stats']:
+            if 'coverage_stats' in eval_results['stats']:
+                coverage = eval_results['stats']['coverage_stats']
+                print(f"  • Polygon Coverage: {coverage['mean']:.3f} ± {coverage['std']:.3f} (median: {coverage['median']:.3f})")
+            if 'ratio_stats' in eval_results['stats']:
+                ratio = eval_results['stats']['ratio_stats']
+                print(f"  • Approximation Ratio: {ratio['mean']:.3f} ± {ratio['std']:.3f} (median: {ratio['median']:.3f})")
         
         # Optionally save results for further analysis
         import json
         results_summary = {
             'args': vars(args),
-            'num_train_samples': len(small_train_dataset),
+            'max_instances': len(small_train_dataset),
             'num_val_samples': len(small_val_dataset),
             'training_method': 'supervised_learning',
             'total_evaluation_time': total_time,
@@ -640,9 +656,9 @@ def main():
         # Add statistics if available
         if 'stats' in eval_results and eval_results['stats']:
             if 'coverage_stats' in eval_results['stats']:
-                results_summary['coverage_stats'] = eval_results['stats']['coverage_stats']
+                results_summary['polygon_coverage'] = eval_results['stats']['coverage_stats']
             if 'ratio_stats' in eval_results['stats']:
-                results_summary['size_ratio_stats'] = eval_results['stats']['ratio_stats']
+                results_summary['approx_ratio'] = eval_results['stats']['ratio_stats']
         
         # Save to results directory
         os.makedirs('results', exist_ok=True)
