@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import DataLoader, Sampler
 import numpy as np
 import sys
+import time
 from functools import partial
 
 
@@ -563,6 +564,7 @@ def main():
         parser.add_argument('--agp_train_dir', type=str, default=default_train)
         parser.add_argument('--agp_val_dir', type=str, default=default_val)
         parser.add_argument('--train-size', type=int, default=None, help="Number of training samples to use (default: all)")
+        parser.add_argument('--max-instances', type=int, default=None, help="Maximum number of validation samples to use for evaluation (default: all)")
         parser.add_argument('--debug', action='store_true', help="Enable debug mode with visualizations")
         args = parser.parse_args()
 
@@ -589,7 +591,7 @@ def main():
             small_train_dataset = train_dataset if len(train_dataset) <= size else train_dataset[:size]
         
         # Use all validation samples by default, or limit if specified
-        val_size = None  # Change to an argument if you want to specify
+        val_size = args.max_instances
         if val_size is None:
             small_val_dataset = val_dataset
         else:
@@ -617,7 +619,11 @@ def main():
         }, checkpoint_path)
         print(f"Model saved to {checkpoint_path}")
         
+        # Evaluate with timing
+        start_time = time.time()
         eval_results = supervised_eval(agp_model, small_val_dataset, batch_size=1, debug=args.debug)
+        total_time = time.time() - start_time
+        avg_time_per_instance = total_time / len(small_val_dataset) if len(small_val_dataset) > 0 else 0
         print("Evaluation complete.")
         
         # Optionally save results for further analysis
@@ -626,7 +632,9 @@ def main():
             'args': vars(args),
             'num_train_samples': len(small_train_dataset),
             'num_val_samples': len(small_val_dataset),
-            'training_method': 'supervised_learning'
+            'training_method': 'supervised_learning',
+            'total_evaluation_time': total_time,
+            'avg_time_per_instance': avg_time_per_instance
         }
         
         # Add statistics if available

@@ -14,9 +14,9 @@
     "debug": false
   },
   "num_train_samples": 8867,
-  "num_val_samples": 1224,
+  "num_instances": 1224,
   "training_method": "supervised_learning",
-  "coverage_stats": {
+  "polygon_coverage": {
     "mean": 0.4822091018398986,
     "median": 0.4782608695652174,
     "std": 0.3148650364282839,
@@ -26,7 +26,7 @@
     "q75": 0.7581818181818182,
     "iqr": 0.5581818181818181
   },
-  "size_ratio_stats": {
+  "approx_ratio": {
     "mean": 3.3682779320345904,
     "median": 3.08,
     "std": 4.0587262185400474,
@@ -36,4 +36,5 @@
     "q75": 4.770104895104895,
     "iqr": 3.270104895104895
   }
+  
 }
