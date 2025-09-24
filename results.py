@@ -183,27 +183,27 @@ def create_pareto_frontier_plot(results, output_dir="results/gfx/pareto"):
         
         methods.append(method)
     
-    # Create the plot
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    # Create the plot with wider figure to accommodate legend
+    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
     
     # Create scatter plot with timing as point size
     # Normalize timing values for better visualization (larger = slower)
     max_timing = max(timing_values) if timing_values else 1
     normalized_sizes = [(t / max_timing) * 500 + 50 for t in timing_values]  # 50-550 point size range
     
-    # Use different colors for each method
+    # Create scatter plot with different colors for each method
     colors = plt.cm.Set3(np.linspace(0, 1, len(methods)))
     
     scatter = ax.scatter(coverage_values, approx_ratio_values, 
                        s=normalized_sizes, c=colors, alpha=0.7, 
                        edgecolors='black', linewidth=1)
     
-    # Add method labels
-    for i, method in enumerate(methods):
-        ax.annotate(method, (coverage_values[i], approx_ratio_values[i]), 
-                   xytext=(5, 5), textcoords='offset points', 
-                   fontsize=10, ha='left', va='bottom',
-                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+    # Add legend with method names and colors
+    legend_elements = [plt.scatter([], [], s=100, color=colors[i], alpha=0.7, 
+                                 edgecolors='black', linewidth=1, label=method) 
+                      for i, method in enumerate(methods)]
+    ax.legend(legend_elements, methods, loc='center left', bbox_to_anchor=(1.02, 0.5), 
+             title='Methods', title_fontsize=12, fontsize=10)
     
     # Customize the plot
     ax.set_xlabel('Polygon Coverage', fontsize=12, fontweight='bold')
@@ -252,6 +252,7 @@ def create_pareto_frontier_plot(results, output_dir="results/gfx/pareto"):
         ax.legend(loc='lower left')
     
     plt.tight_layout()
+    plt.subplots_adjust(right=0.75)  # Make room for the legend
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, 'pareto_frontier.png'), dpi=300, bbox_inches='tight')
     print(f"Pareto frontier plot saved to {os.path.join(output_dir, 'pareto_frontier.png')}")
