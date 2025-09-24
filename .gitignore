@@ -23,7 +23,7 @@ build/
 .env.*
 
 # Results, logs, and outputs
-results/
+#results/
 log/
 logs/
 *.npy
