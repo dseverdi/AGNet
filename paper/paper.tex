@@ -6,6 +6,8 @@
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{hyperref}
+\usepackage[section]{placeins} % keep floats within sections
+% \usepackage{csvsimple}
 % Notation helpers
 \newcommand{\sinst}{s}
 \newcommand{\Vis}[2]{\mathrm{Vis}(#1 \mid #2)}
@@ -166,8 +168,36 @@ The critic $b_\omega(s)$ is trained to regress the observed returns with a mean-
 \label{eq:critic-loss}
 \end{equation}
 
+\subsection{Tabular Q-learning for AGP}
+In addition to policy-gradient training, we evaluate a simple tabular Q-learning baseline tailored to the vertex-guard AGP. The agent constructs a guard set by toggling vertex selections, using a compact state abstraction and a cache-accelerated coverage computation.
+
+\paragraph{State, actions, and dynamics.}
+Let $\pi_t \subseteq \{1,\dots,n\}$ be the selected index set at step $t$ and let the state be the solution cardinality $s_t = |\pi_t|$. An action $a_t \in \{1,\dots,n\}$ toggles membership of vertex $a_t$ in the set: if $a_t\in\pi_t$ it is removed, otherwise it is added. The next solution is $\pi_{t+1} = \pi_t \triangle \{a_t\}$ (symmetric difference) and the next state is $s_{t+1} = |\pi_{t+1}|$.
+
+\paragraph{Reward.}
+After applying $a_t$, the agent receives a scalar reward equal to the attained coverage of the updated solution,
+\begin{equation}
+  r_t \;=\; \Covf{\pi_{t+1}}{s} \,\in[0,1],
+\end{equation}
+computed by uniting precomputed per-vertex visibility regions and normalizing by the polygon area. Episodes terminate when coverage reaches a target threshold $\tau_c$ (e.g., 0.90--0.95) or when a step budget $T_{\max}$ is reached.
+
+\paragraph{Learning rule and exploration.}
+The agent maintains a tabular action-value function $Q(s,a)$ with Q-learning updates
+\begin{equation}
+  Q(s_t,a_t) \leftarrow Q(s_t,a_t) + \alpha\,\Big[\, r_t + \gamma\,\max_{a'} Q(s_{t+1},a') - Q(s_t,a_t) \,\Big],
+  \label{eq:qlearning-update}
+\end{equation}
+with learning rate $\alpha \in (0,1]$ and discount $\gamma\in[0,1)$. Action selection is $\eps$-greedy w.r.t. $Q(s,\cdot)$ with an exponential decay schedule $\eps\leftarrow\max(\eps_{\min},\eps\cdot\lambda)$ per episode ($\lambda\in(0,1)$). We track and report the best solution (highest coverage) encountered across steps/episodes.
+
+\paragraph{Implementation notes.}
+Visibility regions for all vertices are precomputed once using CGAL (via scikit-geometry) and stored as polygon sets, enabling fast coverage evaluation by set unions. We also memoize coverages for sorted guard sets to avoid recomputation. Default hyperparameters used in our runs mirror the code: $\alpha=0.1$, $\gamma=0.9$, initial $\eps=0.3$ with decay $\lambda=0.995$ to $\eps_{\min}=0.01$, episode budget $T_{\max}\in[15,20]$, and early stopping once the running best coverage consistently exceeds $\tau_c\in[0.90,0.95]$.
+
+\paragraph{Scope and limitations.}
+The state abstraction $s_t=|\pi_t|$ is intentionally compact but discards which vertices are selected, so $Q$ values encode action preferences by cardinality rather than instance-specific partial solutions. Despite this limitation, the method serves as a fast heuristic search guided by learned action values and provides a complementary point on the coverage/efficiency/runtime trade-off curve.
+
 
 \section{Experiments}
+\label{sec:experiments}
 
 
 \subsection*{Evaluation}
@@ -201,112 +231,85 @@ We assume a guard can stand at any vertex of the polygon (which is a common assu
 
 \section{Results and Discussion}
 \label{sec:results}
-We report the performance of the greedy, reinforcement learning (RL), and supervised learning (SL) approaches on the test instances. Table~\ref{tab:small_results_summary} provides an overall summary of key metrics on the set of smaller (training-distribution) instances, comparing all three methods. Tables~\ref{tab:results_small} and \ref{tab:results_large} then give a more detailed breakdown of the supervised learning method's performance on small vs. large instances. Figures~\ref{fig:coverage_ratio_boxplot} and \ref{fig:demo_solutions} offer visualizations of the results and example solutions.
+We evaluate greedy, reinforcement learning (RL), and supervised learning (SL) methods on 1,224 test instances and organize findings to flow with the paper’s goals: first aggregate performance, then metric-wise comparisons, followed by qualitative insight, and finally a discussion of trade-offs.
 
-\subsection{Performance overview}
-Across our validation set, we observed the following trends:
+\subsection{Aggregate performance}
+Table~\ref{tab:agg_summary} summarizes the full statistics across all approaches. Table~\ref{tab:perf_cmp} then formats the same data for quick comparison. Together they answer our primary questions: coverage quality, guard efficiency (approximation ratio), and computational cost.
+
+\begin{table}[t]
+  \centering
+  \scriptsize
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.05}
+  \resizebox{\linewidth}{!}{% 
+    \input{tables/summary_table.tex}%
+  }
+  \caption{Complete experimental results across all evaluated methods. Coverage is the fraction of area observed (higher is better). Approximation ratio measures solution efficiency relative to the optimal guard count (lower is better, 1.0 is optimal). Timing is average evaluation time per instance.}
+  \label{tab:agg_summary}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \scriptsize
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.05}
+  \resizebox{\linewidth}{!}{% 
+    \input{tables/performance_comparison.tex}%
+  }
+  \caption{Readable comparison highlighting trade-offs between coverage, efficiency, and compute across methods.}
+  \label{tab:perf_cmp}
+\end{table}
+
+Key observations from Tables~\ref{tab:agg_summary} and~\ref{tab:perf_cmp}:
 \begin{itemize}
-    \item \textbf{Greedy:} Achieved \textbf{full coverage} on essentially all instances (polygon-level mean coverage $\approx 1.0$) with solutions close to optimal size (mean ratio $\approx$ \textbf{1.17}$\times$ optimum; see Table~\ref{tab:small_results_summary}).
-    \item \textbf{Reinforcement Learning (actor–critic):} Achieved high polygon-level coverage (mean $\approx$ \textbf{0.90}) with larger guard sets (mean ratio $\approx$ \textbf{3.49}$\times$ optimum) and higher variance across instances.
-    \item \textbf{Supervised Learning:} Achieved moderate coverage on average (mean $\approx$ \textbf{0.48}) and used about \textbf{3.37}$\times$ the optimal number of guards on average.
+    \item \textbf{Greedy baseline} delivers perfect coverage (1.000 $\pm$ 0.000) with near-optimal guard usage (1.172 $\pm$ 0.124) at moderate runtime (0.66s/instance).
+    \item \textbf{Supervised} is fastest (0.088s) but has low coverage (0.496 $\pm$ 0.305) and high redundancy (3.361 $\pm$ 3.468).
+    \item \textbf{RL variants} reveal different trade-offs: Q-learning attains high coverage (0.917 $\pm$ 0.071) with strong efficiency signals, while active search nearly matches greedy coverage but over-allocates guards.
 \end{itemize}
 
-\begin{table}[!h]
-\centering
-\scriptsize
-\begin{tabular}{lrrrrrr}
-	oprule
- & \multicolumn{3}{c}{\textbf{Area coverage}} & \multicolumn{3}{c}{\textbf{Size ratio to optimum}} \\
-\cmidrule(lr){2-4} \cmidrule(lr){5-7}
-	extbf{Method} & mean & median & std & mean & median & std \\
-\midrule
-Greedy & 1.000 & 1.000 & $\approx$0.000 & 1.172 & 1.154 & 0.125 \\
-REINFORCE (critic) & 0.904 & 0.998 & 0.197 & 3.493 & 3.307 & 3.136 \\
-Supervised & 0.482 & 0.478 & 0.315 & 3.368 & 3.080 & 4.059 \\
-\bottomrule
-\end{tabular}
-\caption{Performance comparison on the validation set using coverage (fraction of polygon area observed) and guard-set size ratio (solution size divided by the optimal guard count). Means, medians, and standard deviations are reported. Greedy achieves full coverage with near-optimal guard counts; RL (actor–critic) reaches high coverage but uses larger guard sets on average; the supervised model attains moderate coverage and similar size ratios to RL on average.}
-\label{tab:small_results_summary}
-\end{table}
+\subsection{Metric-wise comparisons}
+To align with our evaluation criteria, we visualize each metric next to its narrative. Figures~\ref{fig:coverage_cmp} and~\ref{fig:approx_cmp} compare coverage and efficiency; Figures~\ref{fig:time_cmp} and~\ref{fig:pareto} show computational cost and the overall Pareto landscape.
 
-\begin{figure}[h]
+\begin{figure}[t]
   \centering
-  \includegraphics[width=0.8\textwidth]{gfx//method_comparison.png}
-  \caption{Your figure caption}
-  \label{fig:your_label}
-\end{figure}
-
-
-\vspace{1ex}
-
-\noindent \textbf{Example Solution Illustration:} Figure~\ref{fig:demo_solutions} provides a qualitative comparison on one gallery instance. The optimal solution (a) uses 17 guards to cover the polygon. The RL generator model produced several candidate solutions; one such candidate (b) used 16 guards and achieved 94\% coverage (missing a small area), which corresponds to 0.94 of the optimal guard count (since it used slightly fewer guards than the optimum) and 94\% area coverage. Other candidates (c--f) generated by the RL model demonstrate the trade-offs: some used far fewer guards (down to 10 guards in (f), which is 58\% of optimum) but consequently had much lower coverage (82\%), while others used 15 guards with moderate coverage (~89--93\%). In this example, the supervised Pointer Network evaluator identified (b) as the best candidate, which is indeed very close to the optimal solution. This highlights that, given a good evaluator, the RL method can generate near-optimal solutions among its outputs, even if its single-run performance may vary.
-
-\begin{figure}[!h]
+  \begin{minipage}{0.48\textwidth}
     \centering
-    \subfigure[Optimal (17 guards)]{\includegraphics[scale=0.4]{gfx/demo/opt.png}}
-    \hfill
-    \subfigure[CovNet pick: 16 guards, cov. 0.94]{\includegraphics[scale=0.4]{gfx/demo/covnet_predicted.png}}
-    \hfill
-    \subfigure[Candidate 1: 10 guards, cov. 0.72]{\includegraphics[scale=0.4]{gfx/demo/cand1.png}}
-    \hfill
-    \subfigure[Candidate 2: 15 guards, cov. 0.89]{\includegraphics[scale=0.4]{gfx/demo/cand2.png}} \\
-    \subfigure[Candidate 3: 15 guards, cov. 0.93]{\includegraphics[scale=0.4]{gfx/demo/cand3.png}}
-    \hfill
-    \subfigure[Candidate 4: 10 guards, cov. 0.82]{\includegraphics[scale=0.4]{gfx/demo/cand4.png}}
-    \caption{An example gallery instance demonstrating solutions by different methods. (a) shows the optimal solution with 17 guards (each guard's visibility region is implicitly indicated by coverage of the polygon). (b) shows a high-quality solution generated by the RL model (16 guards) which was selected by the supervised Pointer Network evaluator as having the best predicted coverage (94\% coverage, very close to full). (c)--(f) show other candidate solutions generated by the RL model for the same instance, illustrating the range of outcomes (each subcaption lists the number of guards and achieved coverage). The supervised approach, in contrast, would typically place a guard at nearly every vertex for this instance (not shown here), achieving full coverage but with far more than 17 guards.}
-    \label{fig:demo_solutions}
-\end{figure}
-
-\subsection{Generalization to Larger Instances}
-One concern for learning-based approaches is how well they generalize beyond the conditions on which they were trained. We tested the methods on a set of larger gallery polygons (200--600 vertices) that were outside the training range of the RL and SL models. The greedy algorithm, being an instance-specific heuristic, continued to perform well on these larger instances: it still achieved 100\% coverage on all cases, and the relative guard count remained similar (in fact, for larger polygons, greedy often performed within 1.1--1.2 times optimum on average, with some worst-cases around 1.5 times optimum, possibly because larger polygons offer more opportunities for each guard to cover area efficiently).
-
-The RL model in its trained form did not directly generalize to significantly larger polygons if they were far beyond the training distribution (e.g., a model trained on up to 200-vertex polygons struggled on 500-vertex ones, often failing to cover large portions as it had not learned the strategies for much bigger spaces). In principle, one could train a separate RL model on larger instances or use curriculum learning to extend the range, but that was outside our current scope. Thus, we mainly rely on the supervised model for a learning approach on the larger instances.
-
-The supervised Pointer Network-based method was applied to the large instances. Here, the results were notably poorer in coverage. As summarized in Table~\ref{tab:results_large}, the mean coverage achieved by the supervised model on polygons with 400-500 vertices was around 0.59 (59\%), dropping from ~0.86-0.77 for moderately larger polygons (200-399 vertices). The performance gradually degrades as instance size grows beyond what the model saw in training. This indicates that the model did not fully capture a scale-invariant strategy for guard placement; instead, it likely overfit to patterns in smaller layouts. The number of guards it placed, however, remained extremely high relative to optimum (averaging 23-27 times the optimal guard count in these large cases). Essentially, the model was placing guards almost everywhere it could, yet still missing some spots because it had not learned how to systematically ensure full coverage in larger spaces.
-
-Table~\ref{tab:results_large} details these outcomes by binned polygon sizes. Figure~\ref{fig:coverage_ratio_boxplot}(b) illustrates the distribution of coverage and optimal ratio for the supervised method on these larger instances. In the box plot, we see a wide spread in coverage (some large instances were relatively well-covered, others very poorly) and consistently huge values for the guard count ratio (with minima still far above 1.0).
-
-\begin{table}[!h]
-\centering
-\small 
-    \begin{tabular}{lrrrrr}
-        \toprule
-        \textbf{Polygon size range} &  \textbf{Instance count} &  \multicolumn{2}{c}{\textbf{Coverage}} &  \multicolumn{2}{c}{\textbf{Ratio to Optimum}} \\
-        & &  mean &  std  &  mean  &  std \\
-        \midrule
-         10--59     &     149 &           0.95 &          0.08 &        6.26 &       2.43 \\
-         60--99     &     219 &           0.93 &          0.06 &       11.75 &       2.53 \\
-         100--199   &     853 &           0.87 &          0.07 &       19.89 &       4.19 \\
-        \midrule
-        \textit{(200--299)}    &     373 &           0.86 &          0.09 &       23.80 &       5.07 \\
-        \textit{(300--399)}    &     202 &           0.77 &          0.17 &       25.85 &       5.67 \\
-        \textit{(400--499)}    &     180 &           0.64 &          0.20 &       27.04 &       5.03 \\
-        \textit{(500--599)}    &     129 &           0.59 &          0.23 &       27.59 &       5.29 \\
-        \bottomrule
-    \end{tabular}
-\caption{Performance of the \textbf{supervised learning (supervised Pointer Network) method} on two groups of instances: The top rows show results for smaller instances (10--199 vertices, totaling 1221 instances), and the bottom rows (in italics) show results for larger instances (200--599 vertices, 884 instances). \emph{Coverage} is the fraction of area covered by the guards chosen by the model, and \emph{Ratio to Optimum} is the number of guards used divided by the optimal number of guards for that instance. We observe high coverage and moderately low variance on smaller instances, at the expense of large redundant guard sets. On larger instances, coverage drops and the guard count ratio further increases, indicating poor scalability of the supervised model's approach.}
-\label{tab:results_small}\label{tab:results_large}
-\end{table}
-
-\begin{figure}[!h]
+    \includegraphics[width=\textwidth]{gfx/polygon_coverage_comparison.png}
+    \caption{Coverage performance across all methods.}
+    \label{fig:coverage_cmp}
+  \end{minipage}\hfill
+  \begin{minipage}{0.48\textwidth}
     \centering
-    \subfigure[Instances of sizes seen during training]{\includegraphics[scale=0.5]{gfx/testbed_1.png}}
-    \hfill
-    \subfigure[Larger instances (unseen sizes)]{\includegraphics[scale=0.5]{gfx/testbed_2.png}}
-    \caption{Distribution of coverage and guard count ratio (to optimal) for the \textbf{supervised learning method}'s solutions on two test sets: (a) smaller instances within the training distribution (10--199 vertices), and (b) larger instances beyond what the model was trained on (200--599 vertices). Each box plot summarizes the spread of coverage achieved (left in each sub-figure) and the ratio of the solution's guard count to the optimal guard count (right in each sub-figure). In (a), the model usually achieves high coverage (many instances at or near 1.0 coverage) but the guard count ratio is very high (median in double digits). In (b), the coverage median drops (significantly lower, indicating many large instances are only partially covered), while the guard count ratio remains extremely high.}
-    \label{fig:coverage_ratio_boxplot}
+    \includegraphics[width=\textwidth]{gfx/approx_ratio_comparison.png}
+    \caption{Guard efficiency comparison (lower is better).}
+    \label{fig:approx_cmp}
+  \end{minipage}
 \end{figure}
 
-These generalization results highlight a key challenge: \textbf{the learned models (both RL and SL) are limited by the distribution of their training data and objectives, whereas the greedy algorithm is not}. The greedy method inherently scales to any polygon (within computational limits) and always guarantees full coverage, though it has no guarantee on optimality. The RL method can, in principle, be retrained or fine-tuned for larger instances, but that requires additional training effort and does not guarantee success if the complexity grows. The supervised method as implemented clearly did not learn a general strategy applicable to much larger polygons, indicating perhaps the need for architectures that capture more global or scalable features, or training regimes that include more diverse and larger examples.
+\begin{figure}[t]
+  \centering
+  \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{gfx/timing_comparison.png}
+    \caption{Computational performance comparison.}
+    \label{fig:time_cmp}
+  \end{minipage}\hfill
+  \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{gfx/pareto_frontier.png}
+    \caption{Multi-objective analysis: coverage vs. efficiency trade-offs.}
+    \label{fig:pareto}
+  \end{minipage}
+\end{figure}
 
-\subsection{Discussion of Trade-offs}
-From our comparative study, several insights emerge:
+
+\subsection{Discussion of trade-offs}
+Synthesizing the above:
 \begin{itemize}
-    \item \textbf{Solution Quality vs Optimal:} The greedy algorithm provided solutions closest to optimal in guard count while guaranteeing full coverage. The RL approach provided somewhat worse coverage and guard efficiency; its advantage would only be justified if it could significantly improve runtime or scale better, but in our experiments the RL model did not clearly outperform the greedy in quality. The supervised approach produced the worst guard efficiency, essentially trading optimality for coverage (and even then failing to cover fully on large cases).
-    \item \textbf{Computational Considerations:} The greedy algorithm, being a hand-crafted heuristic, was moderately fast on our instance sizes (taking seconds per instance). The RL and SL methods have a large upfront cost (training can take hours), but once trained, producing a solution is very fast (a single network forward pass taking milliseconds). This suggests that if one needed to solve a very large number of instances repeatedly, a learned approach might become more appealing. In scenarios where a model can be trained offline and then deployed in real-time (e.g., a robot that needs to quickly decide guard or camera placements on the fly), the learned methods offer an advantage of speed at runtime.
-    \item \textbf{Robustness and Guarantees:} The greedy method has a predictable performance: it will always cover the area completely. The RL and SL methods lack guarantees -- they might fail to cover some parts of the polygon and there's no easy way to know without computing coverage. In safety-critical applications, this is a major drawback. One could combine approaches (e.g., run the learned method and then use a quick greedy top-up to cover any uncovered spots, thereby ensuring coverage while hopefully using fewer guards than a pure greedy approach). Such hybrid strategies could marry the strengths of both sides.
-    \item \textbf{Learning Problem Difficulty:} The disparity in performance between the learned models and the greedy algorithm underscores the difficulty of the AGP as a learning problem. Unlike simpler combinatorial problems (like shortest paths or even traveling salesman for moderate sizes) where learning approaches have come closer to classical methods, the AGP involves a complex continuous space and combinatorial coverage aspect that is hard to capture with limited training. The supervised model effectively learned to cover the polygon but not to do so efficiently, indicating that the optimal coverage problem (cover everything with as few guards as possible) might require more sophisticated training signals or model architectures to learn effectively. The RL model, which had an explicit reward balancing coverage and count, still struggled to find the true optimal balance, likely due to the huge search space of possible guard sets.
-    \item \textbf{Potential Improvements:} There are ways to improve the learning-based methods. For RL, one could incorporate more advanced techniques like curriculum learning (starting with smaller polygons then gradually increasing size, which we partially did), use of baseline or critic networks to reduce variance in training, or using more structured action representations. For supervised learning, using graph neural networks or transformers that operate on the polygon geometry rather than a fixed grid might improve generalization to larger or different shapes, as they could be more size-invariant. Additionally, explicitly training to minimize guard count (perhaps by generating not just any covering set but minimal covers) could push the model to be more efficient. These are avenues for future research.
+    \item \textbf{Solution quality vs optimal:} Greedy is the most reliable (full coverage, near-optimal count). RL can approach high coverage with promising efficiency signals but with variance; SL lags on both axes.
+    \item \textbf{Runtime:} SL is fastest at inference; RL sampling/active search and greedy are moderate; RL Q-learning is slowest. Training cost for learned methods must be amortized.
+    \item \textbf{Guarantees and hybrids:} Greedy guarantees coverage; learned methods do not. A practical hybrid is to run a learned policy then greedily top up coverage.
+    \item \textbf{Learning difficulty:} The combinatorial/continuous nature of AGP strains current architectures. Stronger geometric encoders and training signals (e.g., explicit count minimization, curricula) are likely needed.
 \end{itemize}
 
 \section{Conclusion}
