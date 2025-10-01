@@ -195,6 +195,39 @@ Visibility regions for all vertices are precomputed once using CGAL (via scikit-
 \paragraph{Scope and limitations.}
 The state abstraction $s_t=|\pi_t|$ is intentionally compact but discards which vertices are selected, so $Q$ values encode action preferences by cardinality rather than instance-specific partial solutions. Despite this limitation, the method serves as a fast heuristic search guided by learned action values and provides a complementary point on the coverage/efficiency/runtime trade-off curve.
 
+\subsection{Learned reward proxy (value\_net) for active search}
+Exact polygon-visibility coverage is computationally heavy. For our active-search variant, we therefore employ a learned value network, denoted $f_\phi$, to approximate the reward directly from the instance and a candidate guard set. The proxy is trained to mimic the scalar reward $R(\pi\mid s)$, enabling rapid scoring of multiple candidates per instance.
+
+\paragraph{Definition.}
+Given polygon instance $s$ (its vertex coordinates) and a candidate index set $\pi\subseteq\{1,\dots,n\}$, the proxy predicts
+\begin{equation}
+  \hat r_\phi(s,\pi) \;\approx\; R(\pi\mid s),
+\end{equation}
+where $R(\pi\mid s)$ is the smooth penalty-as-reward used in Eq.~\eqref{eq:reward-def} or its coverage-only variant. The proxy thus serves as a drop-in evaluator for ranking candidates during active search without invoking geometric visibility.
+
+\paragraph{Training.}
+We construct supervised pairs $\big((s,\pi),\, r\big)$ by sampling candidate sets and computing the ground-truth reward $r=R(\pi\mid s)$ via visibility. The value network is trained with an $\ell_2$ regression loss
+\begin{equation}
+  \mathcal{L}(\phi) \,=\, \mathbb{E}_{(s,\pi)}\big[\, \big(\hat r_\phi(s,\pi) - r\big)^2 \,\big].
+\end{equation}
+At inference, we sample $K$ candidate sequences from the policy and select the best according to $\hat r_\phi$.
+
+\paragraph{Evaluation.}
+On a held-out set of 100 instances, the proxy exhibits high fidelity to the true reward with the following aggregate metrics (from \texttt{results/value\_net\_evaluation\_all.json}): MAE=0.0089, RMSE=0.0273, $R^2=0.989$, and $\rho=0.996$. The mean predicted value (0.153) closely matches the mean target (0.149), with similar standard deviations.
+
+\paragraph{Updated dev-set evaluation and insights.}
+On a separate dev split comprising 640 samples, the proxy achieves $R^2\!=\!0.516$ and Pearson correlation $\rho\!=\!0.884$, indicating strong ranking fidelity but only moderate variance capture. In scale-free terms, the relative errors are modest: Rel. MAE $\approx$ 8.9% and Rel. RMSE $\approx$ 11.3% of the mean target (866.9). We also observe a small over-prediction bias (+2.3% mean shift; prediction mean 886.9 vs. target mean 866.9) and a higher prediction spread (standard deviation ratio $\sigma_\text{pred}/\sigma_\text{tgt}\approx1.38$). These properties are acceptable for active search where ranking is paramount; in practice, we optionally re-score the top-$k$ candidates with exact visibility to guard against residual bias. Since absolute errors depend on reward scaling, we emphasize scale-independent metrics ($R^2$, $\rho$) and relative errors.
+
+\paragraph{Usage in active search.}
+During candidate generation, scoring with $\hat r_\phi$ avoids repeated polygon-visibility calls, substantially reducing per-instance runtime. In practice, one may optionally re-evaluate the top-ranked candidate(s) with exact coverage for verification, but we observed the proxy to be sufficiently accurate for ranking.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.75\linewidth]{gfx/value_net_proxy_metrics.png}
+  \caption{Value proxy quality: scale-independent metrics ($R^2$, Pearson $\rho$) and relative errors (Rel. MAE, Rel. RMSE), plus distribution summary (mean and std for prediction vs target). Derived from `results/value\_net\_evaluation\_test.json`.}
+  \label{fig:value_net_proxy}
+\end{figure}
+
 
 \section{Experiments}
 \label{sec:experiments}

@@ -22,8 +22,8 @@ from tqdm import tqdm
 # Import from project files
 from dataset import Dataset as AGPDataset, agp_read_samples, collate_fn
 from models import create_actor
-from rewards import enhanced_penalty as reward_fn
-from rl_agp import BucketBatchSampler, get_lengths_from_dataset
+#from rewards import enhanced_penalty as reward_fn
+from rewards import strict_reward as reward_fn
 from functools import partial
 
 
@@ -463,131 +463,6 @@ def generate_training_data(actor_model, dataset, num_samples_per_polygon=100, de
     return training_data
 
 
-def evaluate_value_net_performance(model, test_data, device, r_mean, r_std, max_samples=1000):
-    """Evaluate value network performance with comprehensive metrics"""
-    if not test_data:
-        return {}
-    
-    model.eval()
-    test_dataset = SolutionDataset(test_data[:max_samples])
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, collate_fn=solution_collate_fn)
-    
-    all_predictions = []
-    all_targets = []
-    all_raw_predictions = []  # Before denormalization
-    polygon_stats = {}
-    
-    with torch.no_grad():
-        eval_pbar = tqdm(test_loader, desc="Evaluating value network performance", leave=False)
-        for batch in eval_pbar:
-            polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
-            polygon_coords = polygon_coords.to(device)
-            guard_indices = guard_indices.to(device)
-            poly_lengths = poly_lengths.to(device)
-            sol_lengths = sol_lengths.to(device)
-            
-            if isinstance(model, MultiTaskValueNet):
-                out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
-                raw_pred = out['reward']
-            elif isinstance(model, RankerNet):
-                raw_pred = -model(polygon_coords, guard_indices, poly_lengths, sol_lengths)  # Convert score to reward
-            else:
-                raw_pred = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
-            
-            # Denormalize predictions
-            pred = torch.expm1(raw_pred * r_std + r_mean)
-            
-            # Collect data for analysis
-            for i, name in enumerate(names):
-                pred_val = pred[i].item()
-                target_val = rewards[i].item()
-                raw_pred_val = raw_pred[i].item()
-                
-                all_predictions.append(pred_val)
-                all_targets.append(target_val)
-                all_raw_predictions.append(raw_pred_val)
-                
-                if name not in polygon_stats:
-                    polygon_stats[name] = {'predictions': [], 'targets': [], 'raw_predictions': []}
-                polygon_stats[name]['predictions'].append(pred_val)
-                polygon_stats[name]['targets'].append(target_val)
-                polygon_stats[name]['raw_predictions'].append(raw_pred_val)
-    
-    # Calculate comprehensive metrics
-    all_predictions = np.array(all_predictions)
-    all_targets = np.array(all_targets)
-    all_raw_predictions = np.array(all_raw_predictions)
-    
-    # Overall metrics
-    mae, r2, rmse, correlation = compute_simple_metrics(torch.tensor(all_predictions), torch.tensor(all_targets))
-    
-    # Raw space metrics (normalized)
-    raw_mae = np.mean(np.abs(all_raw_predictions - np.log1p(all_targets)))
-    raw_correlation = np.corrcoef(all_raw_predictions, np.log1p(all_targets))[0, 1] if len(all_raw_predictions) > 1 else 0.0
-    
-    # Per-polygon statistics
-    polygon_metrics = {}
-    for name, stats in polygon_stats.items():
-        if len(stats['predictions']) > 1:
-            poly_mae = np.mean(np.abs(np.array(stats['predictions']) - np.array(stats['targets'])))
-            poly_corr = np.corrcoef(stats['predictions'], stats['targets'])[0, 1] if len(stats['predictions']) > 1 else 0.0
-            polygon_metrics[name] = {
-                'mae': float(poly_mae),
-                'correlation': float(poly_corr),
-                'num_samples': len(stats['predictions'])
-            }
-    
-    # Prediction distribution analysis
-    pred_percentiles = np.percentile(all_predictions, [5, 25, 50, 75, 95])
-    target_percentiles = np.percentile(all_targets, [5, 25, 50, 75, 95])
-    
-    performance_stats = {
-        'num_samples': len(all_predictions),
-        'overall_metrics': {
-            'mae': float(mae),
-            'rmse': float(rmse),
-            'r2_score': float(r2),
-            'correlation': float(correlation),
-            'raw_mae': float(raw_mae),
-            'raw_correlation': float(raw_correlation)
-        },
-        'prediction_stats': {
-            'mean': float(np.mean(all_predictions)),
-            'std': float(np.std(all_predictions)),
-            'min': float(np.min(all_predictions)),
-            'max': float(np.max(all_predictions)),
-            'percentiles': {
-                '5th': float(pred_percentiles[0]),
-                '25th': float(pred_percentiles[1]),
-                '50th': float(pred_percentiles[2]),
-                '75th': float(pred_percentiles[3]),
-                '95th': float(pred_percentiles[4])
-            }
-        },
-        'target_stats': {
-            'mean': float(np.mean(all_targets)),
-            'std': float(np.std(all_targets)),
-            'min': float(np.min(all_targets)),
-            'max': float(np.max(all_targets)),
-            'percentiles': {
-                '5th': float(target_percentiles[0]),
-                '25th': float(target_percentiles[1]),
-                '50th': float(target_percentiles[2]),
-                '75th': float(target_percentiles[3]),
-                '95th': float(target_percentiles[4])
-            }
-        },
-        'normalization_info': {
-            'r_mean': float(r_mean),
-            'r_std': float(r_std)
-        },
-        'polygon_metrics': polygon_metrics,
-        'num_polygons_evaluated': len(polygon_stats)
-    }
-    
-    return performance_stats
-
-
 def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=0.1, 
                     embedding_size=128, hidden_size=256, target='multi', use_phys_loss=True,
                     lambda_cov=0.5, lambda_phys=0.4, lambda_reg=0.5, lambda_rank=0.0):
@@ -661,8 +536,7 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
         train_predictions = []
         train_targets = []
         
-        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} - Training", leave=False)
-        for batch in train_pbar:
+        for batch in train_loader:
             polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
             polygon_coords = polygon_coords.to(device)
             guard_indices = guard_indices.to(device)
@@ -733,9 +607,6 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
             train_loss += loss.item()
             train_predictions.append(pr.detach())
             train_targets.append(rewards.detach())
-            
-            # Update progress bar
-            train_pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
         
         # Compute training metrics
         train_loss /= max(1, len(train_loader))
@@ -754,8 +625,7 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
         val_targets = []
         
         with torch.no_grad():
-            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} - Validation", leave=False)
-            for batch in val_pbar:
+            for batch in val_loader:
                 polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
                 polygon_coords = polygon_coords.to(device)
                 guard_indices = guard_indices.to(device)
@@ -800,10 +670,6 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
                     val_loss += loss.item()
                     val_predictions.append(pr)
                 val_targets.append(rewards)
-                
-                # Update validation progress bar
-                if 'loss' in locals():
-                    val_pbar.set_postfix({'Val Loss': f'{loss.item():.4f}'})
         
         # Compute validation metrics
         val_loss /= max(1, len(val_loader))
@@ -917,14 +783,11 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
     torch.save({'model_state_dict': model.state_dict(), 'metadata': meta}, final_checkpoint_path)
     print(f"Final model saved to {final_checkpoint_path}")
 
-    # Load best and evaluate (only if epochs > 0)
-    if epochs > 0:
-        best_obj = torch.load(best_checkpoint_path, map_location='cpu')
-        best_state = best_obj['model_state_dict'] if isinstance(best_obj, dict) and 'model_state_dict' in best_obj else best_obj
-        model.load_state_dict(best_state)
-        best_epoch = np.argmin(val_losses)
-    else:
-        best_epoch = 0  # No training, so epoch 0
+    # Load best and evaluate
+    best_obj = torch.load(best_checkpoint_path, map_location='cpu')
+    best_state = best_obj['model_state_dict'] if isinstance(best_obj, dict) and 'model_state_dict' in best_obj else best_obj
+    model.load_state_dict(best_state)
+    best_epoch = np.argmin(val_losses)
     print_training_statistics(train_losses, val_losses, train_maes, val_maes, 
                              train_r2s, val_r2s, epoch_times, best_epoch)
     print("\n" + "="*60)
@@ -966,24 +829,7 @@ def train_value_net(training_data, epochs=50, batch_size=32, lr=1e-3, val_split=
     print(f"  Std Prediction: {np.std(all_predictions_np):.6f}")
     print(f"  Std Target: {np.std(all_targets_np):.6f}")
     print("="*60)
-    
-    # Compile training statistics
-    training_stats = {
-        'train_losses': [float(x) for x in train_losses],
-        'val_losses': [float(x) for x in val_losses],
-        'train_maes': [float(x) for x in train_maes],
-        'val_maes': [float(x) for x in val_maes],
-        'train_r2s': [float(x) for x in train_r2s],
-        'val_r2s': [float(x) for x in val_r2s],
-        'epoch_times': [float(x) for x in epoch_times],
-        'epochs_completed': len(train_losses),
-        'best_epoch': int(np.argmin(val_losses)) + 1,
-        'early_stopped': len(train_losses) < epochs,
-        'training_time': float(sum(epoch_times)),
-        'normalization': {'r_mean': r_mean, 'r_std': r_std}
-    }
-    
-    return model, best_checkpoint_path, final_checkpoint_path, training_stats
+    return model, best_checkpoint_path, final_checkpoint_path
 
 
 def main():
@@ -996,8 +842,8 @@ def main():
     parser = argparse.ArgumentParser(description='Train Solution-Aware Value Network')
     
     # Mode selection
-    parser.add_argument('--mode', choices=['generate', 'train', 'both'], default='both',
-                       help='Generate data, train model, or both')
+    parser.add_argument('--mode', choices=['generate', 'train', 'both', 'evaluate'], default='both',
+                       help='Generate data, train model, both, or evaluate existing model')
     
     # Data generation parameters
     parser.add_argument('--actor-checkpoint', type=str, 
@@ -1010,7 +856,7 @@ def main():
                        help='Number of solutions to sample per polygon')
     parser.add_argument('--max-polygons', type=int, default=None,
                        help='Maximum number of polygons to use (for testing)')
-    parser.add_argument('--data-file', type=str, default='data/value_net_training_data.pkl',
+    parser.add_argument('--data-file', type=str, default='value_net_training_data.pkl',
                        help='File to save/load training data')
     
     # Training parameters
@@ -1018,7 +864,7 @@ def main():
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--val-split', type=float, default=0.1)
-    parser.add_argument('--output', type=str, default='checkpoints/value_net.pt',
+    parser.add_argument('--output', type=str, default='value_net.pt',
                        help='Output file for trained model (in addition to checkpoints)')
     parser.add_argument('--target', choices=['reward','coverage','multi'], default='multi')
     parser.add_argument('--use-phys-loss', action='store_true', default=True)
@@ -1026,14 +872,6 @@ def main():
     parser.add_argument('--lambda-phys', type=float, default=0.4)
     parser.add_argument('--lambda-reg', type=float, default=0.5)
     parser.add_argument('--lambda-rank', type=float, default=0.0)
-    
-    # Evaluation and output arguments
-    parser.add_argument('--stats-output', type=str, default='checkpoints/value_net_training_stats.json',
-                       help='Output file for training statistics JSON')
-    parser.add_argument('--evaluate', action='store_true', default=True,
-                       help='Run comprehensive evaluation after training')
-    parser.add_argument('--load-model', type=str, default=None,
-                       help='Path to pre-trained model to load for evaluation (skips training if provided)')
     
     # Value network architecture parameters
     parser.add_argument('--value-embedding-size', type=int, default=128,
@@ -1049,6 +887,8 @@ def main():
     parser.add_argument('--use-tanh', action='store_true', default=True)
     parser.add_argument('--temperature', type=float, default=1.0)
     parser.add_argument('--normalize', action='store_true', default=True)
+    parser.add_argument('--model-path', type=str, default=None,
+                       help='Path to trained model for evaluation mode')
     
     args = parser.parse_args()
     
@@ -1107,7 +947,7 @@ def main():
         print(f"Loaded {len(training_data)} training samples")
         
         # Train value network
-        model, best_checkpoint_path, final_checkpoint_path, training_stats = train_value_net(
+        model, best_checkpoint_path, final_checkpoint_path = train_value_net(
             training_data,
             epochs=args.epochs,
             batch_size=args.batch_size,
@@ -1123,87 +963,152 @@ def main():
             lambda_rank=args.lambda_rank,
         )
         
-        # Load pre-trained model if specified
-        if args.load_model:
-            print(f"Loading pre-trained model from {args.load_model}")
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            model = model.to(device)
-            model.load_state_dict(torch.load(args.load_model, map_location=device))
-        
         # Also save final model to specified location for backward compatibility
         torch.save(model.state_dict(), args.output)
-        
-        # Compile comprehensive statistics
-        stats = {
-            'training_configuration': {
-                'epochs': args.epochs,
-                'batch_size': args.batch_size,
-                'learning_rate': args.lr,
-                'val_split': args.val_split,
-                'embedding_size': args.value_embedding_size,
-                'hidden_size': args.value_hidden_size,
-                'target': args.target,
-                'use_phys_loss': args.use_phys_loss,
-                'lambda_cov': args.lambda_cov,
-                'lambda_phys': args.lambda_phys,
-                'lambda_reg': args.lambda_reg,
-                'lambda_rank': args.lambda_rank,
-                'num_training_samples': len(training_data),
-            },
-            'training_stats': training_stats,
-            'model_paths': {
-                'best_model': best_checkpoint_path,
-                'final_model': final_checkpoint_path,
-                'output_copy': args.output
-            },
-            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-        }
-        
-        # Evaluate value network performance if requested
-        if args.evaluate:
-            print("\n=== EVALUATION PHASE ===")
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            model = model.to(device)
-            
-            # Use validation split for internal evaluation
-            split_idx = int(len(training_data) * (1 - args.val_split))
-            val_data = training_data[split_idx:]
-            
-            # Internal value network performance evaluation
-            print("Evaluating value network performance on validation data...")
-            value_performance = evaluate_value_net_performance(
-                model, val_data, device, 
-                training_stats['normalization']['r_mean'], 
-                training_stats['normalization']['r_std']
-            )
-            stats['value_performance'] = value_performance
-        else:
-            stats['value_performance'] = {'evaluated': False, 'reason': 'Evaluation disabled'}
-        
-        # Save comprehensive statistics to JSON
-        print(f"\nSaving comprehensive training and evaluation statistics to {args.stats_output}")
-        with open(args.stats_output, 'w') as f:
-            json.dump(stats, f, indent=2)
-        
-        print(f"\n=== SUMMARY ===")
-        print(f"Training completed in {training_stats['training_time']:.1f}s over {training_stats['epochs_completed']} epochs")
-        if training_stats['early_stopped']:
-            print(f"Early stopping triggered, best model at epoch {training_stats['best_epoch']}")
-        
-        if args.evaluate and 'value_performance' in stats and stats['value_performance'].get('evaluated', True):
-            vp = stats['value_performance']
-            print(f"Value Network Performance:")
-            print(f"  - MAE: {vp['overall_metrics']['mae']:.4f}")
-            print(f"  - RMSE: {vp['overall_metrics']['rmse']:.4f}")
-            print(f"  - R² Score: {vp['overall_metrics']['r2_score']:.4f}")
-            print(f"  - Correlation: {vp['overall_metrics']['correlation']:.4f}")
-            print(f"  - Evaluated on {vp['num_samples']} samples from {vp['num_polygons_evaluated']} polygons")
-        
         print(f"\nCheckpoint summary:")
         print(f"  Best model saved to: {best_checkpoint_path}")
         print(f"  Final model saved to: {final_checkpoint_path}")
         print(f"  Copy also saved to: {args.output} (for backward compatibility)")
-        print(f"All statistics saved to: {args.stats_output}")
+    
+    if args.mode == 'evaluate':
+        print("=== EVALUATION PHASE ===")
+        
+        if not args.model_path:
+            raise ValueError("--model-path must be specified for evaluation mode")
+            
+        # Load training data for evaluation
+        with open(args.data_file, 'rb') as f:
+            training_data = pickle.load(f)
+        print(f"Loaded {len(training_data)} training samples")
+        
+        # Create model architecture
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        if args.target == 'rank':
+            model = RankerNet(embedding_size=args.value_embedding_size, hidden_size=args.value_hidden_size).to(device)
+        elif args.target in ['coverage', 'multi']:
+            model = MultiTaskValueNet(embedding_size=args.value_embedding_size, hidden_size=args.value_hidden_size).to(device)
+        else:
+            model = SolutionValueNet(embedding_size=args.value_embedding_size, hidden_size=args.value_hidden_size).to(device)
+        
+        # Load model weights
+        print(f"Loading model from {args.model_path}")
+        checkpoint = torch.load(args.model_path, map_location=device)
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
+        
+        # Get normalization parameters (assume log1p normalization)
+        rewards_all = np.array([np.log1p(item['reward']) for item in training_data], dtype=np.float64)
+        r_mean = float(rewards_all.mean())
+        r_std = float(rewards_all.std() + 1e-8)
+        
+        # Use all data for evaluation (or validation split if specified)
+        if args.val_split > 0:
+            split_idx = int(len(training_data) * (1 - args.val_split))
+            eval_data = training_data[split_idx:]
+        else:
+            eval_data = training_data
+        
+        print(f"Evaluating on {len(eval_data)} samples...")
+        
+        # Run evaluation
+        model.eval()
+        eval_dataset = SolutionDataset(eval_data)
+        eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, 
+                               collate_fn=solution_collate_fn)
+        
+        all_predictions = []
+        all_targets = []
+        
+        with torch.no_grad():
+            eval_pbar = tqdm(eval_loader, desc="Evaluating value network performance")
+            for batch in eval_pbar:
+                polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
+                polygon_coords = polygon_coords.to(device)
+                guard_indices = guard_indices.to(device)
+                poly_lengths = poly_lengths.to(device)
+                sol_lengths = sol_lengths.to(device)
+                
+                if isinstance(model, MultiTaskValueNet):
+                    out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                    raw_pred = out['reward']
+                elif isinstance(model, RankerNet):
+                    raw_pred = -model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                else:
+                    raw_pred = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
+                
+                # Denormalize predictions
+                pred = torch.expm1(raw_pred * r_std + r_mean)
+                
+                all_predictions.extend(pred.cpu().numpy())
+                all_targets.extend(rewards.cpu().numpy())
+        
+        # Calculate metrics
+        all_predictions = np.array(all_predictions)
+        all_targets = np.array(all_targets)
+        
+        mae, r2, rmse, correlation = compute_simple_metrics(
+            torch.tensor(all_predictions), torch.tensor(all_targets)
+        )
+        
+        value_performance = {
+            'num_samples': len(all_predictions),
+            'overall_metrics': {
+                'mae': float(mae),
+                'rmse': float(rmse),
+                'r2_score': float(r2),
+                'correlation': float(correlation)
+            },
+            'prediction_stats': {
+                'mean': float(np.mean(all_predictions)),
+                'std': float(np.std(all_predictions)),
+                'min': float(np.min(all_predictions)),
+                'max': float(np.max(all_predictions))
+            },
+            'target_stats': {
+                'mean': float(np.mean(all_targets)),
+                'std': float(np.std(all_targets)),
+                'min': float(np.min(all_targets)),
+                'max': float(np.max(all_targets))
+            },
+            'normalization_info': {
+                'r_mean': float(r_mean),
+                'r_std': float(r_std)
+            }
+        }
+        
+        # Save results
+        eval_results = {
+            'evaluation_configuration': {
+                'model_path': args.model_path,
+                'data_file': args.data_file,
+                'val_split': args.val_split,
+                'target': args.target,
+                'embedding_size': args.value_embedding_size,
+                'hidden_size': args.value_hidden_size,
+                'num_eval_samples': len(eval_data),
+            },
+            'value_performance': value_performance,
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        
+        # Save to output file
+        with open(args.output, 'w') as f:
+            json.dump(eval_results, f, indent=2)
+        
+        print(f"\n=== EVALUATION RESULTS ===")
+        if 'overall_metrics' in value_performance:
+            vm = value_performance['overall_metrics']
+            print(f"Value Network Performance:")
+            print(f"  - MAE: {vm['mae']:.6f}")
+            print(f"  - RMSE: {vm['rmse']:.6f}")
+            print(f"  - R² Score: {vm['r2_score']:.6f}")
+            print(f"  - Correlation: {vm['correlation']:.6f}")
+            print(f"  - Evaluated on {value_performance['num_samples']} samples")
+        
+        print(f"\nResults saved to: {args.output}")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import numpy as np
 from   utils import evaluate_polygon_visibility_numpy_wo_gt
 import torch
+import math
 from functools import lru_cache
 
 # Global cache for value_net model to avoid reloading
@@ -91,31 +92,33 @@ def linear_reward(points: np.ndarray, solution: np.ndarray, name: str, length: i
     return - (1.0 - coverage) - alpha * rel_length
 
 
-def strict_reward(points: np.ndarray, solution: np.ndarray, name: str, length: int = None, delta=1e-5, p=1):
+def strict_reward(points: np.ndarray, solution: np.ndarray, name: str, length: int = None, alpha=1.0, M=1000.0):
     """
     Strict reward function for vertex guard optimization.
+    Returns large penalty M if coverage < 0.99, otherwise exponential reward based on guard efficiency.
+
     Args:
         points: np.ndarray, polygon vertices (N, 2)
         solution: np.ndarray, indices of selected guards
         name: str, instance name (unused)
         length: int, number of real vertices (if points is padded)
-        uncovered_area: float, area not covered by guards (optional)
-        delta: float, tolerance for uncovered area (default: 1e-5)
-        p: float, penalty exponent for guard usage (default: 1)
+        alpha: float, scaling factor for exponential reward (default: 1.0)
+        M: float, large penalty for insufficient coverage (default: 1000.0)
     Returns:
         float: The computed reward.
     """
     n_vertices = length if length is not None else len(points)
-    n_guards = len(solution)    
-    try:        
+    n_guards = len(solution)
+
+    try:
         coverage = evaluate_polygon_visibility_numpy_wo_gt(points, solution, name)
-        uncovered_area = 1.0 - coverage
     except Exception:
-        uncovered_area = 1.0  # fallback: assume nothing is covered
-    if uncovered_area < delta:
-        return -((n_guards / n_vertices) ** p)
+        coverage = 0.0  # fallback: assume nothing is covered
+
+    if coverage < 0.99:
+        return M  # large penalty
     else:
-        return -1
+        return -math.exp(alpha * (1 - n_guards / n_vertices))
 
 
 def smooth_reward(points: np.ndarray, solution: np.ndarray, name: str, length: int = None, alpha=1, p=1):

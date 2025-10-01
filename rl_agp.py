@@ -18,7 +18,8 @@ import sys
 import matplotlib.pyplot as plt
 #from rewards import linear_reward as reward  # Use the new reward function
 #from rewards import strict_reward as reward  # Use the strict reward function
-from rewards import enhanced_penalty as reward  # Use the smooth reward function
+#from rewards import enhanced_penalty as reward  # Use the smooth reward function
+from rewards import strict_reward as reward  # Use the smooth reward function
 from functools import wraps, partial
 
 # use torch's nn and functional via existing torch import
@@ -544,7 +545,7 @@ def main():
     small_val_dataset = val_dataset if len(val_dataset) <= size else Dataset(val_dataset.samples[:size])
     
     # define reward function
-    reward_fn = partial(reward, alpha=5.0, p=0.0)  # Use smooth reward with alpha=5.0 and p=0.0
+    reward_fn = partial(reward, alpha=1.0, M=1000.0)  # Use strict reward with alpha=1.0 and penalty M=1000.0
 
     if args.ema:
         reinforce_train_ema(agp_model, small_train_dataset, reward_fn,
