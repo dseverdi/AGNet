@@ -44,6 +44,116 @@ def _flatten_lstm_parameters(module: torch.nn.Module):
                 # Safe to ignore; PyTorch will still run, just less optimal
                 pass
 
+def compute_unified_stats(values):
+    """
+    Compute unified statistics for evaluation metrics.
+    Returns consistent format across all evaluation modes.
+    
+    Args:
+        values: List or array of metric values
+        
+    Returns:
+        dict: Statistics with keys: mean, median, std, min, max, q25, q75, iqr
+    """
+    # Filter out NaN and inf values
+    clean_values = np.array([v for v in values if not (np.isnan(v) or np.isinf(v))])
+    
+    if len(clean_values) == 0:
+        return {
+            'mean': float('nan'),
+            'median': float('nan'),
+            'std': float('nan'),
+            'min': float('nan'),
+            'max': float('nan'),
+            'q25': float('nan'),
+            'q75': float('nan'),
+            'iqr': float('nan')
+        }
+    
+    return {
+        'mean': float(np.mean(clean_values)),
+        'median': float(np.median(clean_values)),
+        'std': float(np.std(clean_values)),
+        'min': float(np.min(clean_values)),
+        'max': float(np.max(clean_values)),
+        'q25': float(np.percentile(clean_values, 25)),
+        'q75': float(np.percentile(clean_values, 75)),
+        'iqr': float(np.percentile(clean_values, 75) - np.percentile(clean_values, 25))
+    }
+
+def format_unified_results(num_instances, total_time, evaluation_type, 
+                          rewards, coverages, solution_sizes, polygon_sizes, optimal_sizes,
+                          optional_metrics=None, K=None):
+    """
+    Format evaluation results in unified structure.
+    
+    Core metrics (always included):
+    - polygon_coverage: fraction of polygon area covered by guards (0.0-1.0)
+    - approx_ratio: predicted_guards / optimal_guards (>1.0, lower is better)
+    - size_ratio: predicted_guards / total_vertices (0.0-1.0, lower is better)
+    - solution_size: number of guards in solution
+    - reward: reward value from reward function
+    
+    Args:
+        num_instances: Number of evaluated instances
+        total_time: Total evaluation time in seconds
+        evaluation_type: Type of evaluation (e.g., "sampling", "qlearning")
+        rewards: List of reward values
+        coverages: List of polygon coverage values (0.0-1.0)
+        solution_sizes: List of solution sizes (number of guards)
+        polygon_sizes: List of polygon sizes (number of vertices)
+        optimal_sizes: List of optimal solution sizes (from .solution files)
+        optional_metrics: Dict of optional metrics (regret, correlation, etc.)
+        K: Number of samples per instance (for sampling/search modes)
+        
+    Returns:
+        dict: Unified results structure
+    """
+    # Calculate size ratios
+    size_ratios = []
+    for sol_size, poly_size in zip(solution_sizes, polygon_sizes):
+        if poly_size > 0:
+            size_ratios.append(sol_size / poly_size)
+        else:
+            size_ratios.append(float('nan'))
+    
+    # Calculate approximation ratios
+    approx_ratios = []
+    for sol_size, opt_size in zip(solution_sizes, optimal_sizes):
+        if not np.isnan(opt_size) and opt_size > 0:
+            approx_ratios.append(sol_size / opt_size)
+        else:
+            approx_ratios.append(float('nan'))
+    
+    # Build unified results
+    results = {
+        'evaluation_metadata': {
+            'evaluation_type': evaluation_type,
+            'num_instances': num_instances,
+            'total_time': total_time,
+            'avg_time_per_instance': total_time / num_instances if num_instances > 0 else 0.0
+        },
+        'core_metrics': {
+            'polygon_coverage': compute_unified_stats(coverages),
+            'approx_ratio': compute_unified_stats(approx_ratios),
+            'size_ratio': compute_unified_stats(size_ratios),
+            'solution_size': compute_unified_stats(solution_sizes),
+            'reward': compute_unified_stats(rewards)
+        }
+    }
+    
+    # Add K if provided (for sampling/search modes)
+    if K is not None:
+        results['evaluation_metadata']['K'] = K
+    
+    # Add optional metrics if provided
+    if optional_metrics:
+        results['optional_metrics'] = {}
+        for key, values in optional_metrics.items():
+            results['optional_metrics'][key] = compute_unified_stats(values)
+    
+    return results
+
 def find_best_value_net_checkpoint(checkpoints_dir='checkpoints'):
     """
     Automatically find the best value network checkpoint in the checkpoints directory.
@@ -61,7 +171,7 @@ def find_best_value_net_checkpoint(checkpoints_dir='checkpoints'):
     return checkpoints[0]
 
 
-def load_reward_predictor(model_path, embedding_size=128, hidden_size=None):
+def load_reward_predictor(model_path, embedding_size=None, hidden_size=None):
     """
     Load either a ranker network or value network for reward prediction.
     Automatically detects the model type and hidden size from filename.
@@ -76,19 +186,51 @@ def load_reward_predictor(model_path, embedding_size=128, hidden_size=None):
     """
     print(f"🔧 Loading reward predictor from: {model_path}")
     
-    # Auto-detect hidden size from filename if not provided
-    if hidden_size is None:
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    ckpt = torch.load(model_path, map_location=device, weights_only=False)
+    
+    # Extract model parameters from checkpoint metadata
+    embedding_size = 128  # default
+    hidden_size = 256     # default
+    max_vertices = 1000   # default
+    
+    if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+        state = ckpt['model_state_dict']
+        # Try to get parameters from checkpoint
+        if 'embedding_size' in ckpt:
+            embedding_size = ckpt['embedding_size']
+            print(f"  Auto-detected embedding_size: {embedding_size} (from checkpoint)")
+        if 'hidden_size' in ckpt:
+            hidden_size = ckpt['hidden_size']
+            print(f"  Auto-detected hidden_size: {hidden_size} (from checkpoint)")
+        
+        # Infer max_vertices from guard_embedding weight shape
+        if 'guard_embedding.weight' in state:
+            max_vertices = state['guard_embedding.weight'].shape[0]
+            print(f"  Auto-detected max_vertices: {max_vertices} (from embedding layer)")
+        
+        # Fallback to filename parsing for hidden_size if not in checkpoint
+        if 'hidden_size' not in ckpt:
+            import re
+            match = re.search(r'hidden_size(\d+)', os.path.basename(model_path))
+            if match:
+                hidden_size = int(match.group(1))
+                print(f"  Auto-detected hidden_size: {hidden_size} (from filename)")
+            else:
+                print(f"  Using default hidden_size: {hidden_size}")
+    else:
+        # Legacy checkpoint format
         import re
         match = re.search(r'hidden_size(\d+)', os.path.basename(model_path))
         if match:
             hidden_size = int(match.group(1))
-            print(f"  Auto-detected hidden_size: {hidden_size}")
-        else:
-            hidden_size = 256  # Default fallback
-            print(f"  Using default hidden_size: {hidden_size}")
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    ckpt = torch.load(model_path, map_location=device)
+            print(f"  Auto-detected hidden_size: {hidden_size} (from filename)")
+        print(f"  Using default embedding_size: {embedding_size}, max_vertices: {max_vertices}")
+    model_type = 'unknown'
+    if 'ranker' in os.path.basename(model_path).lower():
+        model_type = 'ranker'
+    elif 'value_net' in os.path.basename(model_path).lower():
+        model_type = 'value_net'
     
     # Determine model type
     model_type = 'unknown'
@@ -109,7 +251,7 @@ def load_reward_predictor(model_path, embedding_size=128, hidden_size=None):
             model_type = 'multitask_value_net'
         elif detected_type == 'solution':
             from train_value_net import SolutionValueNet
-            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size, max_vertices=max_vertices)
             model_type = 'solution_value_net'
         elif detected_type == 'ranker' or model_type == 'ranker':
             model = RankerNet(embedding_size=embedding_size, hidden_size=hidden_size)
@@ -117,7 +259,7 @@ def load_reward_predictor(model_path, embedding_size=128, hidden_size=None):
         else:
             # Fallback
             from train_value_net import SolutionValueNet
-            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size, max_vertices=max_vertices)
             model_type = 'solution_value_net'
         
         model.load_state_dict(state, strict=False)
@@ -127,7 +269,7 @@ def load_reward_predictor(model_path, embedding_size=128, hidden_size=None):
             model = RankerNet(embedding_size=embedding_size, hidden_size=hidden_size)
         else:
             from train_value_net import SolutionValueNet
-            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size)
+            model = SolutionValueNet(embedding_size=embedding_size, hidden_size=hidden_size, max_vertices=max_vertices)
             model_type = 'solution_value_net'
         model.load_state_dict(ckpt)
     
@@ -253,7 +395,7 @@ def load_value_net(value_net_path, embedding_size=128, hidden_size=256):
     return model, device
 
 
-def fast_active_search_with_value_net(actor, value_net, data_tensor, mask, length, name, K=10, device='cpu'):
+def fast_active_search_with_value_net(actor, value_net, data_tensor, mask, length, name, K=10, device='cpu', val_dir=None):
     """
     Active search using learned value network for fast evaluation.
     
@@ -266,13 +408,10 @@ def fast_active_search_with_value_net(actor, value_net, data_tensor, mask, lengt
         name: Instance name
         K: Number of solutions to sample
         device: Device to run on
+        val_dir: Directory containing .solution files for optimal comparison
     
     Returns:
-        best_solution: List of guard indices for best solution
-        best_pred_reward: Predicted reward of best solution
-        best_actual_reward: Actual reward of best solution (for validation)
-        all_pred_rewards: Array of all K predicted rewards
-        prediction_error: Absolute error between predicted and actual best reward
+        dict: Results including optimal_size for approx_ratio calculation
     """
     actor.eval()
     value_net.eval()
@@ -351,17 +490,33 @@ def fast_active_search_with_value_net(actor, value_net, data_tensor, mask, lengt
             best_size = len(best_solution)
             size_ratio = best_size / max(1, length) if length > 0 else 1.0
             
+            # Read optimal size for approx_ratio calculation
+            optimal_size = float('nan')
+            if val_dir is not None:
+                base_name = os.path.splitext(os.path.basename(name))[0]
+                opt_sol_path = os.path.join(val_dir, f"{base_name}.solution")
+                try:
+                    with open(opt_sol_path, 'r') as f:
+                        lines = f.read().splitlines()
+                        if len(lines) >= 2:
+                            optimal_indices = [int(x) for x in lines[1].split()]
+                            optimal_size = len(optimal_indices)
+                except Exception:
+                    pass
+            
             return {
                 'best_reward': actual_reward,
                 'best_coverage': coverage,
                 'best_size': best_size,
                 'size_ratio': size_ratio,
+                'polygon_size': length,
+                'optimal_size': optimal_size,
                 'reward_variance': reward_variance,
                 'coverage_variance': 0.0,  # Not computed for fast evaluation
                 'pred_err_selected': prediction_error,
                 'pred_err_opt': prediction_error,  # Same since we only evaluate selected solution
-                'regret': 0.0  # Would need to compute actual rewards for all K solutions
-                # 'correlation': 0.0  # Would need actual rewards for all K solutions
+                'regret': 0.0,  # Would need to compute actual rewards for all K solutions
+                'correlation': 0.0  # Would need actual rewards for all K solutions
             }
         else:
             # Fallback if no valid solutions
@@ -370,6 +525,8 @@ def fast_active_search_with_value_net(actor, value_net, data_tensor, mask, lengt
                 'best_coverage': 0.0,
                 'best_size': 0,
                 'size_ratio': 0.0,
+                'polygon_size': length,
+                'optimal_size': float('nan'),
                 'reward_variance': 0.0,
                 'coverage_variance': 0.0,
                 'pred_err_selected': 0.0,
@@ -382,7 +539,7 @@ def fast_active_search_with_value_net(actor, value_net, data_tensor, mask, lengt
 def load_rl_model(checkpoint_path, embedding_size=128, hidden_size=128, n_glimpses=1, 
                   tanh_exploration=10, use_tanh=True, temperature=1.0):
     """Load the trained RL model from checkpoint."""
-    print(f"Loading RL model from: {checkpoint_path}")
+    print(f"Loading RL model from: {checkpoint_path} (temperature={temperature})")
     
     # Create model with same architecture as training
     model = create_actor(
@@ -580,7 +737,7 @@ def active_search_train_proxy_on_instance(model, value_net, data_tensor, mask, l
             best_coverage = 0.0
     return best_solution, best_pred_reward, best_coverage
 
-def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha=0.9, device='cpu', use_proxy=False, value_net=None, no_geometry=False):
+def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha=0.9, device='cpu', use_proxy=False, value_net=None, no_geometry=False, proxy_type='reward'):
     """Run Active Search training per instance and report aggregated stats.
     If use_proxy=True, uses value_net predictions as proxy rewards (no true reward calls).
     """
@@ -592,11 +749,24 @@ def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha
     
     all_best_rewards, all_best_coverages, all_best_sizes, all_size_ratios = [], [], [], []
     start_time = time.time()
-    for i, (batch_data, mask, lengths, batch_names) in enumerate(loader):
+    
+    # Progress bar for active search evaluation
+    progress_bar = tqdm(loader, desc="Active Search Evaluation", unit="instance")
+    
+    for i, (batch_data, mask, lengths, batch_names) in enumerate(progress_bar):
         data_tensor = batch_data
         instance_mask = mask
         length = lengths[0]
         name = batch_names[0]
+        
+        # Update progress bar with current instance
+        proxy_info = f"proxy:{proxy_type}" if use_proxy else ""
+        progress_bar.set_postfix({
+            'instance': f"{i+1}/{len(dataset)}",
+            'name': os.path.basename(name)[:15],  # Truncate more for proxy info
+            'proxy': proxy_info
+        })
+        
         # Run AS on this instance
         if use_proxy:
             if value_net is None:
@@ -624,6 +794,16 @@ def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha
             best_solution, best_reward, best_coverage = active_search_train_on_instance(
                 model, data_tensor, instance_mask, length, name, K=K, B=B, lr=lr, alpha=alpha, device=device, no_geometry=no_geometry
             )
+        
+        # Update progress bar with results
+        progress_bar.set_postfix({
+            'instance': f"{i+1}/{len(dataset)}",
+            'name': os.path.basename(name)[:15],
+            'proxy': proxy_info,
+            'reward': f"{best_reward:.3f}",
+            'coverage': f"{best_coverage:.3f}" if not np.isnan(best_coverage) else "N/A"
+        })
+        
         # Read optimal size for ratio if available
         base_name = os.path.splitext(os.path.basename(name))[0]
         opt_sol_path = os.path.join(val_dir, f"{base_name}.solution")
@@ -638,11 +818,14 @@ def evaluate_with_as_training(model, dataset, val_dir, K=64, B=8, lr=3e-4, alpha
                     size_ratio = float('nan')
         except Exception:
             size_ratio = float('nan')
+        
         # Collect
         all_best_rewards.append(best_reward)
         all_best_coverages.append(best_coverage)
         all_best_sizes.append(len(best_solution))
         all_size_ratios.append(size_ratio)
+    
+    progress_bar.close()
     total_time = time.time() - start_time
     
     # Stats helper
@@ -801,7 +984,7 @@ def active_search_single_instance(model, data_tensor, mask, length, name, K=10, 
     return best_solution, best_reward, best_coverage, rewards, coverages, pred_err_selected, pred_err_opt, regret, corr
 
 
-def evaluate_with_sampling(model, dataset, val_dir, K=10, device='cpu', value_net=None, use_value_net=False, no_geometry=False):
+def evaluate_with_sampling(model, dataset, val_dir, K=10, device='cpu', value_net=None, use_value_net=False, no_geometry=False, proxy_type='reward'):
     """
     Evaluate the model using simple sampling (no active search).
     
@@ -834,7 +1017,8 @@ def evaluate_with_sampling(model, dataset, val_dir, K=10, device='cpu', value_ne
     all_best_rewards = []
     all_best_coverages = []
     all_best_sizes = []
-    all_size_ratios = []
+    all_polygon_sizes = []
+    all_optimal_sizes = []
     all_reward_variances = []
     all_coverage_variances = []
     all_pred_err_selected = []
@@ -844,7 +1028,10 @@ def evaluate_with_sampling(model, dataset, val_dir, K=10, device='cpu', value_ne
     
     start_time = time.time()
     
-    for batch_idx, (batch_data, mask, lengths, batch_names) in enumerate(loader):
+    # Progress bar for sampling evaluation
+    progress_bar = tqdm(loader, desc="Sampling Evaluation", unit="instance")
+    
+    for batch_idx, (batch_data, mask, lengths, batch_names) in enumerate(progress_bar):
         batch_data, mask = batch_data.to(device), mask.to(device)
         
         # Process single instance
@@ -853,22 +1040,39 @@ def evaluate_with_sampling(model, dataset, val_dir, K=10, device='cpu', value_ne
         length = lengths[0]  # lengths is a list, not tensor
         name = batch_names[0]
         
+        # Update progress bar with current instance
+        proxy_info = f"proxy:{proxy_type}" if use_value_net else ""
+        progress_bar.set_postfix({
+            'instance': f"{batch_idx+1}/{len(dataset)}",
+            'name': os.path.basename(name)[:15],  # Truncate more for proxy info
+            'proxy': proxy_info
+        })
+        
         if use_value_net and value_net is not None:
             # Use value network for fast sampling evaluation
             result = fast_active_search_with_value_net(
-                model, value_net, data_tensor, instance_mask, length, name, K, device
+                model, value_net, data_tensor, instance_mask, length, name, K, device, val_dir
             )
         else:
             # Use standard sampling evaluation
             result = standard_sampling_single_instance(
-                model, data_tensor, instance_mask, length, name, K, device, no_geometry
+                model, data_tensor, instance_mask, length, name, K, device, no_geometry, val_dir
             )
+        
+        # Update progress bar with results
+        progress_bar.set_postfix({
+            'instance': f"{batch_idx+1}/{len(dataset)}",
+            'name': os.path.basename(name)[:20],
+            'reward': f"{result['best_reward']:.3f}",
+            'coverage': f"{result['best_coverage']:.3f}" if not np.isnan(result['best_coverage']) else "N/A"
+        })
         
         # Collect results
         all_best_rewards.append(result['best_reward'])
         all_best_coverages.append(result['best_coverage']) 
         all_best_sizes.append(result['best_size'])
-        all_size_ratios.append(result['size_ratio'])
+        all_polygon_sizes.append(result.get('polygon_size', length))
+        all_optimal_sizes.append(result.get('optimal_size', float('nan')))
         all_reward_variances.append(result.get('reward_variance', 0.0))
         all_coverage_variances.append(result.get('coverage_variance', 0.0))
         all_pred_err_selected.append(result.get('pred_err_selected', 0.0))
@@ -876,56 +1080,46 @@ def evaluate_with_sampling(model, dataset, val_dir, K=10, device='cpu', value_ne
         all_regrets.append(result.get('regret', 0.0))
         all_corrs.append(result.get('correlation', 0.0))
         
-        print(f"Instance {batch_idx+1}/{len(dataset)}: {name} - Best reward: {result['best_reward']:.4f}, Coverage: {result['best_coverage']:.4f}")
+        # Remove the individual print statement since we have progress bar
+        # print(f"Instance {batch_idx+1}/{len(dataset)}: {name} - Best reward: {result['best_reward']:.4f}, Coverage: {result['best_coverage']:.4f}")
+    
+    progress_bar.close()
     
     total_time = time.time() - start_time
     
-    # Calculate statistics
-    def safe_stats(values):
-        """Calculate statistics safely handling NaN values"""
-        clean_values = [v for v in values if not (np.isnan(v) or np.isinf(v))]
-        if not clean_values:
-            return {'mean': 0.0, 'std': 0.0, 'min': 0.0, 'max': 0.0, 'median': 0.0}
-        
-        return {
-            'mean': float(np.mean(clean_values)),
-            'std': float(np.std(clean_values)),
-            'min': float(np.min(clean_values)),
-            'max': float(np.max(clean_values)),
-            'median': float(np.median(clean_values))
-        }
-    
-    results = {
-        'evaluation_type': evaluation_type,
-        'num_instances': len(dataset),
-        'K': K,
-        'total_time': total_time,
-        'avg_time_per_instance': total_time / len(dataset),
-        'best_rewards': safe_stats(all_best_rewards),
-        'best_coverages': safe_stats(all_best_coverages),
-        'best_sizes': safe_stats(all_best_sizes),
-        'size_ratios': safe_stats(all_size_ratios),
-        'reward_variances': safe_stats(all_reward_variances),
-        'coverage_variances': safe_stats(all_coverage_variances),
-        'pred_err_selected': safe_stats(all_pred_err_selected),
-        'pred_err_opt': safe_stats(all_pred_err_opt),
-        'regrets': safe_stats(all_regrets),
-        'correlations': safe_stats(all_corrs),
-        'raw_results': {
-            'best_rewards': all_best_rewards,
-            'best_coverages': all_best_coverages,
-            'best_sizes': all_best_sizes,
-            'size_ratios': all_size_ratios
-        }
+    # Use unified results format with approx_ratio
+    optional_metrics = {
+        'reward_variance': all_reward_variances,
+        'coverage_variance': all_coverage_variances,
+        'pred_err_selected': all_pred_err_selected,
+        'pred_err_opt': all_pred_err_opt,
+        'regret': all_regrets,
+        'correlation': all_corrs
     }
+    
+    results = format_unified_results(
+        num_instances=len(dataset),
+        total_time=total_time,
+        evaluation_type=evaluation_type,
+        rewards=all_best_rewards,
+        coverages=all_best_coverages,
+        solution_sizes=all_best_sizes,
+        polygon_sizes=all_polygon_sizes,
+        optimal_sizes=all_optimal_sizes,
+        optional_metrics=optional_metrics,
+        K=K
+    )
     
     return results
 
 
-def standard_sampling_single_instance(model, data_tensor, mask, length, name, K, device, no_geometry=False):
+def standard_sampling_single_instance(model, data_tensor, mask, length, name, K, device, no_geometry=False, val_dir=None):
     """
     Standard sampling evaluation for a single instance.
     Sample K solutions and pick the best one based on true rewards.
+    
+    Args:
+        val_dir: Directory containing .solution files for reading optimal sizes
     """
     solutions = []
     rewards = []
@@ -989,11 +1183,27 @@ def standard_sampling_single_instance(model, data_tensor, mask, length, name, K,
     # Size ratio (compared to polygon size as rough optimal estimate)
     size_ratio = best_size / max(1, length) if length > 0 else 1.0
     
+    # Read optimal size for approx_ratio calculation
+    optimal_size = float('nan')
+    if val_dir is not None:
+        base_name = os.path.splitext(os.path.basename(name))[0]
+        opt_sol_path = os.path.join(val_dir, f"{base_name}.solution")
+        try:
+            with open(opt_sol_path, 'r') as f:
+                lines = f.read().splitlines()
+                if len(lines) >= 2:
+                    optimal_indices = [int(x) for x in lines[1].split()]
+                    optimal_size = len(optimal_indices)
+        except Exception:
+            pass
+    
     return {
         'best_reward': best_reward,
         'best_coverage': best_coverage,
         'best_size': best_size,
         'size_ratio': size_ratio,
+        'polygon_size': length,
+        'optimal_size': optimal_size,
         'reward_variance': reward_variance,
         'coverage_variance': coverage_variance,
         'regret': 0.0,  # No regret calculation in simple sampling
@@ -1613,13 +1823,18 @@ def print_results(results, args=None):
             print(f"  Total evaluation time: {total_time:.2f} seconds")
             print(f"  🧠 Value network evaluation completed!")
     else:
-        print(f"\n=== {search_type.upper()} {mode.upper()} EVALUATION RESULTS (K={results['K']}) ===")
-        print(f"Number of instances: {results['num_instances']}")
+        # Handle both old and new unified formats
+        K_value = results.get('K') or results.get('evaluation_metadata', {}).get('K', 'N/A')
+        num_instances = results.get('num_instances') or results.get('evaluation_metadata', {}).get('num_instances', 0)
+        
+        print(f"\n=== {search_type.upper()} {mode.upper()} EVALUATION RESULTS (K={K_value}) ===")
+        print(f"Number of instances: {num_instances}")
         
         # Print timing information
-        if 'evaluation_time' in results:
-            total_time = results['evaluation_time']
-            avg_time = results.get('avg_time_per_instance', 0)
+        total_time = results.get('evaluation_time') or results.get('total_time') or results.get('evaluation_metadata', {}).get('total_time', 0)
+        avg_time = results.get('avg_time_per_instance') or results.get('evaluation_metadata', {}).get('avg_time_per_instance', 0)
+        
+        if total_time > 0:
             print(f"\nTiming Information:")
             print(f"  Total evaluation time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
             print(f"  Average time per instance: {avg_time:.3f} seconds")
@@ -1629,10 +1844,29 @@ def print_results(results, args=None):
             else:
                 print(f"  ⏳ Using standard evaluation (computing actual rewards for all K samples)")
     
-    print_stat_section(results.get('best_rewards', results.get('best_reward_stats', {})), "Best Reward Statistics")
-    print_stat_section(results.get('best_coverages', results.get('best_coverage_stats', {})), "Best Coverage Statistics") 
-    print_stat_section(results.get('best_sizes', results.get('best_size_stats', {})), "Best Solution Size Statistics")
-    print_stat_section(results.get('size_ratios', results.get('size_ratio_stats', {})), "Size Ratio Statistics (best/optimal)")
+    # Handle both old format and new unified format with core_metrics
+    core_metrics = results.get('core_metrics', {})
+    
+    print_stat_section(
+        results.get('best_rewards', results.get('best_reward_stats', core_metrics.get('reward', {}))),
+        "Best Reward Statistics"
+    )
+    print_stat_section(
+        results.get('best_coverages', results.get('best_coverage_stats', core_metrics.get('polygon_coverage', {}))),
+        "Polygon Coverage Statistics"
+    )
+    print_stat_section(
+        results.get('best_sizes', results.get('best_size_stats', core_metrics.get('solution_size', {}))),
+        "Solution Size Statistics"
+    )
+    print_stat_section(
+        results.get('size_ratios', results.get('size_ratio_stats', core_metrics.get('size_ratio', {}))),
+        "Size Ratio Statistics (solution/vertices)"
+    )
+    
+    # Print approx_ratio if available (new unified format)
+    if core_metrics.get('approx_ratio'):
+        print_stat_section(core_metrics['approx_ratio'], "Approximation Ratio (solution/optimal)")
     
     # Print value net quality stats if using value network
     if proxy == 'value_net':
@@ -1881,6 +2115,7 @@ def main():
     ss_parser.add_argument('--no-geometry', action='store_true', help='Disable all geometry-based computations.')
     ss_parser.add_argument('--proxy', choices=['reward', 'value_net', 'ranker'], default='reward', help='Evaluation proxy')
     ss_parser.add_argument('--proxy-path', type=str, default='auto', help='Path to proxy model checkpoint')
+    ss_parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for sampling (higher = more random)')
 
     # Add 'search' mode as an alias for sampling (or duplicate if needed)
     search_parser = subparsers.add_parser('search', help='Active search with test-time training')
@@ -1970,7 +2205,7 @@ def main():
             else:
                 raise FileNotFoundError("No RL model checkpoints found in 'checkpoints/' directory")
 
-        model, device = load_rl_model(checkpoint_path)
+        model, device = load_rl_model(checkpoint_path, temperature=getattr(args, 'temperature', 1.0))
 
         # Load proxy model if requested
         proxy_model = None
@@ -2018,7 +2253,9 @@ def main():
                 K=getattr(args, 'K', 10),
                 device=device,
                 value_net=proxy_model,
-                no_geometry=args.no_geometry
+                use_proxy=(getattr(args, 'proxy', 'reward') != 'reward'),
+                no_geometry=args.no_geometry,
+                proxy_type=getattr(args, 'proxy', 'reward')
             )
             training_method = 'search_' + getattr(args, 'proxy', 'reward')
         else:
@@ -2029,7 +2266,8 @@ def main():
                 device=device,
                 value_net=proxy_model,
                 use_value_net=(getattr(args, 'proxy', 'reward') != 'reward'),
-                no_geometry=args.no_geometry
+                no_geometry=args.no_geometry,
+                proxy_type=getattr(args, 'proxy', 'reward')
             )
             training_method = 'sampling_' + getattr(args, 'proxy', 'reward')
     
@@ -2051,24 +2289,37 @@ def main():
     proxy_val = getattr(args, 'proxy', 'reward')
     output_arg = getattr(args, 'output', None)
 
+    # Handle both old format and new unified format
+    eval_metadata = results.get('evaluation_metadata', {})
+    core_metrics = results.get('core_metrics', {})
+    
     results_summary = {
         'args': vars(args),
-        'K': k_val,
+        'K': k_val or eval_metadata.get('K'),
         'mode': args.mode,
         'proxy': proxy_val,
-        'num_instances': results['num_instances'],
+        'num_instances': results.get('num_instances', eval_metadata.get('num_instances', 0)),
         'training_method': training_method,
-        'evaluation_type': results.get('evaluation_type', training_method),
-        'total_time': results.get('total_time', 0.0),
-        'avg_time_per_instance': results.get('avg_time_per_instance', 0.0),
+        'evaluation_type': results.get('evaluation_type', eval_metadata.get('evaluation_type', training_method)),
+        'total_time': results.get('total_time', eval_metadata.get('total_time', 0.0)),
+        'avg_time_per_instance': results.get('avg_time_per_instance', eval_metadata.get('avg_time_per_instance', 0.0)),
         'overall_metrics': results.get('overall_metrics', {}),
-        'best_rewards': results.get('best_rewards', results.get('best_reward_stats', {})),
-        'best_coverages': results.get('best_coverages', results.get('best_coverage_stats', {})), 
-        'best_sizes': results.get('best_sizes', results.get('best_size_stats', {})),
-        'size_ratios': results.get('size_ratios', results.get('size_ratio_stats', {}))
+        'best_rewards': results.get('best_rewards', results.get('best_reward_stats', core_metrics.get('reward', {}))),
+        'best_coverages': results.get('best_coverages', results.get('best_coverage_stats', core_metrics.get('polygon_coverage', {}))), 
+        'best_sizes': results.get('best_sizes', results.get('best_size_stats', core_metrics.get('solution_size', {}))),
+        'size_ratios': results.get('size_ratios', results.get('size_ratio_stats', core_metrics.get('size_ratio', {})))
     }
     
-    # Add additional stats if available
+    # Add approx_ratio if available in new unified format
+    if core_metrics.get('approx_ratio'):
+        results_summary['approx_ratio'] = core_metrics['approx_ratio']
+    
+    # Add optional_metrics if available in new unified format
+    if 'optional_metrics' in results:
+        for key, value in results['optional_metrics'].items():
+            results_summary[key] = value
+    
+    # Add additional stats if available (old format compatibility)
     if 'prediction_error_stats' in results:
         results_summary['prediction_error_stats'] = results['prediction_error_stats']
     if 'regrets' in results:

@@ -16,6 +16,11 @@ from utils import evaluate_polygon_visibility_numpy_wo_gt  # reuse coverage eval
 import numpy as np
 import sys
 import matplotlib.pyplot as plt
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+    print("Warning: tqdm not available, progress bars will be disabled")
 #from rewards import linear_reward as reward  # Use the new reward function
 #from rewards import strict_reward as reward  # Use the strict reward function
 #from rewards import enhanced_penalty as reward  # Use the smooth reward function
@@ -128,9 +133,18 @@ def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e
     device = next(model.parameters()).device
     # Initialize EMA baseline for variance reduction
     baseline = 0.0
-    for epoch in range(epochs):
+    
+    # Use tqdm for epoch progress if available
+    epoch_iterator = tqdm(range(epochs), desc="Training Epochs") if tqdm else range(epochs)
+    
+    for epoch in epoch_iterator:
         total_loss = 0
-        for batch_data, mask, lengths, batch_names in loader:
+        batch_count = 0
+        
+        # Use tqdm for batch progress if available
+        batch_iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs} Batches", leave=False) if tqdm else loader
+        
+        for batch_data, mask, lengths, batch_names in batch_iterator:
             batch_data = batch_data.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             lengths = torch.tensor(lengths, dtype=torch.long, device=device)
@@ -154,6 +168,15 @@ def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * batch_data.size(0)
+            batch_count += 1
+            
+            # Update tqdm postfix with current loss
+            if tqdm and hasattr(batch_iterator, 'set_postfix'):
+                batch_iterator.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'baseline': f"{baseline:.3f}"
+                })
+            
             # Free up memory after each batch
             del batch_data, mask, lengths, selected_idxs, log_probs, rewards
             torch.cuda.empty_cache()
@@ -182,10 +205,19 @@ def reinforce_train_critic(actor, critic, dataset, reward_fn,
     loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate_fn,
                         pin_memory=True, num_workers=2)
     device = next(actor.parameters()).device
-    for epoch in range(epochs):
+    
+    # Use tqdm for epoch progress if available
+    epoch_iterator = tqdm(range(epochs), desc="AC Training Epochs") if tqdm else range(epochs)
+    
+    for epoch in epoch_iterator:
         total_actor_loss = 0.0
         total_critic_loss = 0.0
-        for batch_data, mask, lengths, batch_names in loader:
+        batch_count = 0
+        
+        # Use tqdm for batch progress if available
+        batch_iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs} Batches", leave=False) if tqdm else loader
+        
+        for batch_data, mask, lengths, batch_names in batch_iterator:
             batch_data = batch_data.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             lengths = torch.tensor(lengths, dtype=torch.long, device=device)
@@ -213,6 +245,15 @@ def reinforce_train_critic(actor, critic, dataset, reward_fn,
             opt_actor.step(); opt_critic.step()
             total_actor_loss += actor_loss.item() * batch_data.size(0)
             total_critic_loss += critic_loss.item() * batch_data.size(0)
+            batch_count += 1
+            
+            # Update tqdm postfix with current losses
+            if tqdm and hasattr(batch_iterator, 'set_postfix'):
+                batch_iterator.set_postfix({
+                    'actor_loss': f"{actor_loss.item():.4f}",
+                    'critic_loss': f"{critic_loss.item():.4f}"
+                })
+            
             # Mem cleanup
             del batch_data, mask, lengths, selected_idxs, log_probs, values, rewards
             torch.cuda.empty_cache(); import gc; gc.collect()

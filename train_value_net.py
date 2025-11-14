@@ -22,8 +22,8 @@ from tqdm import tqdm
 # Import from project files
 from dataset import Dataset as AGPDataset, agp_read_samples, collate_fn
 from models import create_actor
-#from rewards import enhanced_penalty as reward_fn
-from rewards import strict_reward as reward_fn
+from rewards import enhanced_penalty as reward_fn
+from rl_agp import BucketBatchSampler, get_lengths_from_dataset
 from functools import partial
 
 
@@ -842,8 +842,8 @@ def main():
     parser = argparse.ArgumentParser(description='Train Solution-Aware Value Network')
     
     # Mode selection
-    parser.add_argument('--mode', choices=['generate', 'train', 'both', 'evaluate'], default='both',
-                       help='Generate data, train model, both, or evaluate existing model')
+    parser.add_argument('--mode', choices=['generate', 'train', 'both'], default='both',
+                       help='Generate data, train model, or both')
     
     # Data generation parameters
     parser.add_argument('--actor-checkpoint', type=str, 
@@ -887,8 +887,6 @@ def main():
     parser.add_argument('--use-tanh', action='store_true', default=True)
     parser.add_argument('--temperature', type=float, default=1.0)
     parser.add_argument('--normalize', action='store_true', default=True)
-    parser.add_argument('--model-path', type=str, default=None,
-                       help='Path to trained model for evaluation mode')
     
     args = parser.parse_args()
     
@@ -969,146 +967,6 @@ def main():
         print(f"  Best model saved to: {best_checkpoint_path}")
         print(f"  Final model saved to: {final_checkpoint_path}")
         print(f"  Copy also saved to: {args.output} (for backward compatibility)")
-    
-    if args.mode == 'evaluate':
-        print("=== EVALUATION PHASE ===")
-        
-        if not args.model_path:
-            raise ValueError("--model-path must be specified for evaluation mode")
-            
-        # Load training data for evaluation
-        with open(args.data_file, 'rb') as f:
-            training_data = pickle.load(f)
-        print(f"Loaded {len(training_data)} training samples")
-        
-        # Create model architecture
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        if args.target == 'rank':
-            model = RankerNet(embedding_size=args.value_embedding_size, hidden_size=args.value_hidden_size).to(device)
-        elif args.target in ['coverage', 'multi']:
-            model = MultiTaskValueNet(embedding_size=args.value_embedding_size, hidden_size=args.value_hidden_size).to(device)
-        else:
-            model = SolutionValueNet(embedding_size=args.value_embedding_size, hidden_size=args.value_hidden_size).to(device)
-        
-        # Load model weights
-        print(f"Loading model from {args.model_path}")
-        checkpoint = torch.load(args.model_path, map_location=device)
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model.load_state_dict(checkpoint)
-        
-        # Get normalization parameters (assume log1p normalization)
-        rewards_all = np.array([np.log1p(item['reward']) for item in training_data], dtype=np.float64)
-        r_mean = float(rewards_all.mean())
-        r_std = float(rewards_all.std() + 1e-8)
-        
-        # Use all data for evaluation (or validation split if specified)
-        if args.val_split > 0:
-            split_idx = int(len(training_data) * (1 - args.val_split))
-            eval_data = training_data[split_idx:]
-        else:
-            eval_data = training_data
-        
-        print(f"Evaluating on {len(eval_data)} samples...")
-        
-        # Run evaluation
-        model.eval()
-        eval_dataset = SolutionDataset(eval_data)
-        eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, 
-                               collate_fn=solution_collate_fn)
-        
-        all_predictions = []
-        all_targets = []
-        
-        with torch.no_grad():
-            eval_pbar = tqdm(eval_loader, desc="Evaluating value network performance")
-            for batch in eval_pbar:
-                polygon_coords, guard_indices, rewards, poly_lengths, sol_lengths, coverage, cov_mask, names = batch
-                polygon_coords = polygon_coords.to(device)
-                guard_indices = guard_indices.to(device)
-                poly_lengths = poly_lengths.to(device)
-                sol_lengths = sol_lengths.to(device)
-                
-                if isinstance(model, MultiTaskValueNet):
-                    out = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
-                    raw_pred = out['reward']
-                elif isinstance(model, RankerNet):
-                    raw_pred = -model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
-                else:
-                    raw_pred = model(polygon_coords, guard_indices, poly_lengths, sol_lengths)
-                
-                # Denormalize predictions
-                pred = torch.expm1(raw_pred * r_std + r_mean)
-                
-                all_predictions.extend(pred.cpu().numpy())
-                all_targets.extend(rewards.cpu().numpy())
-        
-        # Calculate metrics
-        all_predictions = np.array(all_predictions)
-        all_targets = np.array(all_targets)
-        
-        mae, r2, rmse, correlation = compute_simple_metrics(
-            torch.tensor(all_predictions), torch.tensor(all_targets)
-        )
-        
-        value_performance = {
-            'num_samples': len(all_predictions),
-            'overall_metrics': {
-                'mae': float(mae),
-                'rmse': float(rmse),
-                'r2_score': float(r2),
-                'correlation': float(correlation)
-            },
-            'prediction_stats': {
-                'mean': float(np.mean(all_predictions)),
-                'std': float(np.std(all_predictions)),
-                'min': float(np.min(all_predictions)),
-                'max': float(np.max(all_predictions))
-            },
-            'target_stats': {
-                'mean': float(np.mean(all_targets)),
-                'std': float(np.std(all_targets)),
-                'min': float(np.min(all_targets)),
-                'max': float(np.max(all_targets))
-            },
-            'normalization_info': {
-                'r_mean': float(r_mean),
-                'r_std': float(r_std)
-            }
-        }
-        
-        # Save results
-        eval_results = {
-            'evaluation_configuration': {
-                'model_path': args.model_path,
-                'data_file': args.data_file,
-                'val_split': args.val_split,
-                'target': args.target,
-                'embedding_size': args.value_embedding_size,
-                'hidden_size': args.value_hidden_size,
-                'num_eval_samples': len(eval_data),
-            },
-            'value_performance': value_performance,
-            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-        }
-        
-        # Save to output file
-        with open(args.output, 'w') as f:
-            json.dump(eval_results, f, indent=2)
-        
-        print(f"\n=== EVALUATION RESULTS ===")
-        if 'overall_metrics' in value_performance:
-            vm = value_performance['overall_metrics']
-            print(f"Value Network Performance:")
-            print(f"  - MAE: {vm['mae']:.6f}")
-            print(f"  - RMSE: {vm['rmse']:.6f}")
-            print(f"  - R² Score: {vm['r2_score']:.6f}")
-            print(f"  - Correlation: {vm['correlation']:.6f}")
-            print(f"  - Evaluated on {value_performance['num_samples']} samples")
-        
-        print(f"\nResults saved to: {args.output}")
 
 
 if __name__ == "__main__":
