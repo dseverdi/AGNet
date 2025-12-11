@@ -1,3 +1,16 @@
+#!/usr/bin/env python3
+"""
+RL-AGP with Greedy Baseline
+
+This variant uses precomputed greedy solutions as the baseline for advantage estimation,
+providing more stable and informed training compared to EMA or learned critic baselines.
+
+Key difference from rl_agp.py:
+- Loads greedy cache (data/greedy_baseline_train.pkl) at startup
+- Uses greedy rewards as baseline: advantage = rl_reward - greedy_reward
+- Provides immediate feedback on whether RL solution is better than greedy
+"""
+
 import os
 from dotenv import load_dotenv
 import argparse
@@ -5,28 +18,18 @@ from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor, create_critic
 from utils import createPolygon, compute_visibility
 import torch
-try:
-    import skgeom
-except ImportError:
-    skgeom = None
-    print("Warning: skgeom not available, some visualization functions may not work")
 from torch.utils.data import DataLoader, Sampler
+
+import skgeom
 
 from utils import evaluate_polygon_visibility_numpy_wo_gt  # reuse coverage evaluation
 import numpy as np
 import sys
 import matplotlib.pyplot as plt
-try:
-    from tqdm import tqdm
-except ImportError:
-    tqdm = None
-    print("Warning: tqdm not available, progress bars will be disabled")
-#from rewards import linear_reward as reward  # Use the new reward function
-#from rewards import strict_reward as reward  # Use the strict reward function
-#from rewards import enhanced_penalty as reward  # Use the smooth reward function
-#from rewards import strict_reward as reward  # Use the smooth reward function
-from rewards import coverage_smooth_reward as reward  # Smooth reward with no discontinuity
+import pickle
+from tqdm import tqdm
 
+from rewards import coverage_smooth_reward as reward  # Smooth reward with no discontinuity
 from functools import wraps, partial
 
 # use torch's nn and functional via existing torch import
@@ -40,6 +43,27 @@ def get_checkpoint_path(folder, model_name, params, n_epochs):
     filename = f"{model_name}_{param_str}_epochs{n_epochs}.pt"
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, filename)
+
+def load_greedy_cache(cache_path):
+    """Load precomputed greedy solutions cache."""
+    print(f"\n[GREEDY CACHE] Loading from {cache_path}...")
+    try:
+        with open(cache_path, 'rb') as f:
+            cache = pickle.load(f)
+        print(f"[GREEDY CACHE] Successfully loaded {len(cache)} greedy solutions")
+        
+        # Print sample statistics
+        if len(cache) > 0:
+            sample_entries = list(cache.items())[:3]
+            print(f"[GREEDY CACHE] Sample entries:")
+            for name, data in sample_entries:
+                print(f"  - {name}: {data['num_guards']} guards, coverage={data['coverage']:.3f}, reward={data['reward']:.2f}")
+        
+        return cache
+    except Exception as e:
+        print(f"[GREEDY CACHE] ERROR: Failed to load cache: {e}")
+        print(f"[GREEDY CACHE] Continuing without greedy baseline (will fall back to EMA)")
+        return None
 
 # --- Data Preparation ---
 def prepare_datasets(train_path, val_path, normalize=True):
@@ -112,29 +136,44 @@ def get_lengths_from_dataset(dataset):
     return [sample[0].shape[0] for sample in dataset]
 
 
-
-def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e-3, beta=0.99):
+def reinforce_train_greedy_baseline(model, dataset, reward_fn, greedy_cache, epochs=2, batch_size=1, lr=1e-3, beta=0.99):
     """
-    Train the model using REINFORCE with exponential moving average (EMA) baseline for variance reduction.
-    Uses a simple bucket sampler to group samples by length.
+    Train the model using REINFORCE with GREEDY BASELINE for variance reduction.
+    
+    Uses precomputed greedy solutions as baseline instead of EMA or learned critic.
+    Advantage = RL_reward - Greedy_reward
+    
     Args:
         model: The actor model to train.
         dataset: The dataset containing samples.
         reward_fn: The reward function to compute rewards.
+        greedy_cache: Dictionary mapping polygon names to greedy solutions {name: {'guards': [...], 'reward': float, ...}}
         epochs: Number of training epochs.
         batch_size: Size of each training batch.
         lr: Learning rate for the optimizer.
-        beta: EMA decay factor for baseline updates.
+        beta: EMA decay factor for fallback baseline when greedy solution not available.
     """
-    print(f"\n--- Training on {len(dataset)} samples for {epochs} epochs (batch size {batch_size}) ---")
+    print(f"\n--- Training with Greedy Baseline on {len(dataset)} samples for {epochs} epochs (batch size {batch_size}) ---")
+    
+    if greedy_cache is None:
+        print("[WARNING] No greedy cache available, falling back to EMA baseline")
+    else:
+        print(f"[GREEDY BASELINE] Using {len(greedy_cache)} precomputed greedy solutions as baseline")
+    
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     lengths = get_lengths_from_dataset(dataset)
     batch_sampler = BucketBatchSampler(lengths, batch_size, shuffle=True, bucket_size=10)
     loader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collate_fn, pin_memory=True, num_workers=2)
     device = next(model.parameters()).device
-    # Initialize EMA baseline for variance reduction
-    baseline = 0.0
+    
+    # Fallback EMA baseline for samples without greedy solution
+    ema_baseline = 0.0
+    
+    # Statistics
+    total_greedy_hits = 0
+    total_greedy_misses = 0
+    total_improvements = 0  # Count when RL beats greedy
     
     # Use tqdm for epoch progress if available
     epoch_iterator = tqdm(range(epochs), desc="Training Epochs") if tqdm else range(epochs)
@@ -142,6 +181,9 @@ def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e
     for epoch in epoch_iterator:
         total_loss = 0
         batch_count = 0
+        epoch_greedy_hits = 0
+        epoch_greedy_misses = 0
+        epoch_improvements = 0
         
         # Use tqdm for batch progress if available
         batch_iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs} Batches", leave=False) if tqdm else loader
@@ -150,123 +192,107 @@ def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e
             batch_data = batch_data.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             lengths = torch.tensor(lengths, dtype=torch.long, device=device)
+            
             # Forward pass: model should return (selected_idxs, log_probs)
             selected_idxs, log_probs = model(batch_data, padding_mask=mask, lengths=lengths)
+            
+            # Compute RL rewards
             rewards_list = []
+            baselines_list = []
+            
             for i, (data_tensor, idxs, name) in enumerate(zip(batch_data.cpu(), selected_idxs, batch_names)):
                 n = lengths[i].item() if lengths is not None else len(data_tensor)
                 real_points = data_tensor[:n].detach().cpu().numpy()
                 real_solution = [idx for idx in idxs if idx < n]
-                r = reward(real_points, real_solution, name, length=n)
-                rewards_list.append(r)
+                
+                # Compute RL reward (strict_reward returns reward directly, higher = better)
+                rl_reward = reward(real_points, real_solution, name, length=n)
+                rewards_list.append(rl_reward)
+                
+                # Get greedy baseline for this sample
+                # Extract polygon name without extension
+                base_name = os.path.splitext(os.path.basename(name))[0]
+                
+                if greedy_cache is not None and base_name in greedy_cache:
+                    # Recompute greedy reward using current reward function (not cached value)
+                    # This ensures consistency when reward function changes
+                    greedy_guards = greedy_cache[base_name]['guards']
+                    greedy_reward = reward(real_points, greedy_guards, name, length=n)
+                    baselines_list.append(greedy_reward)
+                    epoch_greedy_hits += 1
+                    
+                    # Track improvements over greedy
+                    if rl_reward > greedy_reward:
+                        epoch_improvements += 1
+                else:
+                    # Fallback to EMA baseline
+                    baselines_list.append(ema_baseline)
+                    epoch_greedy_misses += 1
+            
             rewards = torch.tensor(rewards_list, dtype=torch.float32, device=device)
-            # Update EMA baseline and compute advantages
+            baselines = torch.tensor(baselines_list, dtype=torch.float32, device=device)
+            
+            # Update EMA baseline for fallback
             batch_mean = rewards.mean().item()
-            baseline = beta * baseline + (1 - beta) * batch_mean
-            advantages = rewards - baseline
-            # REINFORCE loss using advantages instead of raw rewards
+            ema_baseline = beta * ema_baseline + (1 - beta) * batch_mean
+            
+            # Compute advantages using greedy baseline (or EMA fallback)
+            advantages = rewards - baselines
+            
+            # REINFORCE loss using advantages
             loss = -(log_probs * advantages).mean()
+            
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
             total_loss += loss.item() * batch_data.size(0)
             batch_count += 1
             
-            # Update tqdm postfix with current loss
+            # Update tqdm postfix with current loss and statistics
             if tqdm and hasattr(batch_iterator, 'set_postfix'):
                 batch_iterator.set_postfix({
                     'loss': f"{loss.item():.4f}",
-                    'baseline': f"{baseline:.3f}"
+                    'avg_reward': f"{batch_mean:.3f}",
+                    'greedy_hits': f"{epoch_greedy_hits}/{epoch_greedy_hits + epoch_greedy_misses}"
                 })
             
             # Free up memory after each batch
-            del batch_data, mask, lengths, selected_idxs, log_probs, rewards
+            del batch_data, mask, lengths, selected_idxs, log_probs, rewards, baselines
             torch.cuda.empty_cache()
-            # gather garbage
             import gc
             gc.collect()
+        
         avg_loss = total_loss / len(dataset)
-        print(f"Epoch {epoch+1}/{epochs} - Avg loss: {avg_loss:.4f}")
+        total_greedy_hits += epoch_greedy_hits
+        total_greedy_misses += epoch_greedy_misses
+        total_improvements += epoch_improvements
+        
+        # Epoch summary
+        hit_rate = 100.0 * epoch_greedy_hits / (epoch_greedy_hits + epoch_greedy_misses) if (epoch_greedy_hits + epoch_greedy_misses) > 0 else 0
+        improvement_rate = 100.0 * epoch_improvements / epoch_greedy_hits if epoch_greedy_hits > 0 else 0
+        
+        print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} | "
+              f"Greedy hits: {epoch_greedy_hits}/{epoch_greedy_hits + epoch_greedy_misses} ({hit_rate:.1f}%) | "
+              f"RL > Greedy: {epoch_improvements}/{epoch_greedy_hits} ({improvement_rate:.1f}%)")
+        
         torch.cuda.empty_cache()
+    
+    # Final summary
+    print(f"\n[TRAINING SUMMARY]")
+    print(f"  Total samples with greedy baseline: {total_greedy_hits}")
+    print(f"  Total samples with EMA fallback: {total_greedy_misses}")
+    print(f"  Times RL beat greedy: {total_improvements}/{total_greedy_hits} ({100.0*total_improvements/total_greedy_hits:.1f}%)")
     print("Training done.")
 
-# --- Reinforce with learned critic ---
-def reinforce_train_critic(actor, critic, dataset, reward_fn,
-                          epochs=2, batch_size=1,
-                          lr_actor=1e-3, lr_critic=1e-3):
-    """
-    Actor-critic training: policy network (actor) and value network (critic).
-    Critic is trained via MSE to match observed return; actor via advantage.
-    """
-    print(f"\n--- AC Training on {len(dataset)} samples for {epochs} epochs (batch {batch_size}) ---")
-    actor.train(); critic.train()
-    opt_actor = torch.optim.Adam(actor.parameters(), lr=lr_actor)
-    opt_critic = torch.optim.Adam(critic.parameters(), lr=lr_critic)
-    lengths_list = get_lengths_from_dataset(dataset)
-    sampler = BucketBatchSampler(lengths_list, batch_size, shuffle=True, bucket_size=10)
-    loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate_fn,
-                        pin_memory=True, num_workers=2)
-    device = next(actor.parameters()).device
-    
-    # Use tqdm for epoch progress if available
-    epoch_iterator = tqdm(range(epochs), desc="AC Training Epochs") if tqdm else range(epochs)
-    
-    for epoch in epoch_iterator:
-        total_actor_loss = 0.0
-        total_critic_loss = 0.0
-        batch_count = 0
-        
-        # Use tqdm for batch progress if available
-        batch_iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs} Batches", leave=False) if tqdm else loader
-        
-        for batch_data, mask, lengths, batch_names in batch_iterator:
-            batch_data = batch_data.to(device, non_blocking=True)
-            mask = mask.to(device, non_blocking=True)
-            lengths = torch.tensor(lengths, dtype=torch.long, device=device)
-            # Actor forward
-            selected_idxs, log_probs = actor(batch_data, padding_mask=mask, lengths=lengths)
-            # Critic forward
-            values = critic(batch_data, mask, lengths)
-            # Compute rewards
-            rewards_list = []
-            for i, (data_tensor, idxs, name) in enumerate(zip(batch_data.cpu(), selected_idxs, batch_names)):
-                n = lengths[i].item() if lengths is not None else len(data_tensor)
-                real_points = data_tensor[:n].detach().cpu().numpy()
-                real_solution = [idx for idx in idxs if idx < n]
-                r = reward(real_points, real_solution, name, length=n)
-                rewards_list.append(r)
-            rewards = torch.tensor(rewards_list, dtype=torch.float32, device=device)
-            # Critic loss: fit to returns
-            critic_loss = F.mse_loss(values, rewards)
-            # Advantages for actor
-            advantages = rewards - values.detach()
-            actor_loss = -(log_probs * advantages).mean()
-            # Optimize
-            opt_actor.zero_grad(); opt_critic.zero_grad()
-            actor_loss.backward(); critic_loss.backward()
-            opt_actor.step(); opt_critic.step()
-            total_actor_loss += actor_loss.item() * batch_data.size(0)
-            total_critic_loss += critic_loss.item() * batch_data.size(0)
-            batch_count += 1
-            
-            # Update tqdm postfix with current losses
-            if tqdm and hasattr(batch_iterator, 'set_postfix'):
-                batch_iterator.set_postfix({
-                    'actor_loss': f"{actor_loss.item():.4f}",
-                    'critic_loss': f"{critic_loss.item():.4f}"
-                })
-            
-            # Mem cleanup
-            del batch_data, mask, lengths, selected_idxs, log_probs, values, rewards
-            torch.cuda.empty_cache(); import gc; gc.collect()
-        print(f"Epoch {epoch+1}/{epochs} - Actor loss: {total_actor_loss/len(dataset):.4f}" \
-              f", Critic loss: {total_critic_loss/len(dataset):.4f}")
-    print("Actor-critic training done.")
-
 # --- Evaluation ---
-def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
+def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None, greedy_cache=None):
     """Evaluate the model on the validation dataset with comprehensive metrics for whisker plots."""
     print(f"\n--- Evaluation on {len(dataset)} validation samples (batch size {batch_size}) ---")
+    
+    if greedy_cache is not None:
+        print(f"[EVAL] Will compare RL solutions against {len(greedy_cache)} greedy baselines")
+    
     model.eval()
     lengths = get_lengths_from_dataset(dataset)
     batch_sampler = BucketBatchSampler(lengths, batch_size, shuffle=False, bucket_size=10)
@@ -282,6 +308,11 @@ def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
     overlap_counts = []  # absolute number of overlapping guards
     all_rewards = []
     all_coverages = []
+    
+    # Greedy comparison statistics
+    greedy_rewards = []
+    rl_vs_greedy_improvements = 0
+    greedy_comparisons = 0
     
     if sol_dir is None:
         # Default: use the directory of the first validation .pol file
@@ -302,9 +333,19 @@ def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
                 points = data_tensor.numpy()
                 length = lengths[i].item() if lengths is not None else len(points)
                 
-                # Compute reward and coverage
+                # Compute reward and coverage (strict_reward returns reward directly)
                 r = reward_fn(points, np.array(pred_indices), name, length=length)
                 all_rewards.append(r)
+                
+                # Compare with greedy if available (recompute greedy reward with current reward function)
+                base_name = os.path.splitext(os.path.basename(name))[0]
+                if greedy_cache is not None and base_name in greedy_cache:
+                    greedy_guards = greedy_cache[base_name]['guards']
+                    greedy_reward = reward_fn(points, np.array(greedy_guards), name, length=length)
+                    greedy_rewards.append(greedy_reward)
+                    greedy_comparisons += 1
+                    if r > greedy_reward:  # r is RL reward (higher=better)
+                        rl_vs_greedy_improvements += 1
                 
                 # Extract coverage from reward if available
                 if isinstance(r, tuple) and len(r) == 2:
@@ -318,7 +359,6 @@ def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
                 all_coverages.append(coverage)
                 
                 # Read optimal solution for comparison
-                base_name = os.path.splitext(os.path.basename(name))[0]
                 opt_sol_path = os.path.join(sol_dir, f"{base_name}.solution")
                 true_indices = []
                 try:
@@ -383,6 +423,16 @@ def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
     
     print("\n=== EVALUATION RESULTS ===")
     
+    # Greedy comparison summary
+    if greedy_comparisons > 0:
+        improvement_rate = 100.0 * rl_vs_greedy_improvements / greedy_comparisons
+        print(f"\n[GREEDY COMPARISON]")
+        print(f"  Comparisons: {greedy_comparisons}")
+        print(f"  RL > Greedy: {rl_vs_greedy_improvements} ({improvement_rate:.1f}%)")
+        print(f"  Avg RL reward: {np.mean(all_rewards):.3f}")
+        if len(greedy_rewards) > 0:
+            print(f"  Avg Greedy reward: {np.mean(greedy_rewards):.3f}")
+    
     # Compute all statistics
     if len(pred_sizes) > 0:
         size_stats = compute_stats(pred_sizes, "Predicted Solution Sizes")
@@ -430,119 +480,15 @@ def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
             'overlap_stats': overlap_stats,
             'coverage_vis_stats': coverage_vis_stats
         },
+        # Greedy comparison metrics
+        'greedy_comparisons': greedy_comparisons,
+        'rl_vs_greedy_improvements': rl_vs_greedy_improvements,
+        'avg_greedy_reward': np.mean(greedy_rewards) if len(greedy_rewards) > 0 else float('nan'),
         # Legacy compatibility
         'rewards': all_rewards,
         'coverages': all_coverages,
         'rel_sizes': rel_sizes
     }
-
-
-
-# --- Visualization and Coverage Testing ---
-# --- Test Coverage ---
-def test_coverage_on_sample(dataset, sol_dir, index=0, regime="opt", n_random_guards=None):
-    """Load the optimal solution or a random guard set and evaluate coverage on one sample
-    n_random_guards: if set and regime=='random', use this many guards (default: match optimal solution)
-    """
-    import random
-    print(f"\n--- Coverage test on a single sample (regime: {regime}) ---")
-    if len(dataset) == 0:
-        print("No validation samples available for coverage test.")
-        return
-    # Get raw polygon points and sample name
-    sample_data, _, sample_name = dataset[index]
-    points = sample_data.numpy()
-    n_points = len(points)
-    true_idxs = []
-    if regime == "opt":
-        # Read optimal guard indices from .solution file (second line)
-        sol_path = os.path.join(sol_dir, f"{sample_name}.solution")
-        try:
-            with open(sol_path, 'r') as f:
-                lines = f.read().splitlines()
-                if len(lines) >= 2:
-                    true_idxs = [int(x) for x in lines[1].split()]
-        except Exception as e:
-            print(f"Could not read solution file {sol_path}: {e}", file=sys.stderr)
-            return
-        if not true_idxs:
-            print(f"No guards found in solution file for sample {sample_name}")
-            return
-        guard_idxs = np.array(true_idxs)
-        label = "True (optimal)"
-    elif regime == "random":
-        # Try to match the number of guards in the optimal solution if possible, unless overridden
-        if n_random_guards is not None:
-            n_guards = min(max(1, int(n_random_guards)), n_points)
-        else:
-            sol_path = os.path.join(sol_dir, f"{sample_name}.solution")
-            n_guards = 1
-            try:
-                with open(sol_path, 'r') as f:
-                    lines = f.read().splitlines()
-                    if len(lines) >= 2:
-                        n_guards = max(1, len([int(x) for x in lines[1].split()]))
-            except Exception:
-                n_guards = max(1, n_points // 10)  # fallback: 10% of vertices
-        guard_idxs = np.array(sorted(random.sample(range(n_points), min(n_guards, n_points))))
-        label = f"Random ({len(guard_idxs)} guards)"
-    else:
-        print(f"Unknown regime: {regime}")
-        return
-    # Evaluate coverage
-    coverage = evaluate_polygon_visibility_numpy_wo_gt(points, guard_idxs, sample_name)
-    print(f"Sample: {sample_name}  {label} coverage: {coverage:.4f}")
-
-    # --- Visualization with visibility regions ---
-    # Compute visibility polygons for each guard
-    if skgeom is None:
-        print("Warning: skgeom not available, skipping visibility visualization")
-        return
-    
-    from concurrent.futures import ThreadPoolExecutor
-    eps = 1e-8
-    poly_obj = createPolygon(points)
-    if poly_obj is None:
-        print(f"Invalid polygon in {sample_name}: less than 3 vertices or zero area", file=sys.stderr)
-        return
-    arr = skgeom.arrangement.Arrangement()
-    for edge in poly_obj.edges:
-        arr.insert(edge)
-    vs = skgeom.TriangularExpansionVisibility(arr)
-    edges = list(poly_obj.edges)
-    vis_polys = []
-    with ThreadPoolExecutor() as executor:
-        futures = [executor.submit(compute_visibility, vs, arr, poly_obj, eps, edges, idx) for idx in guard_idxs]
-        for future in futures:
-            vis_poly, err_idx, err_q = future.result()
-            if vis_poly:
-                vis_polys.append(vis_poly)
-            else:
-                vis_polys.append(None)
-
-    fig, ax = plt.subplots()
-    poly = np.array(points)
-    if poly.shape[0] > 2:
-        ax.plot(np.append(poly[:,0], poly[0,0]), np.append(poly[:,1], poly[0,1]), 'k-', lw=1, label='Polygon')
-    # Plot each guard's visibility region
-    for i, vis_poly in enumerate(vis_polys):
-        if vis_poly is not None:
-            vis_pts = np.array([[p.x(), p.y()] for p in vis_poly.vertices])
-            ax.fill(vis_pts[:,0], vis_pts[:,1], alpha=0.25, label=f'Guard {i} vis' if i==0 else None)
-    # Guards
-    guards = poly[guard_idxs]
-    ax.scatter(guards[:,0], guards[:,1], c='red', s=60, marker='*', label='Guards')
-    ax.set_aspect('equal')
-    ax.set_title(f"{sample_name} ({label})\nCoverage: {coverage:.2f}")
-    ax.legend()
-    out_dir = os.path.join(os.path.dirname(__file__), 'gfx')
-    os.makedirs(out_dir, exist_ok=True)
-    # Add number of guards to the filename
-    n_guards_str = f"{len(guard_idxs)}_guards"
-    out_path = os.path.join(out_dir, f"{sample_name}_{regime}_{n_guards_str}_coverage.png")
-    plt.savefig(out_path, bbox_inches='tight')
-    print(f"Saved coverage plot to {out_path}")
-    plt.close(fig)
 
 
 def main():
@@ -551,13 +497,14 @@ def main():
     DATASET_PATH = os.getenv("DATASET_PATH")
     if not DATASET_PATH:
         raise EnvironmentError("DATASET_PATH environment variable must be set in .env file.")
-    parser = argparse.ArgumentParser()
+    
+    parser = argparse.ArgumentParser(description='RL-AGP with Greedy Baseline')
     parser.add_argument('--embedding-size', type=int, default=128)
     parser.add_argument('--hidden-size', type=int, default=128)
     parser.add_argument('--n-glimpses', type=int, default=1)
     parser.add_argument('--tanh-exploration', type=float, default=10)
     parser.add_argument('--use-tanh', action='store_true', default=True)
-    parser.add_argument('--beta', type=float, default=0.99)
+    parser.add_argument('--beta', type=float, default=0.99, help='EMA decay for fallback baseline')
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=1e-3)
@@ -567,19 +514,20 @@ def main():
     parser.add_argument('--agp_train_dir', type=str, default=default_train)
     parser.add_argument('--agp_val_dir', type=str, default=default_val)
     parser.add_argument('--train-size', type=int, default=8000, help="Number of training samples to use (default: 8000, or all if smaller)")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--ema', action='store_true', help='Use EMA baseline (reinforce_train_ema)')
-    group.add_argument('--critic', action='store_true', help='Use learned critic (reinforce_train_critic)')
+    parser.add_argument('--greedy-cache', type=str, default='data/greedy_baseline_train.pkl', 
+                       help='Path to greedy baseline cache file')
+    
     args = parser.parse_args()
 
+    # Load greedy cache
+    greedy_cache = load_greedy_cache(args.greedy_cache)
+    
+    # Load datasets
     train_dataset, val_dataset = prepare_datasets(args.agp_train_dir, args.agp_val_dir, normalize=True)
+    
+    # Create model
     agp_model = create_agp_model(
         args.embedding_size, args.hidden_size, args.n_glimpses, args.tanh_exploration, args.use_tanh, reward, args.temperature
-    )
-
-    # Create critic model (optional, can be used for actor-critic training)
-    critic_model = create_critic_model(
-        args.embedding_size, args.hidden_size, args.n_glimpses, "Bahdanau"
     )
 
     # Use only args.train_size samples for training if available
@@ -587,17 +535,17 @@ def main():
     small_train_dataset = train_dataset if len(train_dataset) <= size else Dataset(train_dataset.samples[:size])
     small_val_dataset = val_dataset if len(val_dataset) <= size else Dataset(val_dataset.samples[:size])
     
-    # define reward function
-    reward_fn = partial(reward, coverage_weight=100.0, guard_weight=5.0, coverage_exponent=4.0)  # Use smooth reward with no discontinuity
+    # Define reward function - coverage_smooth_reward: NO discontinuity, stable for RL
+    # coverage_weight: base weight for coverage^exponent term
+    # guard_weight: penalty for guards (scaled by coverage)
+    # coverage_exponent: higher = stronger emphasis on reaching 100% coverage
+    reward_fn = partial(reward, coverage_weight=100.0, guard_weight=5.0, coverage_exponent=4.0)
 
-    if args.ema:
-        reinforce_train_ema(agp_model, small_train_dataset, reward_fn,
-                            epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, beta=args.beta)
-        training_method = 'reinforcement_learning_ema'
-    elif args.critic:
-        reinforce_train_critic(agp_model, critic_model, small_train_dataset, reward_fn,
-                               epochs=args.epochs, batch_size=args.batch_size, lr_actor=args.lr, lr_critic=args.lr)
-        training_method = 'reinforcement_learning_critic'
+    # Train with greedy baseline
+    reinforce_train_greedy_baseline(agp_model, small_train_dataset, reward_fn, greedy_cache,
+                                    epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, beta=args.beta)
+    
+    training_method = 'reinforcement_learning_greedy_baseline'
 
     # Save the trained model
     checkpoint_params = {
@@ -606,30 +554,27 @@ def main():
         'n_glimpses': args.n_glimpses,
         'tanh_exploration': args.tanh_exploration,
         'use_tanh': args.use_tanh,
-        'beta': args.beta if args.ema else None,
-        'temperature': args.temperature
+        'beta': args.beta,
+        'temperature': args.temperature,
+        'greedy_baseline': True
     }
-    # Remove None values from checkpoint params
-    checkpoint_params = {k: v for k, v in checkpoint_params.items() if v is not None}
     
-    checkpoint_path = get_checkpoint_path('checkpoints', 'rl_agp_model', checkpoint_params, args.epochs)
+    checkpoint_path = get_checkpoint_path('checkpoints', 'rl_agp_greedy_model', checkpoint_params, args.epochs)
     model_checkpoint = {
         'model_state_dict': agp_model.state_dict(),
         'args': vars(args),
         'training_method': training_method,
         'num_train_samples': len(small_train_dataset),
-        'num_val_samples': len(small_val_dataset)
+        'num_val_samples': len(small_val_dataset),
+        'greedy_cache_size': len(greedy_cache) if greedy_cache else 0
     }
     
-    # Also save critic if used
-    if args.critic:
-        model_checkpoint['critic_state_dict'] = critic_model.state_dict()
-    
     torch.save(model_checkpoint, checkpoint_path)
-    print(f"Model saved to {checkpoint_path}")
+    print(f"\nModel saved to {checkpoint_path}")
 
-    # evaluate the model on the validation dataset
-    eval_results = reinforce_eval(agp_model, small_val_dataset, reward_fn, batch_size=1, sol_dir=args.agp_val_dir)
+    # Evaluate the model on the validation dataset
+    eval_results = reinforce_eval(agp_model, small_val_dataset, reward_fn, batch_size=1, 
+                                  sol_dir=args.agp_val_dir, greedy_cache=greedy_cache)
     
     # Save evaluation results
     import json
@@ -637,7 +582,8 @@ def main():
         'args': vars(args),
         'num_train_samples': len(small_train_dataset),
         'num_val_samples': len(small_val_dataset),
-        'training_method': 'reinforcement_learning'
+        'training_method': training_method,
+        'greedy_cache_size': len(greedy_cache) if greedy_cache else 0
     }
     
     # Add statistics if available
@@ -651,11 +597,16 @@ def main():
         if 'coverage_vis_stats' in eval_results['stats']:
             results_summary['polygon_coverage_stats'] = eval_results['stats']['coverage_vis_stats']
     
+    # Add greedy comparison results
+    results_summary['greedy_comparisons'] = eval_results.get('greedy_comparisons', 0)
+    results_summary['rl_vs_greedy_improvements'] = eval_results.get('rl_vs_greedy_improvements', 0)
+    results_summary['avg_greedy_reward'] = eval_results.get('avg_greedy_reward', float('nan'))
+    
     # Save to results directory
     os.makedirs('results', exist_ok=True)
-    with open('results/rl_agp_evaluation.json', 'w') as f:
+    with open('results/rl_agp_greedy_evaluation.json', 'w') as f:
         json.dump(results_summary, f, indent=2)
-    print("Results summary saved to results/rl_agp_evaluation_greedy.json")
+    print("\nResults summary saved to results/rl_agp_greedy_evaluation.json")
 
 
 if __name__ == "__main__":

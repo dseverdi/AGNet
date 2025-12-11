@@ -121,6 +121,134 @@ def strict_reward(points: np.ndarray, solution: np.ndarray, name: str, length: i
         return -math.exp(alpha * (1 - n_guards / n_vertices))
 
 
+def coverage_first_reward(points: np.ndarray, solution: np.ndarray, name: str, length: int = None,
+                          coverage_weight=100.0, guard_weight=1.0, full_coverage_bonus=50.0,
+                          coverage_threshold=0.99):
+    """
+    Coverage-first reward function that provides smooth gradients for RL training.
+    
+    Key design principles:
+    1. ALWAYS reward higher coverage (smooth gradient from 0% to 100%)
+    2. Large bonus for achieving full coverage (≥99%)
+    3. Only optimize guard count AFTER achieving full coverage
+    
+    Reward structure:
+    - Base reward: coverage_weight * coverage  (always positive, higher coverage = higher reward)
+    - Full coverage bonus: +full_coverage_bonus if coverage >= threshold
+    - Guard efficiency: -guard_weight * (n_guards / n_vertices) only when coverage >= threshold
+    
+    Args:
+        points: np.ndarray, polygon vertices (N, 2)
+        solution: np.ndarray, indices of selected guards
+        name: str, instance name
+        length: int, number of real vertices (if points is padded)
+        coverage_weight: float, weight for coverage component (default: 100.0)
+        guard_weight: float, weight for guard penalty (default: 1.0)
+        full_coverage_bonus: float, bonus for achieving full coverage (default: 50.0)
+        coverage_threshold: float, threshold for "full coverage" (default: 0.99)
+    
+    Returns:
+        float: The computed reward (higher = better)
+    
+    Example rewards:
+        - 50% coverage, 10 guards/100 vertices → 100*0.5 = 50
+        - 90% coverage, 10 guards/100 vertices → 100*0.9 = 90
+        - 99% coverage, 10 guards/100 vertices → 100*0.99 + 50 - 1*0.1 = 148.9
+        - 100% coverage, 5 guards/100 vertices → 100*1.0 + 50 - 1*0.05 = 149.95
+        - 100% coverage, 20 guards/100 vertices → 100*1.0 + 50 - 1*0.2 = 149.8
+    """
+    n_vertices = length if length is not None else len(points)
+    n_guards = len(solution)
+    
+    # Handle edge cases
+    if n_guards == 0:
+        return 0.0  # No guards = no coverage
+    
+    try:
+        coverage = evaluate_polygon_visibility_numpy_wo_gt(points, solution, name)
+    except Exception:
+        coverage = 0.0  # fallback: assume nothing is covered
+    
+    # Base reward: always reward coverage (smooth gradient)
+    reward = coverage_weight * coverage
+    
+    # Full coverage bonus and guard optimization
+    if coverage >= coverage_threshold:
+        # Big bonus for achieving full coverage
+        reward += full_coverage_bonus
+        # Now optimize guard count (only matters when coverage is achieved)
+        guard_ratio = n_guards / n_vertices
+        reward -= guard_weight * guard_ratio
+    
+    return reward
+
+
+def coverage_smooth_reward(points: np.ndarray, solution: np.ndarray, name: str, length: int = None,
+                           coverage_weight=100.0, guard_weight=5.0, coverage_exponent=4.0):
+    """
+    Smooth reward function with NO discontinuity - stable for RL training.
+    
+    Key design:
+    1. Coverage is rewarded with exponential scaling (coverage^exponent)
+       - This makes 99% -> 100% much more valuable than 50% -> 51%
+    2. Guard penalty is ALWAYS applied but scaled by coverage
+       - High coverage + few guards = best reward
+       - Low coverage = guard penalty doesn't matter much
+    
+    Reward = coverage_weight * coverage^exponent - guard_weight * (n_guards/n_vertices) * coverage
+    
+    The coverage^exponent term creates strong incentive for full coverage:
+    - coverage=0.5, exp=4 → 0.5^4 = 0.0625 (low)
+    - coverage=0.9, exp=4 → 0.9^4 = 0.656 (medium)
+    - coverage=0.99, exp=4 → 0.99^4 = 0.961 (high)
+    - coverage=1.0, exp=4 → 1.0^4 = 1.0 (maximum)
+    
+    Args:
+        points: np.ndarray, polygon vertices (N, 2)
+        solution: np.ndarray, indices of selected guards
+        name: str, instance name
+        length: int, number of real vertices
+        coverage_weight: float, weight for coverage (default: 100.0)
+        guard_weight: float, weight for guard penalty (default: 5.0)
+        coverage_exponent: float, exponent to emphasize high coverage (default: 4.0)
+    
+    Returns:
+        float: The computed reward (higher = better, no discontinuities)
+    
+    Example rewards (100 vertices):
+        - 50% cov, 10 guards → 100*0.5^4 - 5*0.1*0.5 = 6.25 - 0.25 = 6.0
+        - 90% cov, 10 guards → 100*0.9^4 - 5*0.1*0.9 = 65.6 - 0.45 = 65.2
+        - 99% cov, 10 guards → 100*0.99^4 - 5*0.1*0.99 = 96.1 - 0.50 = 95.6
+        - 100% cov, 10 guards → 100*1.0^4 - 5*0.1*1.0 = 100 - 0.5 = 99.5
+        - 100% cov, 20 guards → 100*1.0^4 - 5*0.2*1.0 = 100 - 1.0 = 99.0
+        - 100% cov, 30 guards → 100*1.0^4 - 5*0.3*1.0 = 100 - 1.5 = 98.5
+    
+    Note: Greedy with 100% coverage and ~20% guards → reward ≈ 99.0
+          To beat greedy, RL must also achieve 100% with fewer guards.
+    """
+    n_vertices = length if length is not None else len(points)
+    n_guards = len(solution)
+    
+    # Handle edge cases
+    if n_guards == 0:
+        return 0.0  # No guards = no coverage
+    
+    try:
+        coverage = evaluate_polygon_visibility_numpy_wo_gt(points, solution, name)
+    except Exception:
+        coverage = 0.0  # fallback: assume nothing is covered
+    
+    # Coverage reward with exponential emphasis on high coverage
+    # This creates strong gradient toward 100% without discontinuity
+    coverage_reward = coverage_weight * (coverage ** coverage_exponent)
+    
+    # Guard penalty scaled by coverage (only matters when you have good coverage)
+    guard_ratio = n_guards / n_vertices
+    guard_penalty = guard_weight * guard_ratio * coverage
+    
+    return coverage_reward - guard_penalty
+
+
 def smooth_reward(points: np.ndarray, solution: np.ndarray, name: str, length: int = None, alpha=1, p=1):
     """
     Smooth reward function for vertex guard optimization.
