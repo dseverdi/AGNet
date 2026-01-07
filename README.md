@@ -25,6 +25,7 @@ The **Art Gallery Problem** asks: *Given a polygon, what is the minimum number o
 This repository implements multiple approaches:
 - **Greedy algorithms** (baseline heuristic)
 - **Supervised learning** (learn from optimal solutions)
+- **Self-supervised NCO** (learn from a coverage/cost oracle; solution-sampler policy) ✨
 - **Reinforcement learning** (learn through trial and error)
   - Additive RL (build solution incrementally)
   - **Pruning RL** (start full, remove redundant guards) ✨ NEW
@@ -324,6 +325,74 @@ python evaluate.py --method active_search_proxy
 
 ---
 
+### 8. Self-Supervised NCO / Solution Sampler (`ss_agp.py`) ✨
+
+**Approach**: Learn a distribution over guard sets with policy gradients, using a geometric oracle built from a triangulation + visibility hypergraph.
+
+This is “self-supervised” in the sense that training does not require optimal guard sets as labels: the learning signal comes from the oracle cost (coverage + sparsity).
+
+**Oracle construction (per polygon)**:
+- Triangulate polygon into triangles.
+- Build a visibility incidence matrix $M \in \{0,1\}^{T \times n}$ where $M_{t,v}=1$ if vertex $v$ sees triangle $t$.
+
+**Policy**:
+- Pointer-network-style sampler that sequentially selects vertices and an explicit EOS (“stop”) action.
+- Optional fast/slow exploration mixture (Caramanis-style):
+  $p = (1-\beta)\,\text{softmax}(\ell) + \beta\,\text{softmax}(\rho\,\ell)$
+  controlled via `--alpha-slow` ($\beta$) and `--rho-slow` ($\rho\ll 1$).
+
+**Training loop (high level)**:
+1. Sample a polygon instance (from `.pol` files).
+2. Build oracle hypergraph $M$ (triangles × vertices).
+3. Sample a guard sequence with the solution-sampler policy (until EOS).
+4. Compute oracle cost and REINFORCE loss:
+  - baseline: EMA baseline (and optional greedy baseline subtraction)
+  - regularization: negative-entropy term (`--entropy-weight`) to encourage earlier stopping / smaller sets
+5. Update policy with Adam.
+
+**Training objective (minimization)**:
+- Default oracle cost combines guard count and uncovered-triangle penalty:
+  $\lambda\,|S| + w\,\mathbb{E}[\max(0, 1 - (Ms))]$ (normalized by number of triangles).
+- Optional **coverage-gated cost** via `--coverage-gate` to reduce the “either over-guard or under-cover” failure mode:
+  below the gate the loss prioritizes improving coverage; above the gate it prioritizes sparsity.
+
+**Curriculum (optional)**:
+- You can ramp $\lambda$ from a small start value once coverage stabilizes:
+  `--lambda-card-start`, `--lambda-card-cov-threshold`, `--lambda-card-ramp-steps`.
+
+**Evaluation outputs**:
+- Prints mean triangle coverage (`tri-cov`), geometric coverage (`geo-cov`), mean guard count, and `|S|/opt` when `.solution` files are present.
+- Also reports a greedy baseline for comparison.
+- Writes a JSON summary to `results/ss_agp_evaluation_{train_size}.json`.
+
+**Notes / gotchas**:
+- `tri-cov` comes from the triangulation hypergraph; `geo-cov` is computed via polygon visibility unions. They usually correlate but can differ.
+- `|S|/opt` is only available when the dataset directory contains matching `.solution` files.
+- If you see either “over-guards with perfect coverage” or “near-opt size but low coverage”, enable `--coverage-gate` (below) to reduce the objective conflict.
+
+**Common flags**:
+- Data: `--agp_train_dir`, `--agp_val_dir`, `--normalize`, `--train-size`
+- Trade-off: `--penalty-weight`, `--lambda-card`, `--coverage-gate`
+- Curriculum: `--lambda-card-start`, `--lambda-card-cov-threshold`, `--lambda-card-ramp-steps`
+- Exploration/regularization: `--alpha-slow`, `--rho-slow`, `--entropy-weight`
+
+**Useful evaluation flags**:
+- `--eval-k`: number of polygons to evaluate (default: all)
+- `--eval-verbose`: print per-instance lines during evaluation
+
+**Typical starting command**:
+```bash
+python ss_agp.py \
+  --agp_train_dir /path/to/AGPIL/train \
+  --agp_val_dir /path/to/AGPIL/dev \
+  --normalize \
+  --train-size 2000 --epochs 30 --batch-size 64 --eval-k 100 \
+  --penalty-weight 50 --lambda-card 0.2 --coverage-gate 0.95 \
+  --log-every 10
+```
+
+---
+
 ## Visibility Cache System ✨ NEW
 
 **Problem**: Coverage computation is the bottleneck (50-90% of training time).
@@ -526,7 +595,33 @@ python rl_agp_prune.py --epochs 30 --train-size 8000
 python rl_agp_prune.py --epochs 5 --train-size 100 --eval-size 20
 ```
 
-### 5. Comprehensive Evaluation
+### 5. Train Self-Supervised NCO (Solution Sampler) ✨
+
+`ss_agp.py` trains directly from a differentiable coverage/cost oracle (no ground-truth solutions required).
+
+```bash
+# Option A: set DATASET_PATH once (then defaults are used)
+export DATASET_PATH=/path/to/AGPIL
+
+python ss_agp.py \
+  --train-size 2000 --epochs 30 --batch-size 64 --eval-k 100 \
+  --normalize \
+  --penalty-weight 50 --lambda-card 0.2 \
+  --coverage-gate 0.95
+```
+
+```bash
+# Option B: pass explicit paths
+python ss_agp.py \
+  --agp_train_dir /path/to/AGPIL/train \
+  --agp_val_dir /path/to/AGPIL/dev \
+  --train-size 2000 --epochs 30 --batch-size 64 --eval-k 100 \
+  --normalize \
+  --penalty-weight 50 --lambda-card 0.2 \
+  --coverage-gate 0.95
+```
+
+### 6. Comprehensive Evaluation
 
 ```bash
 python evaluate.py --methods greedy sl additive_rl pruning_rl --val-dir data/dev
