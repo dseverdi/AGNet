@@ -406,7 +406,7 @@ def main():
     default_val = os.path.join(DATASET_PATH, "dev")
     parser.add_argument('--agp_train_dir', type=str, default=default_train)
     parser.add_argument('--agp_val_dir', type=str, default=default_val)
-    parser.add_argument('--train-size', type=int, default=8000, help="Number of training samples to use (default: 8000, or all if smaller)")
+    parser.add_argument('--train-size', type=int, help="Use full training dataset if not set", default=1000000)
     
     args = parser.parse_args()
 

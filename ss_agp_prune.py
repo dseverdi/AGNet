@@ -30,6 +30,7 @@ import json
 import os
 import random
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -40,8 +41,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.utils.data import DataLoader
+from dotenv import load_dotenv
 
 from dataset import Dataset, agp_read_samples, collate_fn
+from eval_reporting import make_report
+
+
+def _summarize_seconds(values: List[float]) -> Dict[str, Optional[float]]:
+    if not values:
+        return {
+            "count": 0,
+            "total_s": 0.0,
+            "mean_s": None,
+            "median_s": None,
+            "p95_s": None,
+            "min_s": None,
+            "max_s": None,
+        }
+    arr = np.asarray(values, dtype=np.float64)
+    return {
+        "count": int(arr.size),
+        "total_s": float(arr.sum()),
+        "mean_s": float(arr.mean()),
+        "median_s": float(np.median(arr)),
+        "p95_s": float(np.percentile(arr, 95)),
+        "min_s": float(arr.min()),
+        "max_s": float(arr.max()),
+    }
 
 
 # ---------------------------
@@ -402,47 +428,6 @@ class PruningEpisodeEnv:
         return 0.0, self.done(), {"feasible": False}
 
 
-def oracle_greedy_prune(
-    oracle: FeasibilityOracle,
-    points: np.ndarray,
-    name: str,
-    *,
-    order: Optional[np.ndarray] = None,
-    max_steps: Optional[int] = None,
-) -> np.ndarray:
-    """Oracle-only greedy pruning baseline.
-
-    Starts from all vertices active and attempts to remove vertices in a fixed order.
-    A removal is accepted iff the oracle says the new set is feasible.
-
-    This baseline is fully oracle-agnostic: it uses only F(s) feedback.
-    """
-
-    n = int(points.shape[0])
-    s = np.ones(n, dtype=np.bool_)
-    steps = 0
-
-    if not oracle.is_feasible(points, np.arange(n, dtype=np.int64), name):
-        return np.arange(n, dtype=np.int64)
-
-    if order is None:
-        order = np.arange(n, dtype=np.int64)
-
-    for v in order:
-        if max_steps is not None and steps >= int(max_steps):
-            break
-        if not s[int(v)]:
-            continue
-        candidate = s.copy()
-        candidate[int(v)] = False
-        active = np.flatnonzero(candidate).astype(np.int64)
-        if oracle.is_feasible(points, active, name):
-            s = candidate
-        steps += 1
-
-    return np.flatnonzero(s).astype(np.int64)
-
-
 # ---------------------------
 # Policy network (oracle-agnostic)
 # ---------------------------
@@ -536,7 +521,10 @@ def _list_pol_files(path: str) -> List[str]:
 def _read_opt_solution(sol_dir: Optional[str], name: str) -> Optional[List[int]]:
     if sol_dir is None:
         return None
-    path = os.path.join(sol_dir, f"{name}.solution")
+    base = sol_dir
+    if os.path.isfile(base):
+        base = os.path.dirname(base)
+    path = os.path.join(base, f"{name}.solution")
     if not os.path.exists(path):
         return None
     try:
@@ -623,6 +611,7 @@ def train_pruning_policy(
     eval_k: int,
     log_every: int,
     sol_dir_for_ratios: Optional[str],
+    verbose: bool = False,
 ) -> Dict:
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -640,6 +629,8 @@ def train_pruning_policy(
 
     for epoch in range(1, epochs + 1):
         model.train()
+        if verbose:
+            print(f"[phase] epoch {epoch}/{epochs}: training")
         epoch_returns: List[float] = []
         epoch_removed_ratio: List[float] = []
         epoch_guard_ratio: List[float] = []
@@ -761,28 +752,31 @@ def train_pruning_policy(
 
         # Evaluation
         model.eval()
+        if verbose:
+            print(f"[phase] epoch {epoch}/{epochs}: validation")
         val_k = len(val_dataset) if eval_k is None or eval_k < 0 else min(int(eval_k), len(val_dataset))
         if val_k > 0:
             covs: List[float] = []
             guard_ratios: List[float] = []
             ratios: List[float] = []
-            greedy_ratios: List[float] = []
+
+            t_val0 = time.perf_counter()
+            policy_secs: List[float] = []
             for j in range(val_k):
                 pts, _, name = val_dataset[j]
+
+                t0 = time.perf_counter()
                 active, info = run_policy_pruning(model, oracle, pts, name, deterministic=True, max_steps=max_steps)
+                policy_secs.append(float(time.perf_counter() - t0))
+
                 guard_ratios.append(float(active.size) / max(1.0, float(info.get("n", pts.shape[0]))))
                 if "coverage" in info:
                     covs.append(float(info["coverage"]))
-
-                # Greedy oracle-only baseline (for OPT ratio comparison)
-                pts_np = pts.detach().cpu().numpy()
-                greedy_active = oracle_greedy_prune(oracle, pts_np, name, order=None, max_steps=max_steps)
 
                 # OPT ratios if available
                 opt_sol = _read_opt_solution(sol_dir_for_ratios, name)
                 if opt_sol is not None and len(opt_sol) > 0:
                     ratios.append(float(active.size) / float(len(opt_sol)))
-                    greedy_ratios.append(float(greedy_active.size) / float(len(opt_sol)))
 
             mean_cov = float(np.mean(covs)) if covs else float("nan")
             mean_guard_ratio = float(np.mean(guard_ratios)) if guard_ratios else float("nan")
@@ -803,8 +797,10 @@ def train_pruning_policy(
             msg += f" | removed/n mean={mean_removed_ratio:.3f}"
             if ratios:
                 msg += f" | |S|/opt mean={float(np.mean(ratios)):.3f}"
-            if greedy_ratios:
-                msg += f" | greedy |S|/opt mean={float(np.mean(greedy_ratios)):.3f}"
+
+            val_wall_s = float(time.perf_counter() - t_val0)
+            pstats = _summarize_seconds(policy_secs)
+            msg += f" | time {val_wall_s:.2f}s (mean {pstats['mean_s']:.3f}s, p95 {pstats['p95_s']:.3f}s)"
             print(msg)
 
     return {
@@ -814,13 +810,26 @@ def train_pruning_policy(
 
 
 def main() -> None:
+    load_dotenv()
+    DATASET_PATH = os.getenv("DATASET_PATH")
+    if not DATASET_PATH:
+        raise EnvironmentError("DATASET_PATH environment variable must be set in .env file.")
+    
+    default_train = os.path.join(DATASET_PATH, "train")
+    default_val = os.path.join(DATASET_PATH, "dev")
+
     parser = argparse.ArgumentParser(description="Oracle-agnostic pruning NCO for AGP")
 
-    parser.add_argument("--agp_train_dir", type=str, default=None, help="Training path (dir of .pol or a single .pol).")
-    parser.add_argument("--agp_val_dir", type=str, default=None, help="Validation path (dir of .pol or a single .pol).")
+    parser.add_argument("--agp_train_dir", type=str, default=default_train, help="Training path (dir of .pol or a single .pol).")
+    parser.add_argument("--agp_val_dir", type=str, default=default_val, help="Validation path (dir of .pol or a single .pol).")
     parser.add_argument("--normalize", action="store_true", help="Normalize polygon coordinates when loading .pol files.")
 
-    parser.add_argument("--train-size", type=int, default=2000)
+    parser.add_argument(
+        "--train-size",
+        type=int,
+        default=-1,
+        help="Cap on number of training samples. Use -1 for full training set (default: -1).",
+    )
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)
 
@@ -867,12 +876,37 @@ def main() -> None:
 
     parser.add_argument("--max-steps", type=int, default=-1, help="Cap steps per episode (default: n).")
 
-    parser.add_argument("--eval-k", type=int, default=100, help="How many polygons to evaluate each epoch (default: 100).")
+    parser.add_argument(
+        "--eval-k",
+        type=int,
+        default=-1,
+        help="How many polygons to evaluate each epoch. Use -1 for full validation set (default: -1).",
+    )
     parser.add_argument("--log-every", type=int, default=10)
+
+    parser.add_argument("--evaluate", action="store_true", help="Skip training and only run evaluation with a checkpoint.")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to a PrunePolicyNet checkpoint for --evaluate mode.")
+
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default="results/v3",
+        help="Directory to write evaluation JSON reports.",
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print high-level phases (data load, oracle init, training/val epochs, checkpoint, final eval).",
+    )
 
     parser.add_argument("--seed", type=int, default=0)    
 
     args = parser.parse_args()
+
+    def vprint(msg: str) -> None:
+        if bool(args.verbose):
+            print(msg)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -881,26 +915,48 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    if args.agp_train_dir is None or args.agp_val_dir is None:
-        raise SystemExit("Please provide --agp_train_dir and --agp_val_dir")
+    vprint(f"[phase] dataset path: {DATASET_PATH}")
+    vprint(f"[phase] train_dir: {args.agp_train_dir}")
+    vprint(f"[phase] val_dir: {args.agp_val_dir}")
 
-    train_paths = _list_pol_files(args.agp_train_dir)
+    if args.agp_val_dir is None:
+        raise SystemExit("Please provide --agp_val_dir")
+    if (not args.evaluate) and args.agp_train_dir is None:
+        raise SystemExit("Please provide --agp_train_dir")
+
+    train_paths: List[str] = []
     val_paths = _list_pol_files(args.agp_val_dir)
 
-    if len(train_paths) == 0:
-        raise SystemExit(f"No .pol files found under {args.agp_train_dir}")
+    if not args.evaluate:
+        train_paths = _list_pol_files(args.agp_train_dir)
+
+    vprint(f"[phase] discovered {len(train_paths)} train .pol files")
+    vprint(f"[phase] discovered {len(val_paths)} val .pol files")
+
     if len(val_paths) == 0:
         raise SystemExit(f"No .pol files found under {args.agp_val_dir}")
+    if (not args.evaluate) and len(train_paths) == 0:
+        raise SystemExit(f"No .pol files found under {args.agp_train_dir}")
 
-    # Cap training size
-    train_paths = train_paths[: int(args.train_size)] 
+    if not args.evaluate and int(args.train_size) > 0:
+        train_paths = train_paths[: int(args.train_size)]
+        vprint(f"[phase] using {len(train_paths)} train files (train-size cap)")
 
-    train_samples = agp_read_samples(train_paths, normalize=bool(args.normalize))
+    vprint(f"[phase] loading samples (normalize={bool(args.normalize)})")
+
+    if not args.evaluate:
+        train_samples = agp_read_samples(train_paths, normalize=bool(args.normalize))
+        train_dataset = Dataset(train_samples)
+        train_loader = DataLoader(train_dataset, batch_size=int(args.batch_size), shuffle=True, collate_fn=collate_fn)
+        vprint(
+            f"[phase] dataloader ready: batch_size={int(args.batch_size)}, batches/epoch≈{len(train_loader)}"
+        )
     val_samples = agp_read_samples(val_paths, normalize=bool(args.normalize))
-    train_dataset = Dataset(train_samples)
     val_dataset = Dataset(val_samples)
 
-    train_loader = DataLoader(train_dataset, batch_size=int(args.batch_size), shuffle=True, collate_fn=collate_fn)
+    vprint(
+        f"[phase] oracle init: mode={args.oracle}, threshold={float(args.coverage_threshold):.3f}, samples={int(args.oracle_samples)}"
+    )
 
     if args.oracle == "exact":
         oracle = SkgeomVisibilityOracle(
@@ -927,12 +983,108 @@ def main() -> None:
         )
         oracle = HybridOracle(fast_oracle=fast, exact_oracle=exact, margin=float(args.oracle_margin))
 
+    # Coverage metric: always try exact coverage for comparable reporting.
+    # This is independent of the feasibility oracle used during pruning.
+    coverage_eval_oracle = SkgeomVisibilityOracle(coverage_threshold=0.0, verbose=bool(args.oracle_verbose))
+
     model = PrunePolicyNet(hidden_size=int(args.hidden_size), use_coords=(not args.no_coords))
+
+    vprint(
+        f"[phase] model init: hidden={int(args.hidden_size)}, use_coords={not args.no_coords}, lr={float(args.lr)}, ent={float(args.entropy_weight)}"
+    )
 
     max_steps = None if int(args.max_steps) < 0 else int(args.max_steps)
 
     # For OPT ratio reporting we reuse val dir (expects .solution alongside .pol)
     sol_dir_for_ratios = args.agp_val_dir
+
+    if args.evaluate:
+        if not args.checkpoint:
+            raise SystemExit("--checkpoint is required when using --evaluate")
+
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+        model.load_state_dict(state)
+        model.eval().to(device)
+
+        eval_k = len(val_dataset) if args.eval_k < 0 else min(int(args.eval_k), len(val_dataset))
+
+        per_instance: List[Dict] = []
+
+        t_eval0 = time.perf_counter()
+        policy_secs: List[float] = []
+
+        for j in range(eval_k):
+            pts, _, name = val_dataset[j]
+            t0 = time.perf_counter()
+            active, info = run_policy_pruning(model, oracle, pts, name, deterministic=True, max_steps=max_steps)
+            dt = float(time.perf_counter() - t0)
+            policy_secs.append(dt)
+
+            n = int(info.get("n", pts.shape[0]))
+            cov = None
+            try:
+                cov = coverage_eval_oracle.coverage(pts.detach().cpu().numpy(), active, name)
+            except Exception:
+                cov = None
+            if cov is None and "coverage" in info:
+                cov = float(info["coverage"])
+            opt_sol = _read_opt_solution(sol_dir_for_ratios, name)
+            opt_size = len(opt_sol) if opt_sol is not None else None
+            approx_ratio = (float(active.size) / float(opt_size)) if opt_size else None
+
+            per_instance.append(
+                {
+                    "name": name,
+                    "n": n,
+                    "guards": int(active.size),
+                    "guard_ratio": float(active.size) / max(1.0, float(n)),
+                    "coverage": cov,
+                    "opt_size": opt_size,
+                    "approx_ratio": approx_ratio,
+                    "time_s": dt,
+                }
+            )
+
+        eval_wall_s = float(time.perf_counter() - t_eval0)
+
+        report = make_report(
+            method="ss_agp_prune",
+            per_instance=per_instance,
+            args=vars(args),
+            dataset={
+                "path": args.agp_val_dir,
+                "eval_k": int(eval_k),
+            },
+            oracle={
+                "mode": str(args.oracle),
+                "coverage_threshold": float(args.coverage_threshold),
+                "oracle_samples": int(args.oracle_samples),
+                "oracle_margin": float(args.oracle_margin),
+            },
+            timing={
+                "wall_total_s": eval_wall_s,
+            },
+        )
+        report["checkpoint"] = args.checkpoint
+
+        os.makedirs(args.results_dir, exist_ok=True)
+        eval_tag = "full" if eval_k >= len(val_dataset) else str(eval_k)
+        out_path = os.path.join(args.results_dir, f"ss_agp_prune_eval_only_val{eval_tag}.json")
+        with open(out_path, "w") as f:
+            json.dump(report, f, indent=2)
+
+        print("\n--- Eval on dataset polygons (checkpoint mode) ---")
+        s = report["summary"]
+        msg = f"Dataset eval k={eval_k} | |S| mean={s['guards']['mean']:.2f} | |S|/n mean={s['guard_ratio']['mean']:.3f}"
+        if s["coverage"]["mean"] is not None:
+            msg += f" | geo-cov mean={s['coverage']['mean']:.3f}"
+        if s["approx_ratio"]["mean"] is not None:
+            msg += f" | |S|/opt mean={s['approx_ratio']['mean']:.2f}"
+        msg += f" | time {report['timing']['wall_total_s']:.2f}s (mean {s['time_s']['mean']:.3f}s, p95 {s['time_s']['p95']:.3f}s)"
+        print(msg)
+        print(f"Results summary saved to {out_path}")
+        return
 
     result = train_pruning_policy(
         model,
@@ -948,86 +1100,106 @@ def main() -> None:
         eval_k=int(args.eval_k),
         log_every=int(args.log_every),
         sol_dir_for_ratios=sol_dir_for_ratios,
+        verbose=bool(args.verbose),
     )
 
-    os.makedirs("results", exist_ok=True)
+    vprint("[phase] training complete")
+
+    os.makedirs(args.results_dir, exist_ok=True)
     os.makedirs("checkpoints", exist_ok=True)
 
     # Save model
+    train_tag = "full" if int(args.train_size) <= 0 else str(len(train_paths))
     ckpt_path = os.path.join(
         "checkpoints",
-        f"ss_agp_prune_h{args.hidden_size}_lr{args.lr}_ent{args.entropy_weight}_epochs{args.epochs}_train{len(train_paths)}.pt",
+        f"ss_agp_prune_h{args.hidden_size}_lr{args.lr}_ent{args.entropy_weight}_epochs{args.epochs}_train{train_tag}.pt",
     )
     torch.save({"model": model.state_dict(), "args": vars(args), "result": result}, ckpt_path)
     print(f"Saved checkpoint to {ckpt_path}")
+
+    vprint("[phase] starting final evaluation")
 
     # Final eval on validation set
     model.eval().to(device)
     eval_k = len(val_dataset) if args.eval_k < 0 else min(int(args.eval_k), len(val_dataset))
 
-    guards: List[int] = []
-    guard_ratios: List[float] = []
-    covs: List[float] = []
-    ratios: List[float] = []
+    per_instance: List[Dict] = []
 
-    # Greedy baseline accumulators
-    greedy_guards: List[int] = []
-    greedy_guard_ratios: List[float] = []
-    greedy_covs: List[float] = []
-    greedy_ratios: List[float] = []
+    t_eval0 = time.perf_counter()
+    policy_secs: List[float] = []
 
     for j in range(eval_k):
         pts, _, name = val_dataset[j]
+        t0 = time.perf_counter()
         active, info = run_policy_pruning(model, oracle, pts, name, deterministic=True, max_steps=max_steps)
-        guards.append(int(active.size))
+        dt = float(time.perf_counter() - t0)
+        policy_secs.append(dt)
+
         n = int(info.get("n", pts.shape[0]))
-        guard_ratios.append(float(active.size) / max(1.0, float(n)))
-        if "coverage" in info:
-            covs.append(float(info["coverage"]))
-
-        pts_np = pts.detach().cpu().numpy()
-        greedy_active = oracle_greedy_prune(oracle, pts_np, name, order=None, max_steps=max_steps)
-        greedy_guards.append(int(greedy_active.size))
-        greedy_guard_ratios.append(float(greedy_active.size) / max(1.0, float(pts_np.shape[0])))
-        g_cov = oracle.coverage(pts_np, greedy_active, name)
-        if g_cov is not None:
-            greedy_covs.append(float(g_cov))
+        cov = None
+        try:
+            cov = coverage_eval_oracle.coverage(pts.detach().cpu().numpy(), active, name)
+        except Exception:
+            cov = None
+        if cov is None and "coverage" in info:
+            cov = float(info["coverage"])
         opt_sol = _read_opt_solution(sol_dir_for_ratios, name)
-        if opt_sol is not None and len(opt_sol) > 0:
-            ratios.append(float(active.size) / float(len(opt_sol)))
-            greedy_ratios.append(float(greedy_active.size) / float(len(opt_sol)))
+        opt_size = len(opt_sol) if opt_sol is not None else None
+        approx_ratio = (float(active.size) / float(opt_size)) if opt_size else None
 
-    summary = {
-        "eval_k": eval_k,
-        "guards_mean": float(np.mean(guards)) if guards else None,
-        "guards_ratio_mean": float(np.mean(guard_ratios)) if guard_ratios else None,
-        "coverage_mean": float(np.mean(covs)) if covs else None,
-        "ratio_mean": float(np.mean(ratios)) if ratios else None,
-        "greedy_guards_mean": float(np.mean(greedy_guards)) if greedy_guards else None,
-        "greedy_guards_ratio_mean": float(np.mean(greedy_guard_ratios)) if greedy_guard_ratios else None,
-        "greedy_coverage_mean": float(np.mean(greedy_covs)) if greedy_covs else None,
-        "greedy_ratio_mean": float(np.mean(greedy_ratios)) if greedy_ratios else None,
-        "checkpoint": ckpt_path,
-        "args": vars(args),
-    }
+        per_instance.append(
+            {
+                "name": name,
+                "n": n,
+                "guards": int(active.size),
+                "guard_ratio": float(active.size) / max(1.0, float(n)),
+                "coverage": cov,
+                "opt_size": opt_size,
+                "approx_ratio": approx_ratio,
+                "time_s": dt,
+            }
+        )
 
-    out_path = os.path.join("results", f"ss_agp_prune_evaluation_{len(train_paths)}.json")
+    eval_wall_s = float(time.perf_counter() - t_eval0)
+
+    report = make_report(
+        method="ss_agp_prune",
+        per_instance=per_instance,
+        args=vars(args),
+        dataset={
+            "path": args.agp_val_dir,
+            "eval_k": int(eval_k),
+            "train_k": int(len(train_paths)),
+        },
+        oracle={
+            "mode": str(args.oracle),
+            "coverage_threshold": float(args.coverage_threshold),
+            "oracle_samples": int(args.oracle_samples),
+            "oracle_margin": float(args.oracle_margin),
+            "coverage_metric": "exact",
+        },
+        timing={
+            "wall_total_s": eval_wall_s,
+        },
+    )
+    report["checkpoint"] = ckpt_path
+
+    eval_tag = "full" if eval_k >= len(val_dataset) else str(eval_k)
+    out_path = os.path.join(args.results_dir, f"ss_agp_prune_evaluation_train{train_tag}_val{eval_tag}.json")
     with open(out_path, "w") as f:
-        json.dump(summary, f, indent=2)
+        json.dump(report, f, indent=2)
     print("\n--- Eval on dataset polygons ---")
-    msg = f"Dataset eval k={eval_k} | |S| mean={summary['guards_mean']:.2f} | |S|/n mean={summary['guards_ratio_mean']:.3f}"
-    if summary["coverage_mean"] is not None:
-        msg += f" | geo-cov mean={summary['coverage_mean']:.3f}"
-    if summary["ratio_mean"] is not None:
-        msg += f" | |S|/opt mean={summary['ratio_mean']:.2f}"
-    if summary.get("greedy_guards_mean") is not None:
-        msg += f" || greedy |S| mean={summary['greedy_guards_mean']:.2f} | greedy |S|/n mean={summary['greedy_guards_ratio_mean']:.3f}"
-    if summary.get("greedy_coverage_mean") is not None:
-        msg += f" | greedy geo-cov mean={summary['greedy_coverage_mean']:.3f}"
-    if summary.get("greedy_ratio_mean") is not None:
-        msg += f" | greedy |S|/opt mean={summary['greedy_ratio_mean']:.2f}"
+    s = report["summary"]
+    msg = f"Dataset eval k={eval_k} | |S| mean={s['guards']['mean']:.2f} | |S|/n mean={s['guard_ratio']['mean']:.3f}"
+    if s["coverage"]["mean"] is not None:
+        msg += f" | geo-cov mean={s['coverage']['mean']:.3f}"
+    if s["approx_ratio"]["mean"] is not None:
+        msg += f" | |S|/opt mean={s['approx_ratio']['mean']:.2f}"
+    msg += f" | time {report['timing']['wall_total_s']:.2f}s (mean {s['time_s']['mean']:.3f}s, p95 {s['time_s']['p95']:.3f}s)"
     print(msg)
     print(f"Results summary saved to {out_path}")
+
+    vprint("[phase] done")
 
 
 if __name__ == "__main__":

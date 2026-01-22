@@ -134,7 +134,7 @@ python sl_agp.py --epochs 0  # loads checkpoint
 **Architecture**: Pointer Network with REINFORCE training
 - **State**: Current polygon + already placed guards
 - **Action**: Which vertex to add next
-- **Reward**: Strict reward (valid only if coverage ≥ 99%)
+- **Reward**: Smooth coverage/guard trade-off (`coverage_smooth_reward`, continuous)
 
 **Algorithm**:
 ```
@@ -144,8 +144,9 @@ For each episode:
      a. Policy samples next guard: v ~ π(·|polygon, G)
      b. Add v to G
      c. Compute coverage(G)
-  3. If coverage ≥ 99%: reward = -exp(α × (1 - |G|/n))
-     Else: reward = -1000 (failure penalty)
+  3. Reward is continuous (no threshold/discontinuity):
+    reward = w_c · coverage(G)^p − w_g · (|G|/n) · coverage(G)
+    (defaults in `rl_agp.py`: w_c=100, w_g=5, p=4)
   4. Update policy: ∇θ log π × (reward - baseline)
 ```
 
@@ -155,17 +156,17 @@ For each episode:
 - Direct optimization of coverage + guard count
 
 **Cons**:
-- **Sparse reward**: Most episodes fail (coverage < 99%)
+- Still sensitive to exploration and credit assignment (coverage computation is expensive)
 - Hard to learn when to stop adding guards
 - Slow convergence due to exploration difficulty
 
 **Usage**:
 ```bash
 # Train additive RL
-python rl_agp.py --epochs 30 --train-size 8000
+python rl_agp.py --ema --epochs 30 --train-size 8000 --batch-size 1
 
 # With actor-critic (better baseline)
-python rl_agp.py --epochs 30 --use-critic
+python rl_agp.py --critic --epochs 30 --train-size 8000 --batch-size 1
 ```
 
 **Variants**:
@@ -228,7 +229,7 @@ python rl_agp_prune.py --epochs 30 --train-size 8000 --no-cache
 python rl_agp_prune.py --epochs 0
 ```
 
-**See**: [RL_PRUNING_README.md](RL_PRUNING_README.md) for detailed explanation.
+
 
 ---
 
