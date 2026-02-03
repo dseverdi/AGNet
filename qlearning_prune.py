@@ -24,6 +24,7 @@ import json
 import os
 import random
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -33,6 +34,87 @@ from dotenv import load_dotenv
 from dataset import Dataset, agp_read_samples
 from ss_agp_prune import SampledVisibilityOracle, SkgeomVisibilityOracle, HybridOracle
 from eval_reporting import make_report
+
+
+def _list_pol_files(path: str) -> List[str]:
+    if os.path.isfile(path) and path.endswith(".pol"):
+        return [path]
+    out: List[str] = []
+    for root, _, files in os.walk(path):
+        for f in files:
+            if f.endswith(".pol"):
+                out.append(os.path.join(root, f))
+    out.sort()
+    return out
+
+
+def _oracle_status_line(oracle) -> str:
+    if isinstance(oracle, SkgeomVisibilityOracle):
+        return f"oracle=exact cov=exact thr={oracle.coverage_threshold:.3f}"
+    if isinstance(oracle, SampledVisibilityOracle):
+        return (
+            f"oracle=sampled cov=sampled thr={oracle.coverage_threshold:.3f} "
+            f"samples={oracle.n_samples}"
+        )
+    if isinstance(oracle, HybridOracle):
+        return (
+            f"oracle=hybrid cov=exact thr={oracle.exact_oracle.coverage_threshold:.3f} "
+            f"samples={oracle.fast_oracle.n_samples} margin={oracle.margin:.3f}"
+        )
+    return "oracle=unknown"
+
+
+def _make_oracle_from_config(cfg: Dict) -> object:
+    if cfg["oracle"] == "exact":
+        return SkgeomVisibilityOracle(coverage_threshold=float(cfg["coverage_threshold"]), verbose=bool(cfg.get("oracle_verbose", False)))
+    if cfg["oracle"] == "sampled":
+        return SampledVisibilityOracle(
+            coverage_threshold=float(cfg["coverage_threshold"]),
+            n_samples=int(cfg["oracle_samples"]),
+            seed=int(cfg["seed"]),
+            verbose=bool(cfg.get("oracle_verbose", False)),
+        )
+    fast = SampledVisibilityOracle(
+        coverage_threshold=float(cfg["coverage_threshold"]),
+        n_samples=int(cfg["oracle_samples"]),
+        seed=int(cfg["seed"]),
+        verbose=bool(cfg.get("oracle_verbose", False)),
+    )
+    exact = SkgeomVisibilityOracle(coverage_threshold=float(cfg["coverage_threshold"]), verbose=bool(cfg.get("oracle_verbose", False)))
+    return HybridOracle(fast_oracle=fast, exact_oracle=exact, margin=float(cfg["oracle_margin"]))
+
+
+def _process_single_instance(
+    idx: int,
+    points: np.ndarray,
+    name: str,
+    n_total: int,
+    cfg: Dict,
+) -> Dict:
+    oracle = _make_oracle_from_config(cfg)
+    coverage_eval_oracle = SkgeomVisibilityOracle(coverage_threshold=0.0, verbose=bool(cfg.get("oracle_verbose", False)))
+
+    res = evaluate_qlearning_prune_single_instance(
+        oracle,
+        coverage_eval_oracle,
+        points,
+        name,
+        max_episodes=int(cfg["max_episodes"]),
+        max_steps=cfg["max_steps"],
+        lr=float(cfg["lr"]),
+        epsilon=float(cfg["epsilon"]),
+        gamma=float(cfg["gamma"]),
+        epsilon_decay=float(cfg["epsilon_decay"]),
+        epsilon_min=float(cfg["epsilon_min"]),
+        seed=int(cfg["seed"]),
+        patience=int(cfg["patience"]),
+        verbose=bool(cfg.get("verbose", False)),
+    )
+
+    res["_idx"] = int(idx)
+    res["_n_total"] = int(n_total)
+    res["_status"] = _oracle_status_line(oracle)
+    return res
 
 
 def _list_pol_files(path: str) -> List[str]:
@@ -355,31 +437,28 @@ def main() -> None:
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for evaluation (default: 1).")
 
     parser.add_argument(
         "--results-dir",
         type=str,
-        default="results/v3",
+        default="results",
         help="Directory to write evaluation JSON reports.",
     )
 
     args = parser.parse_args()
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-
     val_paths = _list_pol_files(args.agp_val_dir)
-    if len(val_paths) == 0:
-        raise SystemExit(f"No .pol files found under {args.agp_val_dir}")
-
-    val_samples = agp_read_samples(val_paths, normalize=bool(args.normalize))
+    val_samples = agp_read_samples(val_paths, normalize=args.normalize)
     val_dataset = Dataset(val_samples)
+    eval_k = len(val_dataset) if args.eval_k < 0 else min(int(args.eval_k), len(val_dataset))
+    max_steps = args.max_steps
 
-    eval_k = len(val_dataset) if int(args.eval_k) < 0 else min(int(args.eval_k), len(val_dataset))
-
-    # Oracle init
     if args.oracle == "exact":
-        oracle = SkgeomVisibilityOracle(coverage_threshold=float(args.coverage_threshold), verbose=bool(args.oracle_verbose))
+        oracle = SkgeomVisibilityOracle(
+            coverage_threshold=float(args.coverage_threshold),
+            verbose=bool(args.oracle_verbose),
+        )
     elif args.oracle == "sampled":
         oracle = SampledVisibilityOracle(
             coverage_threshold=float(args.coverage_threshold),
@@ -389,18 +468,18 @@ def main() -> None:
         )
     else:
         fast = SampledVisibilityOracle(
-            coverage_threshold=float(args.coverage_threshold),
+            coverage_threshold=float(args.coverage_threshold) + float(args.oracle_margin),
             n_samples=int(args.oracle_samples),
             seed=int(args.seed),
             verbose=bool(args.oracle_verbose),
         )
-        exact = SkgeomVisibilityOracle(coverage_threshold=float(args.coverage_threshold), verbose=bool(args.oracle_verbose))
-        oracle = HybridOracle(fast_oracle=fast, exact_oracle=exact, margin=float(args.oracle_margin))
+        exact = SkgeomVisibilityOracle(
+            coverage_threshold=float(args.coverage_threshold),
+            verbose=bool(args.oracle_verbose),
+        )
+        oracle = HybridOracle(fast_oracle=fast, exact_oracle=exact)
 
-    max_steps = None if int(args.max_steps) < 0 else int(args.max_steps)
-
-    # Coverage metric: always try exact coverage for comparable reporting.
-    coverage_eval_oracle = SkgeomVisibilityOracle(coverage_threshold=0.0, verbose=bool(args.oracle_verbose))
+    coverage_eval_oracle = oracle
 
     guards: List[int] = []
     guard_ratios: List[float] = []
@@ -410,45 +489,119 @@ def main() -> None:
 
     per_instance: List[Dict] = []
 
+    cfg = {
+        "oracle": args.oracle,
+        "oracle_samples": int(args.oracle_samples),
+        "oracle_margin": float(args.oracle_margin),
+        "coverage_threshold": float(args.coverage_threshold),
+        "seed": int(args.seed),
+        "oracle_verbose": bool(args.oracle_verbose),
+        "max_episodes": int(args.max_episodes),
+        "max_steps": max_steps,
+        "patience": int(args.patience),
+        "lr": float(args.lr),
+        "epsilon": float(args.epsilon),
+        "gamma": float(args.gamma),
+        "epsilon_decay": float(args.epsilon_decay),
+        "epsilon_min": float(args.epsilon_min),
+        "verbose": bool(args.verbose),
+    }
+
     t_all0 = time.perf_counter()
-    for j in range(eval_k):
-        pts, _, name = val_dataset[j]
-        pts_np = pts.detach().cpu().numpy() if hasattr(pts, "detach") else np.asarray(pts)
+    if int(args.workers) <= 1:
+        for j in range(eval_k):
+            pts, _, name = val_dataset[j]
+            pts_np = pts.detach().cpu().numpy() if hasattr(pts, "detach") else np.asarray(pts)
 
-        res = evaluate_qlearning_prune_single_instance(
-            oracle,
-            coverage_eval_oracle,
-            pts_np,
-            name,
-            max_episodes=int(args.max_episodes),
-            max_steps=max_steps,
-            lr=float(args.lr),
-            epsilon=float(args.epsilon),
-            gamma=float(args.gamma),
-            epsilon_decay=float(args.epsilon_decay),
-            epsilon_min=float(args.epsilon_min),
-            seed=int(args.seed),
-            patience=int(args.patience),
-            verbose=bool(args.verbose),
-        )
+            res = evaluate_qlearning_prune_single_instance(
+                oracle,
+                coverage_eval_oracle,
+                pts_np,
+                name,
+                max_episodes=int(args.max_episodes),
+                max_steps=max_steps,
+                lr=float(args.lr),
+                epsilon=float(args.epsilon),
+                gamma=float(args.gamma),
+                epsilon_decay=float(args.epsilon_decay),
+                epsilon_min=float(args.epsilon_min),
+                seed=int(args.seed),
+                patience=int(args.patience),
+                verbose=bool(args.verbose),
+            )
 
-        per_instance.append(res)
-        times.append(float(res["time_s"]))
-        guards.append(int(res["guards"]))
-        guard_ratios.append(float(res["guards"]) / max(1.0, float(res["n"])))
-        if res.get("coverage") is not None:
-            covs.append(float(res["coverage"]))
-
-        opt_sol = _read_opt_solution(args.agp_val_dir, name)
-        if opt_sol is not None and len(opt_sol) > 0:
-            ratios.append(float(res["guards"]) / float(len(opt_sol)))
-
-        if args.verbose:
-            msg = f"[ql-prune] {j+1}/{eval_k} {name} | |S|={res['guards']} | time={res['time_s']:.2f}s"
+            guards.append(int(res["guards"]))
+            guard_ratios.append(float(res["guards"]) / max(1.0, float(res["n"])))
             if res.get("coverage") is not None:
-                msg += f" | cov={res['coverage']:.3f}"
-            print(msg)
+                covs.append(float(res["coverage"]))
 
+            opt = _read_opt_solution(args.agp_val_dir, name)
+            opt_size = len(opt) if opt is not None else None
+            ratios.append((float(res["guards"]) / float(opt_size)) if opt_size else None)
+
+            times.append(float(res["time_s"]))
+
+            per_instance.append(
+                {
+                    "name": name,
+                    "n": int(res["n"]),
+                    "guards": int(res["guards"]),
+                    "guard_ratio": float(res["guards"]) / max(1.0, float(res["n"])),
+                    "coverage": float(res["coverage"]) if res.get("coverage") is not None else None,
+                    "opt_size": opt_size,
+                    "approx_ratio": (float(res["guards"]) / float(opt_size)) if opt_size else None,
+                    "time_s": float(res["time_s"]),
+                }
+            )
+    else:
+        print(f"[qlearning] using {int(args.workers)} workers | {_oracle_status_line(oracle)}")
+        jobs = []
+        with ProcessPoolExecutor(max_workers=int(args.workers)) as ex:
+            for j in range(eval_k):
+                pts, _, name = val_dataset[j]
+                pts_np = pts.detach().cpu().numpy() if hasattr(pts, "detach") else np.asarray(pts)
+                jobs.append(
+                    ex.submit(
+                        _process_single_instance,
+                        j,
+                        pts_np,
+                        name,
+                        eval_k,
+                        cfg,
+                    )
+                )
+
+            completed = 0
+            for fut in as_completed(jobs):
+                res = fut.result()
+                completed += 1
+                print(
+                    f"[qlearning] {completed}/{eval_k}: {res['name']} | {res['_status']}"
+                )
+
+                guards.append(int(res["guards"]))
+                guard_ratios.append(float(res["guards"]) / max(1.0, float(res["n"])))
+                if res.get("coverage") is not None:
+                    covs.append(float(res["coverage"]))
+
+                opt = _read_opt_solution(args.agp_val_dir, res["name"])
+                opt_size = len(opt) if opt is not None else None
+                ratios.append((float(res["guards"]) / float(opt_size)) if opt_size else None)
+
+                times.append(float(res["time_s"]))
+
+                per_instance.append(
+                    {
+                        "name": res["name"],
+                        "n": int(res["n"]),
+                        "guards": int(res["guards"]),
+                            "guard_ratio": float(res["guards"]) / max(1.0, float(res["n"])),
+                            "coverage": float(res["coverage"]) if res.get("coverage") is not None else None,
+                            "opt_size": opt_size,
+                            "approx_ratio": (float(res["guards"]) / float(opt_size)) if opt_size else None,
+                            "time_s": float(res["time_s"]),
+                        }
+                    )
     wall_total_s = float(time.perf_counter() - t_all0)
 
     summary = {

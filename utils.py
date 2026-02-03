@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from torch.autograd import Variable
@@ -100,25 +101,37 @@ def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.nda
         return 0.0
     vs = skgeom.TriangularExpansionVisibility(arr)
 
-    # Compute visibility polygons in parallel
+    # Compute visibility polygons (optionally threaded)
     edges = list(poly.edges)
     views = []
-    with ThreadPoolExecutor() as executor:
-        futures = [executor.submit(compute_visibility, vs, arr, poly, eps, edges, idx) for idx in solution]
-        for future in futures:
-            vis_poly, err_idx, err_q = future.result()
+    max_threads = int(os.getenv("AGNET_VIS_THREADS", "0"))
+    if max_threads <= 1:
+        for idx in solution:
+            vis_poly, err_idx, err_q = compute_visibility(vs, arr, poly, eps, edges, idx)
             if vis_poly:
                 views.append(skgeom.PolygonSet([vis_poly]))
             else:
                 print(f"Warning: visibility failed at guard {err_idx}", file=sys.stderr)
+    else:
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = [executor.submit(compute_visibility, vs, arr, poly, eps, edges, idx) for idx in solution]
+            for future in futures:
+                vis_poly, err_idx, err_q = future.result()
+                if vis_poly:
+                    views.append(skgeom.PolygonSet([vis_poly]))
+                else:
+                    print(f"Warning: visibility failed at guard {err_idx}", file=sys.stderr)
 
-    # Merge partial regions
-    merged_parts = []
-    with ThreadPoolExecutor() as executor:
-        chunk_size = max(1, len(views) // executor._max_workers)
-        chunks = [views[i:i + chunk_size] for i in range(0, len(views), chunk_size)]
-        merged_parts = [executor.submit(merge_polygon_sets, chunk).result() for chunk in chunks]
-    region = merge_polygon_sets(merged_parts)
+    # Merge partial regions (optionally threaded)
+    if max_threads <= 1 or len(views) <= 1:
+        region = merge_polygon_sets(views)
+    else:
+        merged_parts = []
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            chunk_size = max(1, len(views) // executor._max_workers)
+            chunks = [views[i:i + chunk_size] for i in range(0, len(views), chunk_size)]
+            merged_parts = [executor.submit(merge_polygon_sets, chunk).result() for chunk in chunks]
+        region = merge_polygon_sets(merged_parts)
 
     # Calculate total visible area
     total_area = 0.0

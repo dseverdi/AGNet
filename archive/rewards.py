@@ -18,7 +18,7 @@ def load_value_net_proxy(model_path='checkpoints/value_net_embedding_size128_hid
     if _value_net_model is None:
         try:
             # Import here to avoid circular imports
-            from evaluate import load_reward_predictor
+            from archive.evaluate import load_reward_predictor
             _value_net_model, _value_net_device, _ = load_reward_predictor(model_path)
             _value_net_model.eval()
             print(f"✓ Loaded value_net proxy: {model_path}")

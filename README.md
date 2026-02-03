@@ -11,10 +11,12 @@ A comprehensive implementation of multiple algorithms for the Art Gallery Proble
 3. [Methods Implemented](#methods-implemented)
 4. [Installation](#installation)
 5. [Quick Start](#quick-start)
-6. [Detailed Method Descriptions](#detailed-method-descriptions)
-7. [Performance Comparison](#performance-comparison)
-8. [Advanced Features](#advanced-features)
-9. [Citation](#citation)
+6. [Evaluation (Recommended)](#evaluation-recommended)
+7. [Detailed Method Descriptions](#detailed-method-descriptions)
+8. [Performance Comparison](#performance-comparison)
+9. [Advanced Features](#advanced-features)
+10. [Citation](#citation)
+11. [Evaluation Examples (Methods of Interest)](#evaluation-examples-methods-of-interest)
 
 ---
 
@@ -29,6 +31,7 @@ This repository implements multiple approaches:
 - **Reinforcement learning** (learn through trial and error)
   - Additive RL (build solution incrementally)
   - **Pruning RL** (start full, remove redundant guards) ✨ NEW
+  - **One-pass pruning distillation** (teacher → student mask predictor) ✨ NEW
 - **Q-Learning** (tabular RL with visibility caching)
 - **Value network proxies** (fast approximation for active search)
 
@@ -129,21 +132,19 @@ python sl_agp.py --epochs 0  # loads checkpoint
 
 ### 3. Reinforcement Learning - Additive (`rl_agp.py`)
 
-**Approach**: Learn to sequentially **add** guards via policy gradient (REINFORCE).
+**Approach**: Learn to **sample a full guard sequence** (multiple guards) via policy gradient (REINFORCE).
 
 **Architecture**: Pointer Network with REINFORCE training
-- **State**: Current polygon + already placed guards
-- **Action**: Which vertex to add next
+- **State**: Polygon geometry (the policy outputs a full sequence in one forward pass)
+- **Action**: A sequence of vertex indices (multiple guards per polygon)
 - **Reward**: Smooth coverage/guard trade-off (`coverage_smooth_reward`, continuous)
 
 **Algorithm**:
 ```
 For each episode:
-  1. Start: G = ∅ (0% coverage)
-  2. Repeat:
-     a. Policy samples next guard: v ~ π(·|polygon, G)
-     b. Add v to G
-     c. Compute coverage(G)
+  1. Policy samples a guard sequence for the polygon in one pass:
+     G = [v_1, v_2, ..., v_k] ~ π(·|polygon)
+  2. Compute coverage(G)
   3. Reward is continuous (no threshold/discontinuity):
     reward = w_c · coverage(G)^p − w_g · (|G|/n) · coverage(G)
     (defaults in `rl_agp.py`: w_c=100, w_g=5, p=4)
@@ -175,29 +176,26 @@ python rl_agp.py --critic --epochs 30 --train-size 8000 --batch-size 1
 
 ---
 
-### 4. Reinforcement Learning - Pruning ✨ (`rl_agp_prune.py`)
+### 4. Reinforcement Learning - Pruning  (`rl_agp_prune.py`)
 
-**Approach**: Learn to sequentially **remove** redundant guards via policy gradient.
+**Approach**: Learn to **sample a full removal set** (guards to prune) via policy gradient.
 
 **Key Innovation**: Solves the sparse reward problem by starting from a valid solution!
 
 **Architecture**: Same Pointer Network, different action space
-- **State**: Current polygon + active guards
-- **Action**: Which guard to remove
-- **Reward**: Strict reward (always valid since coverage maintained)
+- **State**: Polygon geometry (policy outputs a full removal set in one pass)
+- **Action**: A sequence of vertex indices to remove
+- **Reward**: Strict reward evaluated once on the final pruned set
 
 **Algorithm**:
 ```
 For each episode:
   1. Start: G = {all vertices} (100% coverage guaranteed)
-  2. Repeat:
-     a. Policy samples guard to remove: v ~ π(·|polygon, G)
-     b. Try G' = G \ {v}
-     c. If coverage(G') ≥ 99%:
-        - Accept removal: G = G'
-        - Reward: -exp(α × (1 - |G|/n))  [less negative as |G| decreases]
-     d. Else: stop (can't remove more)
-  3. Update policy: ∇θ log π × (cumulative_reward - baseline)
+  2. Policy samples a removal sequence in one pass:
+    R = [v_1, v_2, ..., v_k] ~ π(·|polygon)
+  3. Apply removals at once: G' = G \ R
+  4. Compute reward once on final set G'
+  5. Update policy: ∇θ log π × (reward - baseline)
 ```
 
 **Advantages over Additive**:
@@ -229,6 +227,88 @@ python rl_agp_prune.py --epochs 30 --train-size 8000 --no-cache
 python rl_agp_prune.py --epochs 0
 ```
 
+
+
+---
+
+### 4b. Self-Supervised NCO - Oracle-Agnostic Pruning  (`ss_agp_prune.py`)
+
+**Approach**: Oracle-driven pruning with a policy that **never sees geometry-derived coverage**. The policy proposes removals, while a black-box feasibility oracle decides if coverage stays above a threshold.
+
+**Oracle interface**:
+- `is_feasible(points, active)` only (coverage is used for reporting, not training)
+- Modes: **exact**, **sampled**, or **hybrid** (sampled precheck + exact confirm)
+
+**Policy**: Per-vertex logits conditioned on coordinates + state bits (`active`, `blocked`). Invalid actions are masked.
+
+**Reward**: +1 for each successful removal; episode ends when no more feasible removals remain.
+
+**Algorithm**:
+```
+For each polygon:
+  1. Start with all guards active: s = 1^n
+  2. Repeatedly sample a removable vertex v from the policy
+  3. If oracle says feasible, remove v (reward +1)
+  4. If infeasible, block v permanently (monotonicity)
+  5. Stop when no valid actions remain or max_steps reached
+```
+
+**Evaluation options**:
+- Oracle-guided pruning (default)
+- Oracle-free inference: keep top-k / top-ratio / thresholded scores in a single pass
+
+**Usage**:
+```bash
+# Train with exact oracle
+python ss_agp_prune.py --oracle exact --epochs 30 --train-size 8000
+
+# Faster oracle (sampled) or hybrid
+python ss_agp_prune.py --oracle sampled --oracle-samples 512
+python ss_agp_prune.py --oracle hybrid --oracle-samples 512 --oracle-margin 0.01
+
+# Eval-only (checkpoint)
+python ss_agp_prune.py --evaluate --checkpoint checkpoints/ss_agp_prune_*.pt
+```
+
+---
+
+### 4c. Reinforcement Learning - One-Pass Pruning (Distillation)  (`rl_agp_prune_v2.py`)
+
+**Approach**: Distill an oracle-guided pruning teacher (from `ss_agp_prune.py`) into a **single-pass mask predictor** that outputs the final set of kept guards.
+
+**Teacher**: `ss_agp_prune` policy + visibility oracle (coverage threshold 0.99) generates the active-guard mask.
+
+**Student**: Per-vertex logits trained with BCE to match the teacher’s active mask (teacher masks are cached for speed; optional parallel precompute).
+
+**Inference**: One forward pass → keep guards with `logit > select_threshold` (fallback to argmax if empty).
+
+**Algorithm**:
+```
+For each polygon:
+  1. Teacher pruning (oracle-guided) yields active guard set A
+  2. Train student on per-vertex mask: y_i = 1 if i ∈ A else 0
+  3. At test time, student outputs logits l_i
+  4. Keep indices {i | l_i > τ}; if empty, keep argmax(l)
+  5. Evaluate coverage once on the final set
+```
+
+**Pros**:
+- Very fast inference (single pass, no sequential pruning loop)
+- Simple threshold control over guard count
+- Uses strong oracle-guided teacher signals
+
+**Cons**:
+- Depends on teacher quality
+- No explicit coverage constraint during inference (coverage evaluated post hoc)
+
+**Usage**:
+```bash
+# Train one-pass pruning student from a teacher checkpoint
+python rl_agp_prune_v2.py --teacher-checkpoint checkpoints/ss_agp_prune_*.pt --epochs 20 --train-size 8000
+
+# Evaluate (oracle only for reporting)
+python rl_agp_prune_v2.py --teacher-checkpoint checkpoints/ss_agp_prune_*.pt --evaluate --select-threshold 0.0
+```
 
 
 ---
@@ -622,13 +702,52 @@ python ss_agp.py \
   --coverage-gate 0.95
 ```
 
-### 6. Comprehensive Evaluation
+### 6. Pruning Method Evaluation (Recommended)
 
 ```bash
-python evaluate.py --methods greedy sl additive_rl pruning_rl --val-dir data/dev
+# Greedy pruning baseline (writes standardized report)
+python greedy_agp_prune.py --dataset-dir $DATASET_PATH/dev
+
+# Q-learning pruning baseline (writes standardized report)
+python qlearning_prune.py --agp_val_dir $DATASET_PATH/dev
+
+# Policy evaluation for ss_agp_prune (train produces a report automatically)
+python ss_agp_prune.py --epochs 30
 ```
 
 ---
+
+## Evaluation (Recommended)
+
+This repo standardizes evaluation for pruning methods via `eval_reporting.py`.
+Each method writes a JSON report with per-instance metrics and summary stats
+(mean, stdev, min/max, percentiles) so results are comparable across methods.
+
+**Metrics reported**:
+- Guards (`|S|`) and guard ratio (`|S|/n`)
+- Coverage (exact area-based if available)
+- Approximation ratio (`|S|/opt`) when `.solution` files exist
+- Timing (mean and p95 per instance)
+
+**Report generation (pruning methods)**:
+- `greedy_agp_prune.py`: writes a report to `results/v3/greedy_prune/greedy_prune_report.json`
+- `qlearning_prune.py`: writes to `results/v3/qlearning_prune_eval_only_val<k>.json`
+- `ss_agp_prune.py`: writes to `results/ss_agp_prune_evaluation_train<train>_val<k>.json`
+  (and eval-only runs write `results/ss_agp_prune_eval_only_val<k>.json`)
+
+**Comparison**:
+Use `compare_prune_methods.py` to print side-by-side summaries from report JSONs:
+
+```bash
+python compare_prune_methods.py --reports \
+  results/v3/greedy_prune/greedy_prune_report.json \
+  results/v3/qlearning_prune_eval_only_valfull.json \
+  results/ss_agp_prune_evaluation_trainfull_valfull.json
+```
+
+**Default evaluation size**:
+- Most scripts accept `--eval-k`. Use `-1` for full validation set.
+- `ss_agp_prune.py` defaults to full validation when `--eval-k` is not set.
 
 ## Detailed Method Descriptions
 
@@ -791,13 +910,19 @@ python evaluate.py --visualize --output-dir visualizations/
 python results.py --plot-training checkpoints/
 ```
 
-### 4. Batch Evaluation
+### 4. Batch Evaluation (Pruning Reports)
 
 ```bash
-# Evaluate multiple methods
-python evaluate.py --methods greedy sl additive_rl pruning_rl \
-                   --val-dir data/dev \
-                   --output results/comparison.json
+# Generate reports
+python greedy_agp_prune.py --dataset-dir $DATASET_PATH/dev
+python qlearning_prune.py --agp_val_dir $DATASET_PATH/dev
+python ss_agp_prune.py --epochs 30
+
+# Compare reports
+python compare_prune_methods.py --reports \
+  results/v3/greedy_prune/greedy_prune_report.json \
+  results/v3/qlearning_prune_eval_only_valfull.json \
+  results/ss_agp_prune_evaluation_trainfull_valfull.json
 ```
 
 ---
@@ -1100,3 +1225,24 @@ Total speedup:        ~2.5-3x end-to-end training time
 python rl_agp_prune.py --epochs 30 --train-size 8000 --precompute-workers 4
 ```
 This enables all optimizations: visibility caching, parallel precomputation, hierarchical union, and incremental caching!
+
+---
+
+## Evaluation Examples (Methods of Interest)
+
+```bash
+# Greedy pruning baseline (full validation set)
+python greedy_agp_prune.py --dataset-dir $DATASET_PATH/dev
+
+# Q-learning pruning baseline (full validation set)
+python qlearning_prune.py --agp_val_dir $DATASET_PATH/dev --eval-k -1
+
+# ss_agp_prune evaluation-only (full validation set)
+python ss_agp_prune.py --evaluate --checkpoint checkpoints/ss_agp_prune_h128_lr0.001_ent0.01_epochs30_trainfull.pt
+
+# Compare reports (update paths to your actual outputs)
+python compare_prune_methods.py --reports \
+  results/v3/greedy_prune/greedy_prune_report.json \
+  results/v3/qlearning_prune_eval_only_valfull.json \
+  results/ss_agp_prune_evaluation_trainfull_valfull.json
+```

@@ -32,6 +32,7 @@ import random
 import sys
 import time
 import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -350,6 +351,22 @@ def _oracle_threshold(oracle: FeasibilityOracle) -> Optional[float]:
     return None
 
 
+def _oracle_status_line(oracle: FeasibilityOracle) -> str:
+    if isinstance(oracle, SkgeomVisibilityOracle):
+        return f"oracle=exact cov=exact thr={oracle.coverage_threshold:.3f}"
+    if isinstance(oracle, SampledVisibilityOracle):
+        return (
+            f"oracle=sampled cov=sampled thr={oracle.coverage_threshold:.3f} "
+            f"samples={oracle.n_samples}"
+        )
+    if isinstance(oracle, HybridOracle):
+        return (
+            f"oracle=hybrid cov=exact thr={oracle.exact_oracle.coverage_threshold:.3f} "
+            f"samples={oracle.fast_oracle.n_samples} margin={oracle.margin:.3f}"
+        )
+    return "oracle=unknown"
+
+
 # ---------------------------
 # Environment (per-instance)
 # ---------------------------
@@ -536,6 +553,127 @@ def _read_opt_solution(sol_dir: Optional[str], name: str) -> Optional[List[int]]
     return None
 
 
+def _make_oracle_from_config(cfg: Dict) -> FeasibilityOracle:
+    if cfg["oracle"] == "exact":
+        return SkgeomVisibilityOracle(
+            coverage_threshold=float(cfg["coverage_threshold"]),
+            verbose=bool(cfg.get("oracle_verbose", False)),
+        )
+    if cfg["oracle"] == "sampled":
+        return SampledVisibilityOracle(
+            coverage_threshold=float(cfg["coverage_threshold"]),
+            n_samples=int(cfg["oracle_samples"]),
+            seed=int(cfg["seed"]),
+            verbose=bool(cfg.get("oracle_verbose", False)),
+        )
+    fast = SampledVisibilityOracle(
+        coverage_threshold=float(cfg["coverage_threshold"]),
+        n_samples=int(cfg["oracle_samples"]),
+        seed=int(cfg["seed"]),
+        verbose=bool(cfg.get("oracle_verbose", False)),
+    )
+    exact = SkgeomVisibilityOracle(
+        coverage_threshold=float(cfg["coverage_threshold"]),
+        verbose=bool(cfg.get("oracle_verbose", False)),
+    )
+    return HybridOracle(fast_oracle=fast, exact_oracle=exact, margin=float(cfg["oracle_margin"]))
+
+
+_EVAL_WORKER_STATE: Dict[str, object] = {}
+
+
+def _init_eval_worker(ckpt_path: str, model_cfg: Dict, oracle_cfg: Dict) -> None:
+    global _EVAL_WORKER_STATE
+
+    seed = int(oracle_cfg.get("seed", 0))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    device = torch.device(model_cfg.get("device", "cpu"))
+    model = PrunePolicyNet(hidden_size=int(model_cfg["hidden_size"]), use_coords=bool(model_cfg["use_coords"]))
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+    model.load_state_dict(state)
+    model.eval().to(device)
+
+    oracle = _make_oracle_from_config(oracle_cfg)
+    coverage_eval_oracle = SkgeomVisibilityOracle(
+        coverage_threshold=0.0,
+        verbose=bool(oracle_cfg.get("oracle_verbose", False)),
+    )
+
+    _EVAL_WORKER_STATE = {
+        "device": device,
+        "model": model,
+        "oracle": oracle,
+        "coverage_eval_oracle": coverage_eval_oracle,
+        "oracle_free": bool(model_cfg.get("oracle_free", False)),
+        "oracle_free_k": model_cfg.get("oracle_free_k"),
+        "oracle_free_ratio": model_cfg.get("oracle_free_ratio"),
+        "oracle_free_threshold": model_cfg.get("oracle_free_threshold"),
+    }
+
+
+def _process_eval_instance(
+    idx: int,
+    points: np.ndarray,
+    name: str,
+    max_steps: Optional[int],
+    sol_dir_for_ratios: Optional[str],
+) -> Dict:
+    state = _EVAL_WORKER_STATE
+    model: PrunePolicyNet = state["model"]
+    oracle: FeasibilityOracle = state["oracle"]
+    coverage_eval_oracle: SkgeomVisibilityOracle = state["coverage_eval_oracle"]
+    device: torch.device = state["device"]
+    oracle_free = bool(state.get("oracle_free", False))
+    oracle_free_k = state.get("oracle_free_k")
+    oracle_free_ratio = state.get("oracle_free_ratio")
+    oracle_free_threshold = state.get("oracle_free_threshold")
+
+    t0 = time.perf_counter()
+    pts = torch.tensor(points, device=device)
+    if oracle_free:
+        active, info = run_policy_oracle_free(
+            model,
+            pts,
+            name,
+            top_k=oracle_free_k,
+            ratio=oracle_free_ratio,
+            threshold=oracle_free_threshold,
+            max_steps=max_steps,
+        )
+    else:
+        active, info = run_policy_pruning(model, oracle, pts, name, deterministic=True, max_steps=max_steps)
+    dt = float(time.perf_counter() - t0)
+
+    n = int(info.get("n", points.shape[0]))
+    cov = None
+    try:
+        cov = coverage_eval_oracle.coverage(points, active, name)
+    except Exception:
+        cov = None
+    if cov is None and "coverage" in info:
+        cov = float(info["coverage"])
+    opt_sol = _read_opt_solution(sol_dir_for_ratios, name)
+    opt_size = len(opt_sol) if opt_sol is not None else None
+    approx_ratio = (float(active.size) / float(opt_size)) if opt_size else None
+
+    return {
+        "_idx": int(idx),
+        "name": name,
+        "n": n,
+        "guards": int(active.size),
+        "guard_ratio": float(active.size) / max(1.0, float(n)),
+        "coverage": cov,
+        "opt_size": opt_size,
+        "approx_ratio": approx_ratio,
+        "time_s": dt,
+    }
+
+
 @torch.no_grad()
 def run_policy_pruning(
     model: PrunePolicyNet,
@@ -588,6 +726,66 @@ def run_policy_pruning(
     cov = oracle.coverage(pts_np, active, name)
     if cov is not None:
         info["coverage"] = float(cov)
+    return active, info
+
+
+@torch.no_grad()
+def run_policy_oracle_free(
+    model: PrunePolicyNet,
+    points: torch.Tensor,
+    name: str,
+    *,
+    top_k: Optional[int],
+    ratio: Optional[float],
+    threshold: Optional[float],
+    max_steps: Optional[int],
+) -> Tuple[np.ndarray, Dict]:
+    """Oracle-free selection based on model scores.
+
+    If top-k or ratio is set, uses a single forward pass and keeps the top-scoring
+    vertices. Otherwise, performs greedy removals without an oracle, stopping when
+    the best score drops below the threshold or max_steps is reached.
+    """
+
+    device = next(model.parameters()).device
+    n = int(points.shape[0])
+
+    s = torch.ones(1, n, device=device, dtype=torch.bool)
+    blocked = torch.zeros(1, n, device=device, dtype=torch.bool)
+    pad_mask = torch.ones(1, n, device=device, dtype=torch.bool)
+    pts = points.to(device).unsqueeze(0)
+
+    if (top_k is not None and int(top_k) > 0) or (ratio is not None and float(ratio) > 0):
+        logits = model(pts, pad_mask, s, blocked).squeeze(0)
+        if top_k is not None and int(top_k) > 0:
+            k = min(int(top_k), n)
+        else:
+            k = max(1, int(round(float(ratio) * n)))
+        if k >= n:
+            active = np.arange(n, dtype=np.int64)
+        else:
+            _, idx = torch.topk(logits, k)
+            active = idx.detach().cpu().numpy().astype(np.int64)
+    else:
+        thresh = 0.0 if threshold is None else float(threshold)
+        steps = 0
+        max_steps_eff = n if max_steps is None else int(max_steps)
+        while steps < max_steps_eff:
+            logits = model(pts, pad_mask, s, blocked).squeeze(0)
+            logits = logits.masked_fill(~s.squeeze(0), float("-inf"))
+            best_val, best_idx = torch.max(logits, dim=0)
+            if torch.isneginf(best_val) or float(best_val.item()) <= thresh:
+                break
+            s[0, int(best_idx.item())] = False
+            steps += 1
+        active = torch.nonzero(s.squeeze(0), as_tuple=False).squeeze(-1).detach().cpu().numpy().astype(np.int64)
+
+    info = {
+        "n": n,
+        "guards": int(active.size),
+        "removed": int(n - active.size),
+        "oracle_free": True,
+    }
     return active, info
 
 
@@ -741,7 +939,8 @@ def train_pruning_policy(
                     f"| |S|/n {mean_guard_ratio:.3f} "
                     f"| removed/n {mean_removed_ratio:.3f} "
                     f"| loss {loss_batch.item():.3f} "
-                    f"| advantage {mean_R - baseline:.2f}"
+                    f"| advantage {mean_R - baseline:.2f} "
+                    f"| {_oracle_status_line(oracle)}"
                 )
 
         # Epoch aggregates (kept for results.json / plotting if needed)
@@ -801,6 +1000,7 @@ def train_pruning_policy(
             val_wall_s = float(time.perf_counter() - t_val0)
             pstats = _summarize_seconds(policy_secs)
             msg += f" | time {val_wall_s:.2f}s (mean {pstats['mean_s']:.3f}s, p95 {pstats['p95_s']:.3f}s)"
+            msg += f" | {_oracle_status_line(oracle)}"
             print(msg)
 
     return {
@@ -886,6 +1086,31 @@ def main() -> None:
 
     parser.add_argument("--evaluate", action="store_true", help="Skip training and only run evaluation with a checkpoint.")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to a PrunePolicyNet checkpoint for --evaluate mode.")
+    parser.add_argument(
+        "--oracle-free",
+        action="store_true",
+        help="Run oracle-free one-pass inference during evaluation (no feasibility checks).",
+    )
+    parser.add_argument(
+        "--oracle-free-k",
+        type=int,
+        default=-1,
+        help="Oracle-free: keep top-k vertices by model score (default: -1).",
+    )
+    parser.add_argument(
+        "--oracle-free-ratio",
+        type=float,
+        default=-1.0,
+        help="Oracle-free: keep top ratio of vertices by model score (default: -1).",
+    )
+    parser.add_argument(
+        "--oracle-free-threshold",
+        type=float,
+        default=0.0,
+        help="Oracle-free: greedy removals stop when best score <= threshold (default: 0.0).",
+    )
+
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for evaluation (default: 1).")
 
     parser.add_argument(
         "--results-dir",
@@ -1002,6 +1227,11 @@ def main() -> None:
         if not args.checkpoint:
             raise SystemExit("--checkpoint is required when using --evaluate")
 
+        oracle_free = bool(args.oracle_free)
+        oracle_free_k = int(args.oracle_free_k) if int(args.oracle_free_k) > 0 else None
+        oracle_free_ratio = float(args.oracle_free_ratio) if float(args.oracle_free_ratio) > 0 else None
+        oracle_free_threshold = float(args.oracle_free_threshold)
+
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
         model.load_state_dict(state)
@@ -1014,37 +1244,104 @@ def main() -> None:
         t_eval0 = time.perf_counter()
         policy_secs: List[float] = []
 
-        for j in range(eval_k):
-            pts, _, name = val_dataset[j]
-            t0 = time.perf_counter()
-            active, info = run_policy_pruning(model, oracle, pts, name, deterministic=True, max_steps=max_steps)
-            dt = float(time.perf_counter() - t0)
-            policy_secs.append(dt)
+        if int(args.workers) <= 1:
+            for j in range(eval_k):
+                pts, _, name = val_dataset[j]
+                vprint(f"[eval] {j + 1}/{eval_k}: {name}")
+                t0 = time.perf_counter()
+                if oracle_free:
+                    active, info = run_policy_oracle_free(
+                        model,
+                        pts,
+                        name,
+                        top_k=oracle_free_k,
+                        ratio=oracle_free_ratio,
+                        threshold=oracle_free_threshold,
+                        max_steps=max_steps,
+                    )
+                else:
+                    active, info = run_policy_pruning(model, oracle, pts, name, deterministic=True, max_steps=max_steps)
+                dt = float(time.perf_counter() - t0)
+                policy_secs.append(dt)
 
-            n = int(info.get("n", pts.shape[0]))
-            cov = None
-            try:
-                cov = coverage_eval_oracle.coverage(pts.detach().cpu().numpy(), active, name)
-            except Exception:
+                n = int(info.get("n", pts.shape[0]))
                 cov = None
-            if cov is None and "coverage" in info:
-                cov = float(info["coverage"])
-            opt_sol = _read_opt_solution(sol_dir_for_ratios, name)
-            opt_size = len(opt_sol) if opt_sol is not None else None
-            approx_ratio = (float(active.size) / float(opt_size)) if opt_size else None
+                try:
+                    cov = coverage_eval_oracle.coverage(pts.detach().cpu().numpy(), active, name)
+                except Exception:
+                    cov = None
+                if cov is None and "coverage" in info:
+                    cov = float(info["coverage"])
+                opt_sol = _read_opt_solution(sol_dir_for_ratios, name)
+                opt_size = len(opt_sol) if opt_sol is not None else None
+                approx_ratio = (float(active.size) / float(opt_size)) if opt_size else None
 
-            per_instance.append(
-                {
-                    "name": name,
-                    "n": n,
-                    "guards": int(active.size),
-                    "guard_ratio": float(active.size) / max(1.0, float(n)),
-                    "coverage": cov,
-                    "opt_size": opt_size,
-                    "approx_ratio": approx_ratio,
-                    "time_s": dt,
-                }
-            )
+                per_instance.append(
+                    {
+                        "name": name,
+                        "n": n,
+                        "guards": int(active.size),
+                        "guard_ratio": float(active.size) / max(1.0, float(n)),
+                        "coverage": cov,
+                        "opt_size": opt_size,
+                        "approx_ratio": approx_ratio,
+                        "time_s": dt,
+                    }
+                )
+        else:
+            oracle_cfg = {
+                "oracle": str(args.oracle),
+                "coverage_threshold": float(args.coverage_threshold),
+                "oracle_samples": int(args.oracle_samples),
+                "oracle_margin": float(args.oracle_margin),
+                "oracle_verbose": bool(args.oracle_verbose),
+                "seed": int(args.seed),
+            }
+            model_cfg = {
+                "hidden_size": int(args.hidden_size),
+                "use_coords": not args.no_coords,
+                "device": "cpu",
+                "oracle_free": oracle_free,
+                "oracle_free_k": oracle_free_k,
+                "oracle_free_ratio": oracle_free_ratio,
+                "oracle_free_threshold": oracle_free_threshold,
+            }
+            with ProcessPoolExecutor(
+                max_workers=int(args.workers),
+                initializer=_init_eval_worker,
+                initargs=(args.checkpoint, model_cfg, oracle_cfg),
+            ) as ex:
+                jobs = []
+                for j in range(eval_k):
+                    pts, _, name = val_dataset[j]
+                    pts_np = pts.detach().cpu().numpy() if hasattr(pts, "detach") else np.asarray(pts)
+                    jobs.append(
+                        ex.submit(
+                            _process_eval_instance,
+                            j,
+                            pts_np,
+                            name,
+                            max_steps,
+                            sol_dir_for_ratios,
+                        )
+                    )
+
+                for fut in as_completed(jobs):
+                    res = fut.result()
+                    vprint(f"[eval] {res['_idx'] + 1}/{eval_k}: {res['name']}")
+                    policy_secs.append(float(res["time_s"]))
+                    per_instance.append(
+                        {
+                            "name": res["name"],
+                            "n": int(res["n"]),
+                            "guards": int(res["guards"]),
+                            "guard_ratio": float(res["guard_ratio"]),
+                            "coverage": res.get("coverage"),
+                            "opt_size": res.get("opt_size"),
+                            "approx_ratio": res.get("approx_ratio"),
+                            "time_s": float(res["time_s"]),
+                        }
+                    )
 
         eval_wall_s = float(time.perf_counter() - t_eval0)
 
@@ -1123,42 +1420,114 @@ def main() -> None:
     model.eval().to(device)
     eval_k = len(val_dataset) if args.eval_k < 0 else min(int(args.eval_k), len(val_dataset))
 
+    oracle_free = bool(args.oracle_free)
+    oracle_free_k = int(args.oracle_free_k) if int(args.oracle_free_k) > 0 else None
+    oracle_free_ratio = float(args.oracle_free_ratio) if float(args.oracle_free_ratio) > 0 else None
+    oracle_free_threshold = float(args.oracle_free_threshold)
+
     per_instance: List[Dict] = []
 
     t_eval0 = time.perf_counter()
     policy_secs: List[float] = []
 
-    for j in range(eval_k):
-        pts, _, name = val_dataset[j]
-        t0 = time.perf_counter()
-        active, info = run_policy_pruning(model, oracle, pts, name, deterministic=True, max_steps=max_steps)
-        dt = float(time.perf_counter() - t0)
-        policy_secs.append(dt)
+    if int(args.workers) <= 1:
+        for j in range(eval_k):
+            pts, _, name = val_dataset[j]
+            vprint(f"[eval] {j + 1}/{eval_k}: {name}")
+            t0 = time.perf_counter()
+            if oracle_free:
+                active, info = run_policy_oracle_free(
+                    model,
+                    pts,
+                    name,
+                    top_k=oracle_free_k,
+                    ratio=oracle_free_ratio,
+                    threshold=oracle_free_threshold,
+                    max_steps=max_steps,
+                )
+            else:
+                active, info = run_policy_pruning(model, oracle, pts, name, deterministic=True, max_steps=max_steps)
+            dt = float(time.perf_counter() - t0)
+            policy_secs.append(dt)
 
-        n = int(info.get("n", pts.shape[0]))
-        cov = None
-        try:
-            cov = coverage_eval_oracle.coverage(pts.detach().cpu().numpy(), active, name)
-        except Exception:
+            n = int(info.get("n", pts.shape[0]))
             cov = None
-        if cov is None and "coverage" in info:
-            cov = float(info["coverage"])
-        opt_sol = _read_opt_solution(sol_dir_for_ratios, name)
-        opt_size = len(opt_sol) if opt_sol is not None else None
-        approx_ratio = (float(active.size) / float(opt_size)) if opt_size else None
+            try:
+                cov = coverage_eval_oracle.coverage(pts.detach().cpu().numpy(), active, name)
+            except Exception:
+                cov = None
+            if cov is None and "coverage" in info:
+                cov = float(info["coverage"])
+            opt_sol = _read_opt_solution(sol_dir_for_ratios, name)
+            opt_size = len(opt_sol) if opt_sol is not None else None
+            approx_ratio = (float(active.size) / float(opt_size)) if opt_size else None
 
-        per_instance.append(
-            {
-                "name": name,
-                "n": n,
-                "guards": int(active.size),
-                "guard_ratio": float(active.size) / max(1.0, float(n)),
-                "coverage": cov,
-                "opt_size": opt_size,
-                "approx_ratio": approx_ratio,
-                "time_s": dt,
-            }
-        )
+            per_instance.append(
+                {
+                    "name": name,
+                    "n": n,
+                    "guards": int(active.size),
+                    "guard_ratio": float(active.size) / max(1.0, float(n)),
+                    "coverage": cov,
+                    "opt_size": opt_size,
+                    "approx_ratio": approx_ratio,
+                    "time_s": dt,
+                }
+            )
+    else:
+        oracle_cfg = {
+            "oracle": str(args.oracle),
+            "coverage_threshold": float(args.coverage_threshold),
+            "oracle_samples": int(args.oracle_samples),
+            "oracle_margin": float(args.oracle_margin),
+            "oracle_verbose": bool(args.oracle_verbose),
+            "seed": int(args.seed),
+        }
+        model_cfg = {
+            "hidden_size": int(args.hidden_size),
+            "use_coords": not args.no_coords,
+            "device": "cpu",
+            "oracle_free": oracle_free,
+            "oracle_free_k": oracle_free_k,
+            "oracle_free_ratio": oracle_free_ratio,
+            "oracle_free_threshold": oracle_free_threshold,
+        }
+        with ProcessPoolExecutor(
+            max_workers=int(args.workers),
+            initializer=_init_eval_worker,
+            initargs=(ckpt_path, model_cfg, oracle_cfg),
+        ) as ex:
+            jobs = []
+            for j in range(eval_k):
+                pts, _, name = val_dataset[j]
+                pts_np = pts.detach().cpu().numpy() if hasattr(pts, "detach") else np.asarray(pts)
+                jobs.append(
+                    ex.submit(
+                        _process_eval_instance,
+                        j,
+                        pts_np,
+                        name,
+                        max_steps,
+                        sol_dir_for_ratios,
+                    )
+                )
+
+            for fut in as_completed(jobs):
+                res = fut.result()
+                vprint(f"[eval] {res['_idx'] + 1}/{eval_k}: {res['name']}")
+                policy_secs.append(float(res["time_s"]))
+                per_instance.append(
+                    {
+                        "name": res["name"],
+                        "n": int(res["n"]),
+                        "guards": int(res["guards"]),
+                        "guard_ratio": float(res["guard_ratio"]),
+                        "coverage": res.get("coverage"),
+                        "opt_size": res.get("opt_size"),
+                        "approx_ratio": res.get("approx_ratio"),
+                        "time_s": float(res["time_s"]),
+                    }
+                )
 
     eval_wall_s = float(time.perf_counter() - t_eval0)
 
