@@ -249,6 +249,110 @@ def coverage_smooth_reward(points: np.ndarray, solution: np.ndarray, name: str, 
     return coverage_reward - guard_penalty
 
 
+def coverage_gated_barrier_reward(
+    points: np.ndarray,
+    solution: np.ndarray,
+    name: str,
+    length: int = None,
+    coverage_weight: float = 100.0,
+    guard_weight: float = 5.0,
+    coverage_exponent: float = 4.0,
+    coverage_threshold: float = 0.99,
+    barrier_weight: float = 10.0,
+    barrier_eps: float = 1e-6,
+):
+    """
+    Coverage-gated reward with a soft barrier below the target coverage.
+
+    Design goals:
+    1) Always reward higher coverage (smooth gradient).
+    2) Penalize *being below* the target coverage with a log barrier.
+    3) Only optimize guard count after reaching the coverage threshold.
+
+    Reward:
+      base = coverage_weight * coverage^coverage_exponent
+      penalty = barrier_weight * (-log(gap/threshold + eps))  if coverage < threshold
+      guard_penalty = guard_weight * (n_guards/n_vertices)     if coverage >= threshold
+
+    This keeps a smooth signal while strongly discouraging sub-threshold solutions.
+    """
+    n_vertices = length if length is not None else len(points)
+    n_guards = len(solution)
+    if n_guards == 0:
+        return 0.0
+
+    try:
+        coverage = evaluate_polygon_visibility_numpy_wo_gt(points, solution, name)
+    except Exception:
+        coverage = 0.0
+
+    base = coverage_weight * (coverage ** coverage_exponent)
+
+    if coverage < coverage_threshold:
+        gap = (coverage_threshold - coverage) / max(coverage_threshold, barrier_eps)
+        barrier = -math.log(gap + barrier_eps)
+        return base - (barrier_weight * barrier)
+
+    guard_ratio = n_guards / max(1.0, float(n_vertices))
+    return base - (guard_weight * guard_ratio)
+
+
+def coverage_gated_hysteresis_reward(
+    points: np.ndarray,
+    solution: np.ndarray,
+    name: str,
+    length: int = None,
+    coverage_enter: float = 0.995,
+    coverage_exit: float = 0.985,
+    return_meta: bool = False,
+):
+    """
+    Coverage-gated reward with hysteresis:
+    - Below coverage_exit: optimize feasibility only.
+    - Above coverage_enter: optimize sparsity only.
+    - In between: stay in feasibility mode.
+
+    # Coverage-gated reward with hysteresis:
+    # Below coverage_exit → optimize feasibility only.
+    # Above coverage_enter → optimize sparsity only.
+    # Prevents gradient conflict and coverage collapse in AGP.
+    """
+    if coverage_enter <= coverage_exit:
+        raise ValueError("coverage_enter must be > coverage_exit")
+
+    n_vertices = length if length is not None else len(points)
+    n_guards = len(solution)
+
+    try:
+        coverage = evaluate_polygon_visibility_numpy_wo_gt(points, solution, name)
+    except Exception:
+        coverage = 0.0
+
+    uncovered = 1.0 - float(coverage)
+
+    if coverage < coverage_exit:
+        reward = -uncovered
+        regime = "feasibility"
+    elif coverage >= coverage_enter:
+        reward = -(float(n_guards) / max(1.0, float(n_vertices)))
+        regime = "sparsity"
+    else:
+        reward = -uncovered
+        regime = "feasibility"
+
+    if return_meta:
+        meta = {
+            "coverage": float(coverage),
+            "num_guards": int(n_guards),
+            "num_vertices": int(n_vertices),
+            "reward": float(reward),
+            "regime": regime,
+        }
+        return float(reward), meta
+
+    return float(reward)
+
+
 def smooth_reward(points: np.ndarray, solution: np.ndarray, name: str, length: int = None, alpha=1, p=1):
     """
     Smooth reward function for vertex guard optimization.

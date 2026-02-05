@@ -5,6 +5,8 @@ from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor, create_critic
 from utils import createPolygon, compute_visibility
 import torch
+import json
+import time
 try:
     import skgeom
 except ImportError:
@@ -25,7 +27,9 @@ except ImportError:
 #from rewards import strict_reward as reward  # Use the strict reward function
 #from rewards import enhanced_penalty as reward  # Use the smooth reward function
 #from rewards import strict_reward as reward  # Use the smooth reward function
-from rewards import coverage_smooth_reward as reward  # Smooth reward with no discontinuity
+from rewards import coverage_gated_hysteresis_reward as reward  # Coverage-gated hysteresis reward
+
+from eval_reporting import make_report
 
 from functools import wraps, partial
 
@@ -113,7 +117,20 @@ def get_lengths_from_dataset(dataset):
 
 
 
-def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e-3, beta=0.99):
+def reinforce_train_ema(
+    model,
+    dataset,
+    reward_fn,
+    epochs=20,
+    batch_size=20,
+    lr=1e-3,
+    beta=0.99,
+    checkpoint_dir=None,
+    checkpoint_params=None,
+    epoch_eval_fn=None,
+    start_epoch=0,
+    episode_log=False,
+):
     """
     Train the model using REINFORCE with exponential moving average (EMA) baseline for variance reduction.
     Uses a simple bucket sampler to group samples by length.
@@ -125,6 +142,10 @@ def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e
         batch_size: Size of each training batch.
         lr: Learning rate for the optimizer.
         beta: EMA decay factor for baseline updates.
+        checkpoint_dir: Directory to save intermediate checkpoints (optional).
+        checkpoint_params: Parameters dict for checkpoint naming (optional).
+        epoch_eval_fn: Optional callback(epoch:int) to report training metrics per epoch.
+        start_epoch: Starting epoch number (for resume).
     """
     print(f"\n--- Training on {len(dataset)} samples for {epochs} epochs (batch size {batch_size}) ---")
     model.train()
@@ -136,15 +157,19 @@ def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e
     # Initialize EMA baseline for variance reduction
     baseline = 0.0
     
+    # Track last checkpoint path for cleanup
+    last_checkpoint_path = None
+    
     # Use tqdm for epoch progress if available
     epoch_iterator = tqdm(range(epochs), desc="Training Epochs") if tqdm else range(epochs)
     
     for epoch in epoch_iterator:
+        actual_epoch = start_epoch + epoch + 1
         total_loss = 0
         batch_count = 0
         
         # Use tqdm for batch progress if available
-        batch_iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs} Batches", leave=False) if tqdm else loader
+        batch_iterator = tqdm(loader, desc=f"Epoch {actual_epoch}/{start_epoch + epochs} Batches", leave=False) if tqdm else loader
         
         for batch_data, mask, lengths, batch_names in batch_iterator:
             batch_data = batch_data.to(device, non_blocking=True)
@@ -157,7 +182,16 @@ def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e
                 n = lengths[i].item() if lengths is not None else len(data_tensor)
                 real_points = data_tensor[:n].detach().cpu().numpy()
                 real_solution = [idx for idx in idxs if idx < n]
-                r = reward(real_points, real_solution, name, length=n)
+                r_out = reward_fn(real_points, real_solution, name, length=n, return_meta=bool(episode_log))
+                if isinstance(r_out, tuple) and len(r_out) == 2:
+                    r, meta = r_out
+                    if episode_log:
+                        print(
+                            f"[episode] {name} | cov={meta['coverage']:.4f} | guards={meta['num_guards']} "
+                            f"| reward={meta['reward']:.4f} | regime={meta['regime']}"
+                        )
+                else:
+                    r = r_out
                 rewards_list.append(r)
             rewards = torch.tensor(rewards_list, dtype=torch.float32, device=device)
             # Update EMA baseline and compute advantages
@@ -186,17 +220,60 @@ def reinforce_train_ema(model, dataset, reward_fn, epochs=2, batch_size=1, lr=1e
             import gc
             gc.collect()
         avg_loss = total_loss / len(dataset)
-        print(f"Epoch {epoch+1}/{epochs} - Avg loss: {avg_loss:.4f}")
+        print(f"Epoch {actual_epoch}/{start_epoch + epochs} - Avg loss: {avg_loss:.4f}")
+        if epoch_eval_fn is not None:
+            epoch_eval_fn(actual_epoch)
+            model.train()
+        
+        # Save checkpoint every 5 epochs
+        if checkpoint_dir and checkpoint_params and actual_epoch % 5 == 0:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            ckpt_path = os.path.join(checkpoint_dir, f"rl_agp_ema_intermediate_epoch{actual_epoch}.pt")
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': actual_epoch,
+                'baseline': baseline,
+                'checkpoint_params': checkpoint_params
+            }, ckpt_path)
+            print(f"  Saved checkpoint: {ckpt_path}")
+            
+            # Remove previous checkpoint
+            if last_checkpoint_path and os.path.exists(last_checkpoint_path):
+                try:
+                    os.remove(last_checkpoint_path)
+                    print(f"  Removed old checkpoint: {last_checkpoint_path}")
+                except Exception as e:
+                    print(f"  Warning: Could not remove old checkpoint: {e}")
+            last_checkpoint_path = ckpt_path
+        
         torch.cuda.empty_cache()
     print("Training done.")
 
 # --- Reinforce with learned critic ---
-def reinforce_train_critic(actor, critic, dataset, reward_fn,
-                          epochs=2, batch_size=1,
-                          lr_actor=1e-3, lr_critic=1e-3):
+def reinforce_train_critic(
+    actor,
+    critic,
+    dataset,
+    reward_fn,
+    epochs=2,
+    batch_size=1,
+    lr_actor=1e-3,
+    lr_critic=1e-3,
+    checkpoint_dir=None,
+    checkpoint_params=None,
+    epoch_eval_fn=None,
+    start_epoch=0,
+    episode_log=False,
+):
     """
     Actor-critic training: policy network (actor) and value network (critic).
     Critic is trained via MSE to match observed return; actor via advantage.
+    Args:
+        checkpoint_dir: Directory to save intermediate checkpoints (optional).
+        checkpoint_params: Parameters dict for checkpoint naming (optional).
+        epoch_eval_fn: Optional callback(epoch:int) to report training metrics per epoch.
+        start_epoch: Starting epoch number (for resume).
     """
     print(f"\n--- AC Training on {len(dataset)} samples for {epochs} epochs (batch {batch_size}) ---")
     actor.train(); critic.train()
@@ -208,16 +285,20 @@ def reinforce_train_critic(actor, critic, dataset, reward_fn,
                         pin_memory=True, num_workers=2)
     device = next(actor.parameters()).device
     
+    # Track last checkpoint path for cleanup
+    last_checkpoint_path = None
+    
     # Use tqdm for epoch progress if available
     epoch_iterator = tqdm(range(epochs), desc="AC Training Epochs") if tqdm else range(epochs)
     
     for epoch in epoch_iterator:
+        actual_epoch = start_epoch + epoch + 1
         total_actor_loss = 0.0
         total_critic_loss = 0.0
         batch_count = 0
         
         # Use tqdm for batch progress if available
-        batch_iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs} Batches", leave=False) if tqdm else loader
+        batch_iterator = tqdm(loader, desc=f"Epoch {actual_epoch}/{start_epoch + epochs} Batches", leave=False) if tqdm else loader
         
         for batch_data, mask, lengths, batch_names in batch_iterator:
             batch_data = batch_data.to(device, non_blocking=True)
@@ -233,7 +314,16 @@ def reinforce_train_critic(actor, critic, dataset, reward_fn,
                 n = lengths[i].item() if lengths is not None else len(data_tensor)
                 real_points = data_tensor[:n].detach().cpu().numpy()
                 real_solution = [idx for idx in idxs if idx < n]
-                r = reward(real_points, real_solution, name, length=n)
+                r_out = reward_fn(real_points, real_solution, name, length=n, return_meta=bool(episode_log))
+                if isinstance(r_out, tuple) and len(r_out) == 2:
+                    r, meta = r_out
+                    if episode_log:
+                        print(
+                            f"[episode] {name} | cov={meta['coverage']:.4f} | guards={meta['num_guards']} "
+                            f"| reward={meta['reward']:.4f} | regime={meta['regime']}"
+                        )
+                else:
+                    r = r_out
                 rewards_list.append(r)
             rewards = torch.tensor(rewards_list, dtype=torch.float32, device=device)
             # Critic loss: fit to returns
@@ -259,8 +349,34 @@ def reinforce_train_critic(actor, critic, dataset, reward_fn,
             # Mem cleanup
             del batch_data, mask, lengths, selected_idxs, log_probs, values, rewards
             torch.cuda.empty_cache(); import gc; gc.collect()
-        print(f"Epoch {epoch+1}/{epochs} - Actor loss: {total_actor_loss/len(dataset):.4f}" \
+        print(f"Epoch {actual_epoch}/{start_epoch + epochs} - Actor loss: {total_actor_loss/len(dataset):.4f}" \
               f", Critic loss: {total_critic_loss/len(dataset):.4f}")
+        if epoch_eval_fn is not None:
+            epoch_eval_fn(actual_epoch)
+            actor.train(); critic.train()
+        
+        # Save checkpoint every 5 epochs
+        if checkpoint_dir and checkpoint_params and actual_epoch % 5 == 0:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            ckpt_path = os.path.join(checkpoint_dir, f"rl_agp_critic_intermediate_epoch{actual_epoch}.pt")
+            torch.save({
+                'actor_state_dict': actor.state_dict(),
+                'critic_state_dict': critic.state_dict(),
+                'optimizer_actor_state_dict': opt_actor.state_dict(),
+                'optimizer_critic_state_dict': opt_critic.state_dict(),
+                'epoch': actual_epoch,
+                'checkpoint_params': checkpoint_params
+            }, ckpt_path)
+            print(f"  Saved checkpoint: {ckpt_path}")
+            
+            # Remove previous checkpoint
+            if last_checkpoint_path and os.path.exists(last_checkpoint_path):
+                try:
+                    os.remove(last_checkpoint_path)
+                    print(f"  Removed old checkpoint: {last_checkpoint_path}")
+                except Exception as e:
+                    print(f"  Warning: Could not remove old checkpoint: {e}")
+            last_checkpoint_path = ckpt_path
     print("Actor-critic training done.")
 
 # --- Evaluation ---
@@ -437,6 +553,72 @@ def reinforce_eval(model, dataset, reward_fn, batch_size=1, sol_dir=None):
     }
 
 
+def _read_opt_solution(sol_dir: str, name: str):
+    base_name = os.path.splitext(os.path.basename(name))[0]
+    opt_sol_path = os.path.join(sol_dir, f"{base_name}.solution")
+    try:
+        with open(opt_sol_path, 'r') as f:
+            lines = f.read().splitlines()
+            if len(lines) >= 2:
+                return [int(x) for x in lines[1].split()]
+    except Exception:
+        return None
+    return None
+
+
+@torch.no_grad()
+def evaluate_rl_agp_simple(model, dataset, sol_dir: str, eval_k: int):
+    model.eval()
+    per_instance = []
+    device = next(model.parameters()).device
+
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn, num_workers=0)
+    count = 0
+    for batch_data, mask, lengths, batch_names in loader:
+        if count >= eval_k:
+            break
+        batch_data = batch_data.to(device)
+        mask = mask.to(device)
+        lengths = torch.tensor(lengths, dtype=torch.long, device=device)
+
+        t0 = time.perf_counter()
+        selected_idxs, _ = model(batch_data, padding_mask=mask, lengths=lengths)
+        dt = float(time.perf_counter() - t0)
+
+        name = batch_names[0]
+        n = int(lengths[0].item())
+        pred_indices = [int(idx) for idx in selected_idxs[0] if int(idx) < n]
+
+        try:
+            coverage = evaluate_polygon_visibility_numpy_wo_gt(
+                batch_data[0, :n].detach().cpu().numpy(),
+                np.array(pred_indices, dtype=np.int64),
+                name,
+            )
+        except Exception:
+            coverage = None
+
+        opt_sol = _read_opt_solution(sol_dir, name)
+        opt_size = len(opt_sol) if opt_sol else None
+        approx_ratio = (float(len(pred_indices)) / float(opt_size)) if opt_size else None
+
+        per_instance.append(
+            {
+                "name": name,
+                "n": n,
+                "guards": int(len(pred_indices)),
+                "guard_ratio": float(len(pred_indices)) / max(1.0, float(n)),
+                "coverage": coverage,
+                "opt_size": opt_size,
+                "approx_ratio": approx_ratio,
+                "time_s": dt,
+            }
+        )
+        count += 1
+
+    return per_instance
+
+
 
 # --- Visualization and Coverage Testing ---
 # --- Test Coverage ---
@@ -567,12 +749,22 @@ def main():
     parser.add_argument('--agp_train_dir', type=str, default=default_train)
     parser.add_argument('--agp_val_dir', type=str, default=default_val)
     parser.add_argument('--train-size', type=int, default=8000, help="Number of training samples to use (default: 8000, or all if smaller)")
+    parser.add_argument('--epoch-eval-k', type=int, default=-1, help="Training samples to evaluate per epoch (-1 = all)")
+    parser.add_argument('--resume-from', type=str, default=None, help="Resume training from intermediate checkpoint (path to .pt file)")
+    parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--checkpoint-dir', type=str, default='checkpoints')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--ema', action='store_true', help='Use EMA baseline (reinforce_train_ema)')
     group.add_argument('--critic', action='store_true', help='Use learned critic (reinforce_train_critic)')
     args = parser.parse_args()
 
+    def vprint(msg: str) -> None:
+        if bool(args.verbose):
+            print(msg)
+
+    vprint("[phase] preparing datasets")
     train_dataset, val_dataset = prepare_datasets(args.agp_train_dir, args.agp_val_dir, normalize=True)
+    vprint("[phase] creating models")
     agp_model = create_agp_model(
         args.embedding_size, args.hidden_size, args.n_glimpses, args.tanh_exploration, args.use_tanh, reward, args.temperature
     )
@@ -587,19 +779,54 @@ def main():
     small_train_dataset = train_dataset if len(train_dataset) <= size else Dataset(train_dataset.samples[:size])
     small_val_dataset = val_dataset if len(val_dataset) <= size else Dataset(val_dataset.samples[:size])
     
+    # Load from intermediate checkpoint if resuming
+    start_epoch = 0
+    if args.resume_from:
+        vprint(f"[phase] resuming from checkpoint: {args.resume_from}")
+        device = next(agp_model.parameters()).device
+        ckpt = torch.load(args.resume_from, map_location=device, weights_only=False)
+        if isinstance(ckpt, dict):
+            if 'model_state_dict' in ckpt:
+                agp_model.load_state_dict(ckpt['model_state_dict'])
+            elif 'actor_state_dict' in ckpt:
+                agp_model.load_state_dict(ckpt['actor_state_dict'])
+                if 'critic_state_dict' in ckpt and args.critic:
+                    critic_model.load_state_dict(ckpt['critic_state_dict'])
+            start_epoch = int(ckpt.get('epoch', 0))
+            vprint(f"[phase] resuming from epoch {start_epoch}")
+    
     # define reward function
-    reward_fn = partial(reward, coverage_weight=100.0, guard_weight=5.0, coverage_exponent=4.0)  # Use smooth reward with no discontinuity
+    def reward_fn(points, solution, name, length=None, return_meta=False):
+        return reward(
+            points,
+            solution,
+            name,
+            length=length,
+            coverage_enter=0.995,
+            coverage_exit=0.985,
+            return_meta=return_meta,
+        )
 
-    if args.ema:
-        reinforce_train_ema(agp_model, small_train_dataset, reward_fn,
-                            epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, beta=args.beta)
-        training_method = 'reinforcement_learning_ema'
-    elif args.critic:
-        reinforce_train_critic(agp_model, critic_model, small_train_dataset, reward_fn,
-                               epochs=args.epochs, batch_size=args.batch_size, lr_actor=args.lr, lr_critic=args.lr)
-        training_method = 'reinforcement_learning_critic'
+    def epoch_eval_train_metrics(epoch: int) -> None:
+        eval_k = len(small_train_dataset) if int(args.epoch_eval_k) < 0 else min(int(args.epoch_eval_k), len(small_train_dataset))
+        per_instance = evaluate_rl_agp_simple(
+            agp_model,
+            small_train_dataset,
+            args.agp_train_dir,
+            eval_k=eval_k,
+        )
+        covs = [x.get("coverage") for x in per_instance if x.get("coverage") is not None]
+        ratios = [x.get("approx_ratio") for x in per_instance if x.get("approx_ratio") is not None]
+        cov_mean = float(np.mean(covs)) if covs else None
+        ratio_mean = float(np.mean(ratios)) if ratios else None
+        msg = f"[epoch {epoch}] train"
+        if cov_mean is not None:
+            msg += f" | geo-cov mean={cov_mean:.3f}"
+        if ratio_mean is not None:
+            msg += f" | |S|/opt mean={ratio_mean:.2f}"
+        print(msg)
 
-    # Save the trained model
+    # Define checkpoint params early (needed for training phase)
     checkpoint_params = {
         'embedding_size': args.embedding_size,
         'hidden_size': args.hidden_size,
@@ -611,8 +838,35 @@ def main():
     }
     # Remove None values from checkpoint params
     checkpoint_params = {k: v for k, v in checkpoint_params.items() if v is not None}
+
+    vprint("[phase] training")
+    # If resuming, adjust epochs to be relative to the starting epoch
+    remaining_epochs = args.epochs - start_epoch
+    if remaining_epochs <= 0:
+        vprint(f"[phase] training already complete (start_epoch={start_epoch} >= epochs={args.epochs})")
+        training_method = 'reinforcement_learning_ema' if args.ema else 'reinforcement_learning_critic'
+    else:
+        vprint(f"[phase] training {remaining_epochs} more epochs (from epoch {start_epoch} to {args.epochs})")
+        if args.ema:
+            reinforce_train_ema(agp_model, small_train_dataset, reward_fn,
+                                epochs=remaining_epochs, batch_size=args.batch_size, lr=args.lr, beta=args.beta,
+                                checkpoint_dir=args.checkpoint_dir, checkpoint_params=checkpoint_params,
+                                epoch_eval_fn=epoch_eval_train_metrics, start_epoch=start_epoch,
+                                episode_log=bool(args.verbose))
+            training_method = 'reinforcement_learning_ema'
+        elif args.critic:
+            reinforce_train_critic(agp_model, critic_model, small_train_dataset, reward_fn,
+                                   epochs=remaining_epochs, batch_size=args.batch_size, lr_actor=args.lr, lr_critic=args.lr,
+                                   checkpoint_dir=args.checkpoint_dir, checkpoint_params=checkpoint_params,
+                                   epoch_eval_fn=epoch_eval_train_metrics, start_epoch=start_epoch,
+                                   episode_log=bool(args.verbose))
+            training_method = 'reinforcement_learning_critic'
+
+    vprint("[phase] saving model")
+    # Save the trained model
+    # checkpoint_params already defined earlier
     
-    checkpoint_path = get_checkpoint_path('checkpoints', 'rl_agp_model', checkpoint_params, args.epochs)
+    checkpoint_path = get_checkpoint_path(args.checkpoint_dir, 'rl_agp_model', checkpoint_params, args.epochs)
     model_checkpoint = {
         'model_state_dict': agp_model.state_dict(),
         'args': vars(args),
@@ -628,34 +882,44 @@ def main():
     torch.save(model_checkpoint, checkpoint_path)
     print(f"Model saved to {checkpoint_path}")
 
-    # evaluate the model on the validation dataset
-    eval_results = reinforce_eval(agp_model, small_val_dataset, reward_fn, batch_size=1, sol_dir=args.agp_val_dir)
-    
-    # Save evaluation results
-    import json
-    results_summary = {
-        'args': vars(args),
-        'num_train_samples': len(small_train_dataset),
-        'num_val_samples': len(small_val_dataset),
-        'training_method': 'reinforcement_learning'
-    }
-    
-    # Add statistics if available
-    if 'stats' in eval_results and eval_results['stats']:
-        if 'coverage_stats' in eval_results['stats']:
-            results_summary['coverage_stats'] = eval_results['stats']['coverage_stats']
-        if 'efficiency_stats' in eval_results['stats']:
-            results_summary['efficiency_stats'] = eval_results['stats']['efficiency_stats']
-        if 'ratio_stats' in eval_results['stats']:
-            results_summary['size_ratio_stats'] = eval_results['stats']['ratio_stats']
-        if 'coverage_vis_stats' in eval_results['stats']:
-            results_summary['polygon_coverage_stats'] = eval_results['stats']['coverage_vis_stats']
-    
-    # Save to results directory
-    os.makedirs('results', exist_ok=True)
-    with open('results/rl_agp_evaluation.json', 'w') as f:
-        json.dump(results_summary, f, indent=2)
-    print("Results summary saved to results/rl_agp_evaluation_greedy.json")
+    vprint("[phase] evaluating")
+    # evaluate the model on the validation dataset (simple report format)
+    eval_k = len(small_val_dataset)
+    per_instance = evaluate_rl_agp_simple(agp_model, small_val_dataset, args.agp_val_dir, eval_k)
+    report = make_report(
+        method="rl_agp",
+        per_instance=per_instance,
+        args=vars(args),
+        dataset={
+            "path": args.agp_val_dir,
+            "eval_k": int(eval_k),
+            "train_k": int(len(small_train_dataset)),
+        },
+        oracle={
+            "mode": "exact",
+            "coverage_threshold": 0.99,
+            "coverage_metric": "exact",
+        },
+        timing={},
+    )
+    report["checkpoint"] = checkpoint_path
+
+    vprint("[phase] saving report")
+    out_dir = os.path.join("results", "v3", "rl_agp")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "rl_agp_report.json")
+    with open(out_path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    print("\n--- RL AGP eval on dataset polygons ---")
+    s = report["summary"]
+    msg = f"Dataset eval k={eval_k} | |S| mean={s['guards']['mean']:.2f} | |S|/n mean={s['guard_ratio']['mean']:.3f}"
+    if s["coverage"]["mean"] is not None:
+        msg += f" | geo-cov mean={s['coverage']['mean']:.3f}"
+    if s["approx_ratio"]["mean"] is not None:
+        msg += f" | |S|/opt mean={s['approx_ratio']['mean']:.2f}"
+    print(msg)
+    print(f"Results summary saved to {out_path}")
 
 
 if __name__ == "__main__":

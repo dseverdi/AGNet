@@ -143,7 +143,7 @@ def main() -> None:
     default_val = os.path.join(DATASET_PATH, "dev")
 
     parser = argparse.ArgumentParser(description="Minimal one-pass pruning training")
-    parser.add_argument("--teacher-checkpoint", type=str, required=True)
+    parser.add_argument("--teacher-checkpoint", type=str, default=None, help="Teacher checkpoint (required for training).")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--workers", type=int, default=1, help="Parallel workers for teacher mask precompute.")
@@ -153,6 +153,8 @@ def main() -> None:
     parser.add_argument("--normalize", action="store_true")
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--evaluate", action="store_true", help="Run evaluation after training.")
+    parser.add_argument("--eval-only", action="store_true", help="Skip training and only evaluate a checkpoint.")
+    parser.add_argument("--student-checkpoint", type=str, default=None, help="Student checkpoint for eval-only mode.")
     parser.add_argument("--select-threshold", type=float, default=0.0)
     parser.add_argument("--agp_val_dir", type=str, default=default_val)
     parser.add_argument("--eval-k", type=int, default=-1)
@@ -173,6 +175,73 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+
+    if args.eval_only:
+        if not args.student_checkpoint:
+            raise SystemExit("--student-checkpoint is required for --eval-only mode")
+        
+        vprint("[phase] eval-only mode")
+        val_paths = _list_pol_files(args.agp_val_dir)
+        if len(val_paths) == 0:
+            raise SystemExit(f"No .pol files found under {args.agp_val_dir}")
+        val_samples = agp_read_samples(val_paths, normalize=bool(args.normalize))
+        val_dataset = Dataset(val_samples)
+
+        student = PrunePolicyNet(hidden_size=int(args.hidden_size), use_coords=True).to(device)
+        ckpt = torch.load(args.student_checkpoint, map_location=device, weights_only=False)
+        state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+        student.load_state_dict(state)
+        student.eval()
+
+        coverage_eval_oracle = SkgeomVisibilityOracle(coverage_threshold=0.0, verbose=False)
+        eval_k = len(val_dataset) if int(args.eval_k) < 0 else min(int(args.eval_k), len(val_dataset))
+
+        per_instance = evaluate_onepass(
+            student,
+            val_dataset,
+            coverage_eval_oracle,
+            eval_k=eval_k,
+            sol_dir=args.agp_val_dir,
+            select_threshold=float(args.select_threshold),
+            verbose=bool(args.verbose),
+        )
+
+        report = make_report(
+            method="rl_agp_prune_v2",
+            per_instance=per_instance,
+            args=vars(args),
+            dataset={
+                "path": args.agp_val_dir,
+                "eval_k": int(eval_k),
+            },
+            oracle={
+                "mode": "exact",
+                "coverage_threshold": 0.99,
+                "coverage_metric": "exact",
+            },
+            timing={},
+        )
+        report["checkpoint"] = args.student_checkpoint
+
+        os.makedirs(args.results_dir, exist_ok=True)
+        eval_tag = "full" if eval_k >= len(val_dataset) else str(eval_k)
+        out_path = os.path.join(args.results_dir, f"rl_agp_prune_v2_eval_only_val{eval_tag}.json")
+        with open(out_path, "w") as f:
+            json.dump(report, f, indent=2)
+
+        print("\n--- One-pass prune eval on dataset polygons (eval-only mode) ---")
+        s = report["summary"]
+        msg = f"Dataset eval k={eval_k} | |S| mean={s['guards']['mean']:.2f} | |S|/n mean={s['guard_ratio']['mean']:.3f}"
+        if s["coverage"]["mean"] is not None:
+            msg += f" | geo-cov mean={s['coverage']['mean']:.3f}"
+        if s["approx_ratio"]["mean"] is not None:
+            msg += f" | |S|/opt mean={s['approx_ratio']['mean']:.2f}"
+        print(msg)
+        print(f"Results summary saved to {out_path}")
+        return
+
+    if not args.teacher_checkpoint:
+        raise SystemExit("--teacher-checkpoint is required for training")
 
     train_paths = _list_pol_files(default_train)
     if len(train_paths) == 0:

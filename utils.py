@@ -11,6 +11,8 @@ import numpy as np
 import skgeom
 from concurrent.futures import ThreadPoolExecutor
 import math  # for sqrt
+from collections import OrderedDict
+import threading
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from dataset import Dataset, agp_read_samples, collate_fn
@@ -75,8 +77,156 @@ def createPolygon(points: np.ndarray) -> bool:
         return False
     return poly
 
+# ---------------------------
+# Visibility cache (per polygon)
+# ---------------------------
+
+_VIS_CACHE_LOCK = threading.Lock()
+_VIS_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+
+
+def _cache_key(points: np.ndarray, name: str) -> str:
+    n = int(points.shape[0])
+    if name:
+        return f"{name}|{n}"
+    return f"anon|{n}|{id(points)}"
+
+
+def _points_bbox(points: np.ndarray) -> tuple:
+    xs = points[:, 0]
+    ys = points[:, 1]
+    return (float(xs.min()), float(xs.max()), float(ys.min()), float(ys.max()))
+
+
+def _get_or_build_vis_cache(points: np.ndarray, name: str) -> dict:
+    key = _cache_key(points, name)
+    bbox = _points_bbox(points)
+    max_cache = int(os.getenv("AGNET_VIS_CACHE_SIZE", "64"))
+    verbose = bool(int(os.getenv("AGNET_VIS_CACHE_VERBOSE", "0")))
+    max_threads = int(os.getenv("AGNET_VIS_THREADS", "0"))
+
+    with _VIS_CACHE_LOCK:
+        cache = _VIS_CACHE.get(key)
+        if cache is not None and cache.get("n") == int(points.shape[0]) and cache.get("bbox") == bbox:
+            _VIS_CACHE.move_to_end(key)
+            return cache
+
+    # Build cache (outside lock)
+    poly = createPolygon(points)
+    if poly is None or poly is False:
+        cache = {"invalid": True, "n": int(points.shape[0]), "bbox": bbox}
+        with _VIS_CACHE_LOCK:
+            _VIS_CACHE[key] = cache
+            _VIS_CACHE.move_to_end(key)
+        return cache
+
+    arr = skgeom.arrangement.Arrangement()
+    try:
+        for edge in poly.edges:
+            arr.insert(edge)
+    except RuntimeError as e:
+        if verbose:
+            print(f"[vis-cache] arrangement build failed for {name}: {e}", file=sys.stderr)
+        cache = {"invalid": True, "n": int(points.shape[0]), "bbox": bbox}
+        with _VIS_CACHE_LOCK:
+            _VIS_CACHE[key] = cache
+            _VIS_CACHE.move_to_end(key)
+        return cache
+
+    vs = skgeom.TriangularExpansionVisibility(arr)
+    edges = list(poly.edges)
+    n = int(points.shape[0])
+    eps = 1e-8
+    poly_area = abs(float(poly.area()))
+
+    guard_visibility_cache = {}
+
+    if max_threads <= 1:
+        for guard_idx in range(n):
+            vis_poly, err_idx, _ = compute_visibility(vs, arr, poly, eps, edges, guard_idx)
+            if vis_poly:
+                guard_visibility_cache[guard_idx] = skgeom.PolygonSet([vis_poly])
+            else:
+                if verbose:
+                    print(f"[vis-cache] visibility failed at guard {err_idx} for {name}", file=sys.stderr)
+                guard_visibility_cache[guard_idx] = skgeom.PolygonSet()
+    else:
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = {
+                guard_idx: executor.submit(compute_visibility, vs, arr, poly, eps, edges, guard_idx)
+                for guard_idx in range(n)
+            }
+            for guard_idx, future in futures.items():
+                vis_poly, err_idx, _ = future.result()
+                if vis_poly:
+                    guard_visibility_cache[guard_idx] = skgeom.PolygonSet([vis_poly])
+                else:
+                    if verbose:
+                        print(f"[vis-cache] visibility failed at guard {err_idx} for {name}", file=sys.stderr)
+                    guard_visibility_cache[guard_idx] = skgeom.PolygonSet()
+
+    cache = {
+        "invalid": False,
+        "n": n,
+        "bbox": bbox,
+        "poly": poly,
+        "arr": arr,
+        "vs": vs,
+        "edges": edges,
+        "eps": eps,
+        "poly_area": poly_area,
+        "guard_visibility_cache": guard_visibility_cache,
+        "coverage_cache": {},
+    }
+
+    with _VIS_CACHE_LOCK:
+        _VIS_CACHE[key] = cache
+        _VIS_CACHE.move_to_end(key)
+        # LRU eviction
+        while len(_VIS_CACHE) > max_cache:
+            _VIS_CACHE.popitem(last=False)
+    return cache
+
+
 # Evaluate coverage without ground-truth (numpy-based)
 def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.ndarray, name: str) -> float:
+    use_cache = bool(int(os.getenv("AGNET_VIS_CACHE", "1")))
+    if use_cache:
+        cache = _get_or_build_vis_cache(points, name)
+        if cache.get("invalid"):
+            print(f"Skipping invalid polygon in {name}: less than 3 vertices or zero area", file=sys.stderr)
+            return 0.0
+
+        solution_key = tuple(sorted(int(x) for x in solution))
+        cov_cache = cache["coverage_cache"]
+        if solution_key in cov_cache:
+            return cov_cache[solution_key]
+
+        if len(solution_key) == 0:
+            coverage = 0.0
+        else:
+            try:
+                union_region = skgeom.PolygonSet()
+                guard_visibility_cache = cache["guard_visibility_cache"]
+                for guard_idx in solution_key:
+                    if guard_idx in guard_visibility_cache:
+                        union_region = union_region.union(guard_visibility_cache[guard_idx])
+
+                total_area = 0.0
+                for vis in union_region.polygons:
+                    outer = abs(float(vis.outer_boundary().area()))
+                    holes = sum(abs(float(h.area())) for h in vis.holes)
+                    total_area += outer - holes
+
+                poly_area = cache["poly_area"]
+                coverage = total_area / poly_area if poly_area > 0 else 0.0
+            except Exception as e:
+                print(f"Fast coverage computation failed for {name}: {e}", file=sys.stderr)
+                coverage = 0.0
+
+        cov_cache[solution_key] = coverage
+        return coverage
+
     # Validate polygon definition
     eps = 1e-8
     # Construct polygon from Point2 list
