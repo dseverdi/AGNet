@@ -101,7 +101,7 @@ def _points_bbox(points: np.ndarray) -> tuple:
 def _get_or_build_vis_cache(points: np.ndarray, name: str) -> dict:
     key = _cache_key(points, name)
     bbox = _points_bbox(points)
-    max_cache = int(os.getenv("AGNET_VIS_CACHE_SIZE", "64"))
+    max_cache = int(os.getenv("AGNET_VIS_CACHE_SIZE", "512"))
     verbose = bool(int(os.getenv("AGNET_VIS_CACHE_VERBOSE", "0")))
     max_threads = int(os.getenv("AGNET_VIS_THREADS", "0"))
 
@@ -165,15 +165,15 @@ def _get_or_build_vis_cache(points: np.ndarray, name: str) -> dict:
                         print(f"[vis-cache] visibility failed at guard {err_idx} for {name}", file=sys.stderr)
                     guard_visibility_cache[guard_idx] = skgeom.PolygonSet()
 
+    # Free CGAL C++ objects in controlled order to avoid double-free
+    # (TriangularExpansionVisibility holds internal ref to Arrangement;
+    #  destroying them in wrong order corrupts the heap)
+    del vs, arr, poly, edges
+
     cache = {
         "invalid": False,
         "n": n,
         "bbox": bbox,
-        "poly": poly,
-        "arr": arr,
-        "vs": vs,
-        "edges": edges,
-        "eps": eps,
         "poly_area": poly_area,
         "guard_visibility_cache": guard_visibility_cache,
         "coverage_cache": {},

@@ -91,7 +91,9 @@ class PointerNet(nn.Module):
             use_tanh,
             attention,
             use_cuda=USE_CUDA,
-            temperature=1.0):
+            temperature=1.0,
+            eos_logit_bias_init=None,
+            eos_logit_bias_learnable=False):
         super(PointerNet, self).__init__()
         
         self.embedding_size = embedding_size
@@ -118,6 +120,16 @@ class PointerNet(nn.Module):
                 param.data.uniform_(-0.08, 0.08)
         
         self.eos_token = -1  # EOS index (will be appended to input)
+
+        # Optional EOS logit bias — positive init encourages stopping
+        # By default registered as a buffer (non-learnable, but saved in state_dict)
+        if eos_logit_bias_init is not None:
+            if eos_logit_bias_learnable:
+                self.eos_logit_bias = nn.Parameter(torch.tensor(float(eos_logit_bias_init)))
+            else:
+                self.register_buffer('eos_logit_bias', torch.tensor(float(eos_logit_bias_init)))
+        else:
+            self.eos_logit_bias = None
         
     def apply_mask_to_logits(self, logits, mask, idxs, lengths=None): 
         batch_size = logits.size(0)
@@ -161,7 +173,7 @@ class PointerNet(nn.Module):
         
         return masked_logits, clone_mask
             
-    def forward(self, inputs, padding_mask=None, lengths=None):
+    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False):
         """
         Args: 
             inputs: [batch_size x num_points x 2]
@@ -221,6 +233,15 @@ class PointerNet(nn.Module):
                 query = torch.bmm(ref, F.softmax(logits, dim=1).unsqueeze(2)).squeeze(2)
             _, logits = self.pointer(query, encoder_outputs)
             logits, mask = self.apply_mask_to_logits(logits, mask, idxs, lengths)
+            # Apply learnable EOS logit bias (makes stopping more likely)
+            if self.eos_logit_bias is not None and lengths is not None:
+                eos_bias_vec = torch.zeros_like(logits)
+                for b in range(batch_size):
+                    if not finished[b]:
+                        eos_pos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                        if not mask[b, eos_pos]:
+                            eos_bias_vec[b, eos_pos] = 1.0
+                logits = logits + eos_bias_vec * self.eos_logit_bias
             # Safety: if all logits are -inf for a sample, unmask EOS
             for b in range(batch_size):
                 actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
@@ -237,7 +258,10 @@ class PointerNet(nn.Module):
                         if nan_rows[b]:
                             actual_eos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
                             probs[b, actual_eos] = 1.0
-            idxs = probs.multinomial(1).squeeze(1)
+            if deterministic:
+                idxs = torch.argmax(probs, dim=1)
+            else:
+                idxs = probs.multinomial(1).squeeze(1)
             
             for b in range(batch_size):
                 if not finished[b]:
@@ -268,7 +292,9 @@ class CombinatorialRL(nn.Module):
             reward,
             attention,
             use_cuda=USE_CUDA,
-            temperature=1.0):
+            temperature=1.0,
+            eos_logit_bias_init=None,
+            eos_logit_bias_learnable=False):
         super(CombinatorialRL, self).__init__()
         self.reward = reward
         self.use_cuda = use_cuda
@@ -282,14 +308,16 @@ class CombinatorialRL(nn.Module):
                 use_tanh,
                 attention,
                 use_cuda,
-                temperature)
+                temperature,
+                eos_logit_bias_init=eos_logit_bias_init,
+                eos_logit_bias_learnable=eos_logit_bias_learnable)
 
 
-    def forward(self, inputs, padding_mask=None, lengths=None):
+    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False):
         """
         Run the PointerNet actor with padding_mask and lengths to ignore padded vertices and return selected guard indices and log-probabilities for REINFORCE.
         """
-        action_idxs, log_probs = self.actor(inputs, padding_mask=padding_mask, lengths=lengths)
+        action_idxs, log_probs = self.actor(inputs, padding_mask=padding_mask, lengths=lengths, deterministic=deterministic)
         return action_idxs, log_probs
 
 
@@ -340,7 +368,8 @@ class CriticNet(nn.Module):
 
 
 def create_actor(embedding_size, hidden_size, seq_len, n_glimpses, 
-                tanh_exploration, use_tanh, attention_type, reward_fn, temperature=1.0):
+                tanh_exploration, use_tanh, attention_type, reward_fn, temperature=1.0,
+                eos_logit_bias_init=None, eos_logit_bias_learnable=False):
     """Create and initialize a TSP model"""
     model = CombinatorialRL(
         embedding_size,
@@ -352,7 +381,9 @@ def create_actor(embedding_size, hidden_size, seq_len, n_glimpses,
         reward_fn,
         attention=attention_type,
         use_cuda=USE_CUDA,
-        temperature=temperature)
+        temperature=temperature,
+        eos_logit_bias_init=eos_logit_bias_init,
+        eos_logit_bias_learnable=eos_logit_bias_learnable)
     
     if USE_CUDA:
         model = model.cuda()

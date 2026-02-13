@@ -9,6 +9,7 @@ A comprehensive implementation of multiple algorithms for the Art Gallery Proble
 1. [Overview](#overview)
 2. [Problem Definition](#problem-definition)
 3. [Methods Implemented](#methods-implemented)
+   - [3b. RL v2 — Weighted-Sum Reward](#3b-reinforcement-learning-v2--weighted-sum-reward-rl_agp_v2py--new)
 4. [Installation](#installation)
 5. [Quick Start](#quick-start)
 6. [Evaluation (Recommended)](#evaluation-recommended)
@@ -173,6 +174,147 @@ python rl_agp.py --critic --epochs 30 --train-size 8000 --batch-size 1
 **Variants**:
 - `reinforce_train_ema()`: REINFORCE with EMA baseline
 - `reinforce_train_critic()`: Actor-critic with learned value network
+
+---
+
+### 3b. Reinforcement Learning v2 — Weighted-Sum Reward (`rl_agp_v2.py`) ✨ NEW
+
+**Approach**: Improved additive RL that fixes critical instabilities in v1. The model learns to output a variable-length guard set in a single autoregressive pass, terminated by an EOS token, optimised with REINFORCE and a carefully designed weighted-sum reward.
+
+#### Architecture
+
+**Pointer Network** with Bahdanau attention, LSTM encoder/decoder, and an explicit **EOS (end-of-sequence) token**:
+
+```
+Input:  Polygon vertices  V = {v₁, …, vₙ}  (2D coordinates)
+Append: EOS token (zero vector)  →  V' = {v₁, …, vₙ, v_EOS}
+Encode: bi-LSTM produces hidden states  h₁, …, hₙ₊₁
+Decode: At each step t, attention over encoder states produces
+        pointer logits  u_t ∈ ℝⁿ⁺¹, softmax → π(aₜ | a<t, V)
+        If aₜ = EOS  →  stop (variable-length output)
+Output: Guard set  S = {aₜ : aₜ ≠ EOS}
+```
+
+Key architectural element — **EOS logit bias**:
+- A constant bias $b$ (default 2.0) is added to the EOS logit before softmax at every decoding step
+- Registered as a non-learnable `register_buffer` (not `nn.Parameter`)
+- At initialisation, attention logits are ~$\mathcal{N}(0, 0.5)$ so $b=2.0$ gives $P(\text{EOS}) \approx e^{2} / (n \cdot e^{0} + e^{2}) \approx 5.5\%$ per step
+- This produces an expected initial guard set size of ~18 guards — a reasonable starting point for exploration
+- **Why non-learnable**: Noisy REINFORCE gradients destroy a learnable EOS bias within a few epochs, collapsing the policy to either "all guards" or "zero guards"
+
+#### Reward Design
+
+**Weighted-sum reward** — simple, no degenerate optima:
+
+$$R(S) = \text{Coverage}(S) - w_g \cdot \frac{|S|}{n}$$
+
+where:
+- $\text{Coverage}(S) \in [0, 1]$ = fraction of polygon area visible from guard set $S$
+- $|S|/n \in [0, 1]$ = fraction of vertices selected as guards  
+- $w_g$ = `guard_weight` parameter (default 0.5)
+
+**Why this works** (no degenerate optima):
+- **Zero guards**: $R(\emptyset) = 0 - 0 = 0$ — not optimal because any single good guard gives $R > 0$
+- **All guards**: $R(V) = 1.0 - w_g \cdot 1.0 = 1 - w_g$ — suboptimal for $w_g > 0$ because removing redundant guards reduces cost more than it reduces coverage
+- **Optimal**: The model must find the sweet spot — enough guards for high coverage, few enough to minimise cost
+
+**Previous reward attempts and why they failed**:
+1. **Hysteresis reward** (v1): $w_c \cdot \text{cov}^p - w_g \cdot (|S|/n) \cdot \text{cov}$ — no penalty when coverage is low, so "all guards" is a stable attractor
+2. **Lagrangian hinge**: $R = \text{cov} - \lambda \cdot \max(0, |S|/n - \tau)$ with dual updates — when $\tau_{\text{start}}=0, \lambda_{\text{init}}=0$, zero guards has $R=0$ which is optimal under no constraint pressure; model collapses deterministically and cannot recover
+
+#### Training Stabilisation
+
+Several mechanisms prevent the known failure modes of REINFORCE with pointer networks:
+
+| Mechanism | What it does | What happens without it |
+|-----------|-------------|------------------------|
+| **EMA baseline init from first batch** | Initialises moving average baseline to `mean(R)` of first batch instead of 0 | Cold-start at 0 makes all early advantages negative → policy collapses |
+| **Non-learnable EOS bias** | Constant added to EOS logit, no gradient | Noisy gradients push EOS bias to extreme → deterministic collapse |
+| **Entropy bonus** | $+\alpha \cdot \mathbb{E}[\log \pi]$ added to loss (encourages exploration) | Policy sharpens too fast, locks into suboptimal deterministic output |
+| **Gradient clipping** | `clip_grad_norm_(params, 1.0)` | Occasional large-reward episodes cause destructive parameter updates |
+| **Best-of-K rollouts** | Sample $K$ solutions per polygon, use best reward | Reduces variance; bad samples don't dominate the gradient |
+
+#### REINFORCE Update
+
+For each polygon, sample $K$ guard sets $S_1, \ldots, S_K$, keep the best:
+
+$$S^* = \arg\max_{k} R(S_k)$$
+
+Policy gradient with EMA baseline $\bar{R}$:
+
+$$\nabla_\theta J = \mathbb{E}\left[(R(S^*) - \bar{R}) \cdot \nabla_\theta \log \pi_\theta(S^*)\right]$$
+
+$$\bar{R} \leftarrow \beta \cdot \bar{R} + (1-\beta) \cdot R(S^*) \quad (\beta = 0.99)$$
+
+Loss with entropy bonus:
+
+$$\mathcal{L} = -\left[(R - \bar{R}) \cdot \log \pi(S^*)\right] + \alpha \cdot \log \pi(S^*)$$
+
+where $\alpha$ = `entropy_weight` (default 0.01).
+
+#### Configuration
+
+Training uses a JSON config file with CLI overrides. CLI arguments always take priority over config values.
+
+**Default config** (`configs/rl_agp_v2_train.json`):
+```json
+{
+    "epochs": 30,
+    "batch_size": 128,
+    "lr": 0.001,
+    "beta": 0.99,
+    "temperature": 1.0,
+    "train_size": 8000,
+    "epoch_eval_k": 100,
+    "checkpoint_dir": "checkpoints/v2",
+    "multi_start": 4,
+    "baseline": "ema",
+    "guard_weight": 0.5,
+    "eos_bias_init": 2.0,
+    "entropy_weight": 0.01,
+    "grad_clip": 1.0
+}
+```
+
+**Key hyperparameters**:
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `guard_weight` | 0.5 | Higher → fewer guards, lower coverage |
+| `eos_bias_init` | 2.0 | Higher → shorter sequences at init; 0 → ~n/2 guards |
+| `entropy_weight` | 0.01 | Higher → more exploration, slower convergence |
+| `multi_start` | 4 | More rollouts per polygon → lower variance, slower |
+| `beta` | 0.99 | EMA decay; higher → more stable baseline, slower adaptation |
+
+#### Usage
+
+```bash
+# Basic training (small run for testing)
+python rl_agp_v2.py --config configs/rl_agp_v2_train.json \
+    --checkpoint-dir checkpoints/v2/run_01 \
+    --epochs 10 --train-size 200 --batch-size 32
+
+# Full training
+python rl_agp_v2.py --config configs/rl_agp_v2_train.json \
+    --checkpoint-dir checkpoints/v2/run_01
+
+# Resume from checkpoint (train 10 more epochs, to epoch 30 total)
+python rl_agp_v2.py --config configs/rl_agp_v2_train.json \
+    --checkpoint-dir checkpoints/v2/run_01 \
+    --epochs 30 \
+    --resume-from checkpoints/v2/run_01/rl_agp_ema_intermediate_epoch20.pt
+```
+
+#### Evaluation Output
+
+Each epoch reports both **greedy** (deterministic argmax) and **stochastic** (sampled) metrics:
+
+```
+[epoch 7] greedy | cov=0.154 | |S|/opt=0.08 | |S|/n=0.011  stoch | cov=0.602 | |S|/n=0.134
+```
+
+- **Greedy `|S|/n=0.000` early on is expected**: The EOS bias dominates freshly initialised attention logits in argmax mode. The stochastic metrics show true learning progress.
+- **Stochastic coverage ~0.55–0.60**: The policy is exploring and learning which guards provide good coverage.
+- As training progresses, attention logits grow large enough to override the EOS bias, and greedy metrics will start showing non-zero values.
 
 ---
 
