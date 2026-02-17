@@ -221,16 +221,22 @@ def pomo_reward_smooth(
     lam: float = 0.2,
     tau: float = 0.99,
     tau_penalty: float = 5.0,
+    cap_at_tau: bool = False,
 ) -> float:
     """Smooth, monotone reward for POMO training.
 
-    r = coverage − λ · (|S|/n) − π · max(0, τ − coverage)
+    Default mode:
+        r = coverage − λ · (|S|/n) − π · max(0, τ − coverage)
 
-    Properties that make it POMO-friendly:
-    - Always increases when coverage increases (holding |S| fixed).
-    - Always increases when |S| decreases (holding coverage fixed).
-    - No mode-switching: both terms are always active.
-    - The deficit penalty steepens the gradient toward full coverage.
+    Capped mode (cap_at_tau=True):
+        r = min(coverage, τ) − λ · (|S|/n) − π · max(0, τ − coverage)
+
+    With cap_at_tau, once coverage ≥ τ the reward becomes
+        r = τ − λ · (|S|/n)
+    so extra coverage above the threshold yields *zero* marginal
+    reward.  The only way to increase reward is to reduce |S|.
+    This prevents the model from inflating the guard set to chase
+    marginal coverage improvements.
 
     Args:
         points:      (N, 2) polygon vertices.
@@ -240,6 +246,7 @@ def pomo_reward_smooth(
         lam:         Weight for the guard-sparsity penalty.
         tau:         Coverage feasibility threshold.
         tau_penalty: Linear penalty weight for coverage below tau.
+        cap_at_tau:  If True, cap coverage reward at tau.
 
     Returns:
         Scalar reward (float).
@@ -256,7 +263,8 @@ def pomo_reward_smooth(
         coverage = 0.0
     guard_ratio = len(sol) / max(1, n)
 
-    r = coverage - lam * guard_ratio
+    effective_cov = min(coverage, tau) if cap_at_tau else coverage
+    r = effective_cov - lam * guard_ratio
     deficit = max(0.0, tau - coverage)
     r -= tau_penalty * deficit
     return float(r)
@@ -271,6 +279,7 @@ def pomo_reward_smooth_meta(
     lam: float = 0.2,
     tau: float = 0.99,
     tau_penalty: float = 5.0,
+    cap_at_tau: bool = False,
 ) -> tuple[float, dict]:
     """Same as pomo_reward_smooth but also returns a metadata dict."""
     n = length if length else len(points)
@@ -289,7 +298,8 @@ def pomo_reward_smooth_meta(
     except Exception:
         coverage = 0.0
     guard_ratio = len(sol) / max(1, n)
-    r = coverage - lam * guard_ratio - tau_penalty * max(0.0, tau - coverage)
+    effective_cov = min(coverage, tau) if cap_at_tau else coverage
+    r = effective_cov - lam * guard_ratio - tau_penalty * max(0.0, tau - coverage)
     regime = "feasible" if coverage >= tau else "infeasible"
     return float(r), {
         "coverage": float(coverage),
@@ -336,6 +346,8 @@ def augment_xy(xy: torch.Tensor, aug_idx: int) -> torch.Tensor:
 #  3.  POMO rollouts (batched, length-normalized log-probs)
 # ===================================================================
 
+_budget_logged_once = True   # one-shot diagnostic flag
+
 def _pomo_rollouts(
     model: torch.nn.Module,
     batch_data: torch.Tensor,
@@ -346,7 +358,8 @@ def _pomo_rollouts(
     K: int,
     episode_log: bool = False,
     normalize_log_probs: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    max_guard_ratio: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run K stochastic rollouts per instance.
 
     The batch is expanded K-fold along dim 0, processed in a *single*
@@ -359,8 +372,10 @@ def _pomo_rollouts(
 
     Returns
     -------
-    rewards :   (B, K) float tensor -- non-differentiable.
-    log_probs : (B, K) float tensor -- differentiable (for REINFORCE).
+    rewards :       (B, K) float tensor -- non-differentiable.
+    log_probs :     (B, K) float tensor -- length-normalized, for REINFORCE.
+    log_probs_raw : (B, K) float tensor -- un-normalized sum log-probs,
+                    for entropy bonus (so EOS confidence is not penalized).
     """
     B = batch_data.size(0)
     device = batch_data.device
@@ -371,19 +386,39 @@ def _pomo_rollouts(
     exp_lengths = lengths.repeat_interleave(K)              # (B*K,)
 
     # -- single forward pass --
-    all_idxs, all_log_probs = model(
-        exp_data, padding_mask=exp_mask, lengths=exp_lengths,
-        deterministic=False,
-    )
-    # all_log_probs: (B*K,), all_idxs: list of B*K index lists
+    # Compute per-sample guard budget from Art Gallery Theorem ratio.
+    # Each polygon gets its own ⌊n_i * ratio⌋ budget.
+    global _budget_logged_once
+    if max_guard_ratio is not None:
+        max_decode_steps = (exp_lengths.float() * max_guard_ratio).clamp(min=1).long()
+        if _budget_logged_once:
+            _budget_logged_once = False
+            print(f"[budget] max_guard_ratio={max_guard_ratio}, "
+                  f"budgets min={max_decode_steps.min().item()} "
+                  f"max={max_decode_steps.max().item()} "
+                  f"(lengths min={exp_lengths.min().item()} "
+                  f"max={exp_lengths.max().item()})")
+    else:
+        max_decode_steps = None
+        if _budget_logged_once:
+            _budget_logged_once = False
+            print("[budget] WARNING: max_guard_ratio is None — no budget enforced!")
 
-    # -- length-normalize log-probs (v2 feature) --
+    all_idxs, all_log_probs_raw = model(
+        exp_data, padding_mask=exp_mask, lengths=exp_lengths,
+        deterministic=False, max_decode_steps=max_decode_steps,
+    )
+    # all_log_probs_raw: (B*K,), all_idxs: list of B*K index lists
+
+    # -- length-normalize log-probs for REINFORCE (v2 feature) --
     if normalize_log_probs:
         step_counts = torch.tensor(
             [max(1, len(idxs)) for idxs in all_idxs],
             dtype=torch.float32, device=device,
         )
-        all_log_probs = all_log_probs / step_counts
+        all_log_probs_norm = all_log_probs_raw / step_counts
+    else:
+        all_log_probs_norm = all_log_probs_raw
 
     # -- pre-extract per-instance numpy points --
     pts_cache: list[np.ndarray] = []
@@ -400,8 +435,9 @@ def _pomo_rollouts(
         r = reward_fn(pts_cache[b_idx], sol, batch_names[b_idx], length=n)
         rewards_flat.append(float(r))
 
-    rewards   = torch.tensor(rewards_flat, dtype=torch.float32, device=device).view(B, K)
-    log_probs = all_log_probs.view(B, K)
+    rewards        = torch.tensor(rewards_flat, dtype=torch.float32, device=device).view(B, K)
+    log_probs      = all_log_probs_norm.view(B, K)
+    log_probs_raw  = all_log_probs_raw.view(B, K)
 
     # -- optional episode logging (first 2 instances) --
     if episode_log and B > 0:
@@ -420,7 +456,7 @@ def _pomo_rollouts(
                 f"r={rewards[b, best_k].item():.4f}"
             )
 
-    return rewards, log_probs
+    return rewards, log_probs, log_probs_raw
 
 
 # ===================================================================
@@ -448,6 +484,7 @@ def pomo_train(
     collapse_patience: int = 3,
     collapse_min_good_cov: float = 0.5,
     collapse_low_cov: float = 0.3,
+    max_guard_ratio: float | None = None,
 ) -> None:
     """Train *model* with POMO (Algorithm 1 from the paper).
 
@@ -526,22 +563,33 @@ def pomo_train(
             lens_t     = torch.tensor(lens, dtype=torch.long, device=device)
 
             # -- POMO rollouts --
-            rewards, log_probs = _pomo_rollouts(
+            rewards, log_probs, log_probs_raw = _pomo_rollouts(
                 model, batch_data, pad_mask, lens_t, names,
                 reward_fn, K, episode_log=episode_log,
+                max_guard_ratio=max_guard_ratio,
             )
 
             # -- shared baseline + advantages --
             baseline   = rewards.mean(dim=1, keepdim=True)   # (B, 1)
             advantages = rewards - baseline                   # (B, K)
 
-            # -- REINFORCE loss --
+            # -- per-instance advantage normalization --
+            # Divide by std across the K rollouts for each instance.
+            # Without this, easy instances (small advantage spread)
+            # get drowned out by hard ones, and the gradient is
+            # dominated by "just add more guards for hard polygons."
+            # This is standard in POMO / modern PG implementations.
+            adv_std = advantages.std(dim=1, keepdim=True) + 1e-8
+            advantages = advantages / adv_std
+
+            # -- REINFORCE loss (uses length-normalized log-probs) --
             pg_loss = -(log_probs * advantages).mean()
 
-            # -- Entropy bonus (v2 feature) --
-            # log_probs are negative sums of per-step log P(action).
-            # More negative = more spread out = higher entropy = good.
-            # We want to MAXIMIZE entropy, i.e. push log_probs more negative.
+            # -- Entropy bonus --
+            # Use per-step (length-normalized) log-probs to avoid an
+            # artificial incentive for longer trajectories. With raw
+            # summed log-probs, the model can reduce loss by increasing
+            # decode length even when solution quality worsens.
             ent_bonus = entropy_weight * log_probs.mean() if entropy_weight > 0 else 0.0
             loss = pg_loss + ent_bonus
 
@@ -565,7 +613,7 @@ def pomo_train(
                     best_r=f"{rewards.max(dim=1).values.mean().item():.3f}",
                 )
 
-            del batch_data, pad_mask, lens_t, rewards, log_probs
+            del batch_data, pad_mask, lens_t, rewards, log_probs, log_probs_raw
             torch.cuda.empty_cache()
 
         # -- epoch summary --
@@ -675,6 +723,7 @@ def evaluate_pomo(
     aug_factor: int = 1,
     reward_fn: Callable | None = None,
     eval_k: int | None = None,
+    max_guard_ratio: float | None = None,
 ) -> list[dict]:
     """Evaluate using POMO rollouts + optional dihedral augmentation.
 
@@ -708,9 +757,11 @@ def evaluate_pomo(
         t0 = time.perf_counter()
 
         # -- deterministic (greedy) decode --
+        budget = max(1, int(n * max_guard_ratio)) if max_guard_ratio is not None else None
         det_idxs, _ = model(
             batch_data, padding_mask=pad_mask,
             lengths=lens_t, deterministic=True,
+            max_decode_steps=budget,
         )
         det_sol = [idx for idx in det_idxs[0] if idx < n]
         det_cov = 0.0
@@ -738,6 +789,7 @@ def evaluate_pomo(
             all_idxs, _ = model(
                 exp_data, padding_mask=exp_mask,
                 lengths=exp_lengths, deterministic=False,
+                max_decode_steps=budget,
             )
 
             for k_idx in range(K):
@@ -825,7 +877,7 @@ def main() -> None:
     g_model.add_argument("--use-tanh",         action="store_true", default=True)
     g_model.add_argument("--temperature",      type=float, default=1.0)
     g_model.add_argument("--eos-bias-init",    type=float, default=None,
-                         help="Initial EOS logit bias (e.g. 0.9). None = no bias.")
+                         help="Initial EOS logit bias (e.g. 0.3). None = no bias.")
     g_model.add_argument("--eos-bias-learnable", action="store_true", default=False,
                          help="Make EOS bias a learnable parameter.")
 
@@ -838,12 +890,19 @@ def main() -> None:
 
     # -- Reward --
     g_rew = p.add_argument_group("Reward")
-    g_rew.add_argument("--reward-lambda",      type=float, default=0.24,
+    g_rew.add_argument("--reward-lambda",      type=float, default=1.0,
                        help="Guard-sparsity penalty weight lambda")
     g_rew.add_argument("--coverage-threshold", type=float, default=0.99,
                        help="Coverage feasibility threshold tau")
-    g_rew.add_argument("--tau-penalty",        type=float, default=5.0,
+    g_rew.add_argument("--tau-penalty",        type=float, default=3.0,
                        help="Linear penalty weight for coverage < tau")
+    g_rew.add_argument("--cap-coverage",        action="store_true", default=True,
+                       help="Cap coverage reward at tau (no credit above threshold).")
+    g_rew.add_argument("--no-cap-coverage",     dest="cap_coverage", action="store_false",
+                       help="Disable coverage cap (original uncapped reward).")
+    g_rew.add_argument("--max-guard-ratio",     type=float, default=0.34,
+                       help="Max guards as fraction of n (0.34 ≈ ⌊n/3⌋ from Art Gallery Thm). "
+                            "Set to 0 or None to disable.")
 
     # -- Training --
     g_train = p.add_argument_group("Training")
@@ -851,7 +910,7 @@ def main() -> None:
     g_train.add_argument("--batch-size",       type=int,   default=64)
     g_train.add_argument("--lr",               type=float, default=2e-4)
     g_train.add_argument("--max-grad-norm",    type=float, default=0.5)
-    g_train.add_argument("--entropy-weight",   type=float, default=0.035,
+    g_train.add_argument("--entropy-weight",   type=float, default=0.0,
                          help="Entropy bonus weight to prevent policy collapse.")
     g_train.add_argument("--train-size",       type=int,   default=8000)
     g_train.add_argument("--epoch-eval-k",     type=int,   default=200,
@@ -881,12 +940,19 @@ def main() -> None:
             "epochs", "batch_size", "lr", "temperature", "train_size",
             "epoch_eval_k", "resume_from", "checkpoint_dir", "pomo_k",
             "aug_factor", "reward_lambda", "coverage_threshold",
-            "tau_penalty", "eos_bias_init", "eos_bias_learnable",
-            "entropy_weight", "max_grad_norm",
+            "tau_penalty", "cap_coverage", "eos_bias_init",
+            "eos_bias_learnable", "entropy_weight", "max_grad_norm",
+            "max_guard_ratio",
         ]
         _apply_config_to_args(args, config, defaults, config_keys, explicit_args)
 
     vprint = print if args.verbose else (lambda *a, **kw: None)
+
+    # -- resolve max_guard_ratio --
+    mgr = args.max_guard_ratio
+    if mgr is not None and mgr <= 0:
+        mgr = None
+    vprint(f"[config] max_guard_ratio={mgr}")
 
     # -- datasets --
     vprint("[phase] preparing datasets")
@@ -934,9 +1000,10 @@ def main() -> None:
         vprint(f"  -> resumed at epoch {start_epoch}")
 
     # -- reward function (closed over CLI args) --
-    lam     = args.reward_lambda
-    tau     = args.coverage_threshold
-    tau_pen = args.tau_penalty
+    lam      = args.reward_lambda
+    tau      = args.coverage_threshold
+    tau_pen  = args.tau_penalty
+    cap_cov  = args.cap_coverage
 
     def reward_fn(
         points: np.ndarray,
@@ -947,6 +1014,7 @@ def main() -> None:
         return pomo_reward_smooth(
             points, solution, name, length=length,
             lam=lam, tau=tau, tau_penalty=tau_pen,
+            cap_at_tau=cap_cov,
         )
 
     # -- epoch eval callback (v2 feature: dual greedy+stoch, returns dict) --
@@ -959,6 +1027,7 @@ def main() -> None:
             model, small_train, args.agp_train_dir,
             K=args.pomo_k, aug_factor=1,
             reward_fn=reward_fn, eval_k=ek,
+            max_guard_ratio=mgr,
         )
         # Greedy metrics
         covs_g = [x["coverage_greedy"] for x in per if x.get("coverage_greedy") is not None]
@@ -1031,6 +1100,7 @@ def main() -> None:
             max_grad_norm=args.max_grad_norm,
             entropy_weight=args.entropy_weight,
             resume_optimizer_state=resume_optimizer_state,
+            max_guard_ratio=mgr,
         )
     else:
         vprint(
@@ -1061,6 +1131,7 @@ def main() -> None:
         K=args.pomo_k,
         aug_factor=args.aug_factor,
         reward_fn=reward_fn,
+        max_guard_ratio=mgr,
     )
     report = make_report(
         method="pomo_agp",

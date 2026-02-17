@@ -173,12 +173,18 @@ class PointerNet(nn.Module):
         
         return masked_logits, clone_mask
             
-    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False):
+    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None):
         """
         Args: 
             inputs: [batch_size x num_points x 2]
             padding_mask: [batch_size x num_points] (True for real, False for pad)
             lengths: list or tensor of ints, true number of vertices per sample
+            max_decode_steps: int, 1-D LongTensor of shape (batch_size,), or
+                None.  Limits the maximum number of guard selections per
+                instance (excluding the EOS step itself).  A scalar int is
+                broadcast to every sample; a per-sample tensor lets each
+                polygon use its own ⌊n/3⌋ budget.
+                When a sample reaches its budget, EOS is forced.
         Returns:
             output_idxs: list of [num_selected_guards] tensors, one per instance, with EOS as end
         """
@@ -222,6 +228,19 @@ class PointerNet(nn.Module):
         output_idxs = [[] for _ in range(batch_size)]
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
         max_steps = total_len  # allow up to N+1 selections
+
+        # Per-sample guard budget from Art Gallery Theorem bound or user limit.
+        # When a sample selects this many non-EOS guards, force EOS next step.
+        if max_decode_steps is not None:
+            if torch.is_tensor(max_decode_steps):
+                per_sample_budget = max_decode_steps.to(dtype=torch.long, device=device)
+            else:
+                per_sample_budget = torch.full((batch_size,), int(max_decode_steps),
+                                              dtype=torch.long, device=device)
+        else:
+            per_sample_budget = None
+        non_eos_counts = torch.zeros(batch_size, dtype=torch.long, device=device)
+
         log_probs_list = [[] for _ in range(batch_size)]
         for step in range(max_steps):
             _, (hidden, context) = self.decoder(decoder_input.unsqueeze(1), (hidden, context))
@@ -242,6 +261,15 @@ class PointerNet(nn.Module):
                         if not mask[b, eos_pos]:
                             eos_bias_vec[b, eos_pos] = 1.0
                 logits = logits + eos_bias_vec * self.eos_logit_bias
+
+            # Budget enforcement: if a sample has used all its non-EOS budget,
+            # mask everything except EOS so only EOS can be selected.
+            if per_sample_budget is not None and lengths is not None:
+                for b in range(batch_size):
+                    if not finished[b] and non_eos_counts[b] >= per_sample_budget[b]:
+                        eos_pos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                        logits[b, :] = float('-inf')
+                        logits[b, eos_pos] = 0.0  # only EOS allowed
             # Safety: if all logits are -inf for a sample, unmask EOS
             for b in range(batch_size):
                 actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
@@ -272,6 +300,8 @@ class PointerNet(nn.Module):
                     actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
                     if idxs[b].item() == actual_eos:
                         finished[b] = True
+                    else:
+                        non_eos_counts[b] += 1
             selected_mask = F.one_hot(idxs, total_len).bool()
             mask = mask | selected_mask
             decoder_input = embedded[torch.arange(batch_size), idxs, :]
@@ -313,11 +343,11 @@ class CombinatorialRL(nn.Module):
                 eos_logit_bias_learnable=eos_logit_bias_learnable)
 
 
-    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False):
+    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None):
         """
         Run the PointerNet actor with padding_mask and lengths to ignore padded vertices and return selected guard indices and log-probabilities for REINFORCE.
         """
-        action_idxs, log_probs = self.actor(inputs, padding_mask=padding_mask, lengths=lengths, deterministic=deterministic)
+        action_idxs, log_probs = self.actor(inputs, padding_mask=padding_mask, lengths=lengths, deterministic=deterministic, max_decode_steps=max_decode_steps)
         return action_idxs, log_probs
 
 
