@@ -43,6 +43,7 @@ import os
 import sys
 import time
 import argparse
+import random
 from typing import Callable, Dict, List
 
 import numpy as np
@@ -62,7 +63,7 @@ except ImportError:
 
 from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor
-from utils import evaluate_polygon_visibility_numpy_wo_gt
+from utils import evaluate_polygon_visibility_numpy_wo_gt, _get_or_build_vis_cache
 from eval_reporting import make_report
 
 
@@ -106,6 +107,14 @@ def _get_explicit_args(parser: argparse.ArgumentParser, argv: List[str]) -> set:
                 explicit.add(action.dest)
                 break
     return explicit
+
+
+def _set_global_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _apply_config_to_args(args, config: Dict, defaults: Dict,
@@ -233,6 +242,82 @@ def po_reward_smooth(
     return float(r)
 
 
+def permutation_reward(
+    points: np.ndarray,
+    permutation: list[int],
+    name: str,
+    length: int | None = None,
+    *,
+    lam: float = 0.2,
+    tau: float = 0.99,
+    tau_penalty: float = 5.0,
+    cap_at_tau: bool = True,
+) -> float:
+    """Dense reward for a full vertex permutation (ranking formulation).
+
+    Evaluates every prefix π[0..k] and returns the best smooth score:
+
+        r_k = min(cov_k, τ) - λ·(k/n) - π·max(0, τ - cov_k)   (if cap_at_tau)
+        r_k = cov_k         - λ·(k/n) - π·max(0, τ - cov_k)   (otherwise)
+
+    Final reward is  max_k r_k, which provides dense learning signal even
+    when no prefix reaches τ early in training.
+    """
+    n = length if length else len(points)
+    pts = points[:n] if length else points
+
+    if not permutation:
+        return float(-tau_penalty)
+
+    # Filter permutation to valid vertex indices
+    perm = [v for v in permutation if 0 <= v < n]
+    if not perm:
+        return float(-tau_penalty)
+
+    # Fast path: incremental union using prebuilt per-guard visibility cache.
+    try:
+        vcache = _get_or_build_vis_cache(pts, name)
+        if not vcache.get("invalid"):
+            import skgeom
+            guard_vis = vcache["guard_visibility_cache"]
+            poly_area = float(vcache["poly_area"])
+            cov_cache = vcache["coverage_cache"]
+
+            best_r = -float("inf")
+            union = skgeom.PolygonSet()
+            current_set: set[int] = set()
+            for k, v in enumerate(perm, start=1):
+                if v not in current_set:
+                    current_set.add(v)
+                    if v in guard_vis:
+                        union = union.union(guard_vis[v])
+                cov = (_union_area(union) / poly_area) if poly_area > 0 else 0.0
+                cov_cache[tuple(sorted(current_set))] = cov
+                cov_eff = min(cov, tau) if cap_at_tau else cov
+                r_k = cov_eff - lam * (k / max(1, n)) - tau_penalty * max(0.0, tau - cov)
+                if r_k > best_r:
+                    best_r = r_k
+
+            return float(best_r)
+    except Exception:
+        pass
+
+    # Fallback path: direct coverage calls per prefix.
+    best_r = -float("inf")
+    for k in range(1, len(perm) + 1):
+        prefix = np.array(perm[:k], dtype=np.int64)
+        try:
+            cov = evaluate_polygon_visibility_numpy_wo_gt(pts, prefix, name)
+        except Exception:
+            cov = 0.0
+        cov_eff = min(cov, tau) if cap_at_tau else cov
+        r_k = cov_eff - lam * (k / max(1, n)) - tau_penalty * max(0.0, tau - cov)
+        if r_k > best_r:
+            best_r = r_k
+
+    return float(best_r)
+
+
 # ===================================================================
 #  2.  Augmentation utilities  (dihedral group of the square)
 # ===================================================================
@@ -260,6 +345,69 @@ def augment_xy(xy: torch.Tensor, aug_idx: int) -> torch.Tensor:
 #  2b.  Local search (remove / add / swap)
 # ===================================================================
 
+def _union_area(polygon_set) -> float:
+    """Return the total area of a skgeom.PolygonSet."""
+    total = 0.0
+    for vis in polygon_set.polygons:
+        outer = abs(float(vis.outer_boundary().area()))
+        holes = sum(abs(float(h.area())) for h in vis.holes)
+        total += outer - holes
+    return total
+
+
+def _coverage_from_guard_vis(
+    guard_set: set,
+    guard_vis: dict,
+    poly_area: float,
+    coverage_cache: dict,
+) -> float:
+    """Compute coverage from prebuilt per-guard visibility polygons.
+
+    Uses `coverage_cache` (keyed by frozenset) to avoid redundant
+    CGAL union operations.
+    """
+    key = tuple(sorted(guard_set))
+    if key in coverage_cache:
+        return coverage_cache[key]
+    if not guard_set or poly_area <= 0:
+        coverage_cache[key] = 0.0
+        return 0.0
+    try:
+        import skgeom
+        union = skgeom.PolygonSet()
+        for g in key:
+            if g in guard_vis:
+                union = union.union(guard_vis[g])
+        cov = _union_area(union) / poly_area
+    except Exception:
+        cov = 0.0
+    coverage_cache[key] = cov
+    return cov
+
+
+def _reward_from_vis(
+    guard_set: set,
+    guard_vis: dict,
+    poly_area: float,
+    coverage_cache: dict,
+    n: int,
+    lam: float,
+    tau: float,
+    tau_penalty: float,
+    cap_at_tau: bool,
+) -> float:
+    """Cheap reward computation using local vis-cache (no round-trip to reward_fn)."""
+    if not guard_set:
+        return float(-tau_penalty)
+    cov = _coverage_from_guard_vis(guard_set, guard_vis, poly_area, coverage_cache)
+    guard_ratio = len(guard_set) / max(1, n)
+    effective_cov = min(cov, tau) if cap_at_tau else cov
+    r = effective_cov - lam * guard_ratio
+    deficit = max(0.0, tau - cov)
+    r -= tau_penalty * deficit
+    return float(r)
+
+
 def local_search_improve(
     points: np.ndarray,
     initial_guards: list[int],
@@ -269,6 +417,11 @@ def local_search_improve(
     *,
     max_iter: int = 50,
     enable_swap: bool = True,
+    # Optional reward params for fast vis-cache path
+    lam: float | None = None,
+    tau: float | None = None,
+    tau_penalty: float | None = None,
+    cap_at_tau: bool = False,
 ) -> tuple[list[int], float, dict]:
     """First-improvement hill-climb on the PO reward function.
 
@@ -278,14 +431,48 @@ def local_search_improve(
       3. SWAP   — replace a guard with a non-guard  (same |S|, may
                   improve coverage geometry).
 
+    When lam/tau/tau_penalty are provided, uses the prebuilt per-guard
+    visibility cache from _get_or_build_vis_cache for fast incremental
+    coverage evaluation (skips CGAL polygon construction per candidate).
+
     Returns
     -------
     guards  : sorted list of guard vertex indices.
     reward  : final reward value.
     stats   : dict with iteration count and move counts.
     """
+    # ── Try to get prebuilt vis cache for fast path ───────────────
+    use_fast = (
+        lam is not None and tau is not None and tau_penalty is not None
+    )
+    guard_vis: dict = {}
+    poly_area: float = 0.0
+    coverage_cache: dict = {}
+
+    if use_fast:
+        try:
+            vcache = _get_or_build_vis_cache(points, name)
+            if vcache.get("invalid"):
+                use_fast = False
+            else:
+                guard_vis = vcache["guard_visibility_cache"]
+                poly_area = vcache["poly_area"]
+                coverage_cache = vcache["coverage_cache"]  # shared with global LRU
+        except Exception:
+            use_fast = False
+
+    if use_fast:
+        def _r(gs: set) -> float:
+            return _reward_from_vis(
+                gs, guard_vis, poly_area, coverage_cache,
+                n, lam, tau, tau_penalty, cap_at_tau,  # type: ignore[arg-type]
+            )
+    else:
+        def _r(gs: set) -> float:
+            return reward_fn(points, sorted(gs), name, length=n)
+
     current = set(initial_guards)
-    current_r = reward_fn(points, sorted(current), name, length=n)
+    current_r = _r(current)
 
     n_remove = 0
     n_add    = 0
@@ -298,8 +485,7 @@ def local_search_improve(
         # ── Phase 1: REMOVE ──────────────────────────────────────
         if len(current) > 1:
             for g in sorted(current):
-                candidate = sorted(current - {g})
-                r = reward_fn(points, candidate, name, length=n)
+                r = _r(current - {g})
                 if r > current_r + 1e-9:
                     current.discard(g)
                     current_r = r
@@ -310,16 +496,57 @@ def local_search_improve(
             continue
 
         # ── Phase 2: ADD ─────────────────────────────────────────
-        best_add_v = -1
-        best_add_r = current_r
-        for v in range(n):
-            if v in current:
-                continue
-            candidate = sorted(current | {v})
-            r = reward_fn(points, candidate, name, length=n)
-            if r > best_add_r + 1e-9:
-                best_add_v = v
-                best_add_r = r
+        # Fast path: compute current_union once, then ADD is one extra union.
+        if use_fast:
+            try:
+                import skgeom
+                cur_key = tuple(sorted(current))
+                # Build current union once (likely cached; only keys matter here)
+                cur_union = skgeom.PolygonSet()
+                for g in cur_key:
+                    if g in guard_vis:
+                        cur_union = cur_union.union(guard_vis[g])
+
+                best_add_v = -1
+                best_add_r = current_r
+                for v in range(n):
+                    if v in current:
+                        continue
+                    # Incremental: union of current + {v}
+                    cand_key = tuple(sorted(current | {v}))
+                    if cand_key in coverage_cache:
+                        cov = coverage_cache[cand_key]
+                    else:
+                        cand_union = cur_union.union(guard_vis[v]) if v in guard_vis else cur_union
+                        cov = _union_area(cand_union) / poly_area if poly_area > 0 else 0.0
+                        coverage_cache[cand_key] = cov
+                    cov_eff = min(cov, tau) if cap_at_tau else cov  # type: ignore[arg-type]
+                    r = cov_eff - lam * (len(current) + 1) / max(1, n) - tau_penalty * max(0.0, tau - cov)  # type: ignore[operator]
+                    if r > best_add_r + 1e-9:
+                        best_add_v = v
+                        best_add_r = r
+            except Exception:
+                # Fall back to generic path for this ADD phase
+                best_add_v = -1
+                best_add_r = current_r
+                for v in range(n):
+                    if v in current:
+                        continue
+                    r = _r(current | {v})
+                    if r > best_add_r + 1e-9:
+                        best_add_v = v
+                        best_add_r = r
+        else:
+            best_add_v = -1
+            best_add_r = current_r
+            for v in range(n):
+                if v in current:
+                    continue
+                r = _r(current | {v})
+                if r > best_add_r + 1e-9:
+                    best_add_v = v
+                    best_add_r = r
+
         if best_add_v >= 0:
             current.add(best_add_v)
             current_r = best_add_r
@@ -333,8 +560,7 @@ def local_search_improve(
                 for v in range(n):
                     if v in current:
                         continue
-                    candidate = sorted((current - {g}) | {v})
-                    r = reward_fn(points, candidate, name, length=n)
+                    r = _r((current - {g}) | {v})
                     if r > current_r + 1e-9:
                         current.discard(g)
                         current.add(v)
@@ -495,13 +721,21 @@ def _po_rollouts(
     reward_fn: Callable,
     K: int,
     episode_log: bool = False,
+    no_eos: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run K stochastic rollouts per instance.
+
+    Parameters
+    ----------
+    no_eos : bool
+        If True, model produces full permutations (ranking mode).
+        All rollouts for one instance have the same length = n,
+        so no length-normalisation is needed.
 
     Returns
     -------
     rewards   : (B, K)  float -- non-differentiable.
-    log_probs : (B, K)  float -- length-normalised, for PO loss.
+    log_probs : (B, K)  float -- (length-normalised if EOS mode).
     """
     B = batch_data.size(0)
     device = batch_data.device
@@ -512,16 +746,20 @@ def _po_rollouts(
 
     all_idxs, all_log_probs_raw = model(
         exp_data, padding_mask=exp_mask, lengths=exp_lengths,
-        deterministic=False,
+        deterministic=False, no_eos=no_eos,
     )
 
-    # Length-normalise log-probs so pairwise comparisons are fair
-    # across variable-length outputs (paper §4.2).
-    step_counts = torch.tensor(
-        [max(1, len(idxs)) for idxs in all_idxs],
-        dtype=torch.float32, device=device,
-    )
-    all_log_probs = all_log_probs_raw / step_counts
+    if no_eos:
+        # Permutation mode: all rollouts for same instance have same length.
+        # No length-normalisation needed.
+        all_log_probs = all_log_probs_raw
+    else:
+        # EOS mode: length-normalise log-probs (paper §4.2).
+        step_counts = torch.tensor(
+            [max(1, len(idxs)) for idxs in all_idxs],
+            dtype=torch.float32, device=device,
+        )
+        all_log_probs = all_log_probs_raw / step_counts
 
     # Pre-extract per-instance numpy points
     pts_cache: list[np.ndarray] = []
@@ -545,12 +783,33 @@ def _po_rollouts(
         for b in range(min(2, B)):
             best_k = int(rewards[b].argmax().item())
             n = int(lengths[b].item())
-            sol = [idx for idx in all_idxs[b * K + best_k] if idx < n]
-            cov = evaluate_polygon_visibility_numpy_wo_gt(
-                pts_cache[b],
-                np.array(sol, dtype=np.int64) if sol else np.array([], dtype=np.int64),
-                batch_names[b],
-            )
+            sol = all_idxs[b * K + best_k]
+            if no_eos:
+                # Find the prefix that achieves coverage ≥ tau
+                for k in range(1, len(sol) + 1):
+                    prefix = [v for v in sol[:k] if v < n]
+                    cov = evaluate_polygon_visibility_numpy_wo_gt(
+                        pts_cache[b],
+                        np.array(prefix, dtype=np.int64),
+                        batch_names[b],
+                    )
+                    if cov >= 0.99:
+                        sol = prefix
+                        break
+                else:
+                    sol = [v for v in sol if v < n]
+                    cov = evaluate_polygon_visibility_numpy_wo_gt(
+                        pts_cache[b],
+                        np.array(sol, dtype=np.int64) if sol else np.array([], dtype=np.int64),
+                        batch_names[b],
+                    )
+            else:
+                sol = [idx for idx in sol if idx < n]
+                cov = evaluate_polygon_visibility_numpy_wo_gt(
+                    pts_cache[b],
+                    np.array(sol, dtype=np.int64) if sol else np.array([], dtype=np.int64),
+                    batch_names[b],
+                )
             print(
                 f"  [po] {batch_names[b]} best-of-{K}: "
                 f"cov={cov:.4f} guards={len(sol)} "
@@ -581,13 +840,19 @@ def po_train(
     max_grad_norm: float = 1.0,
     resume_optimizer_state: dict | None = None,
     save_best: bool = True,
+    no_eos: bool = False,
+    debug_stats: bool = False,
+    preference_loss: str = "bt",
+    early_stop_patience: int = 0,
+    early_stop_min_delta: float = 1e-4,
 ) -> None:
-    """Train with Preference Optimisation (PO, Bradley-Terry).
+    """Train with Preference Optimisation (PO).
 
     For each mini-batch of B instances:
         1) K stochastic rollouts  →  rewards (B,K), log_probs (B,K)
         2) Pairwise preferences:  pref[b,i,j] = 𝟙(r[b,i] > r[b,j])
-        3) Loss = -Σ pref · log σ(α · Δlog π)  /  n_pairs
+          3) Loss (BT): -Σ pref · log σ(α · Δlog π) / n_pairs
+              Loss (Exp): -Σ pref · (α · Δlog π) / n_pairs
         4) Adam + grad clipping.
     """
     if K < 2:
@@ -601,6 +866,12 @@ def po_train(
         f"{'='*60}"
     )
 
+    preference_loss = str(preference_loss).lower().strip()
+    if preference_loss not in {"bt", "exponential"}:
+        raise ValueError(f"preference_loss must be one of {{'bt','exponential'}}, got {preference_loss!r}")
+    if early_stop_patience < 0:
+        early_stop_patience = 0
+
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if resume_optimizer_state is not None:
@@ -610,6 +881,11 @@ def po_train(
             print(f"[warn] could not restore optimizer state: {e}")
 
     device = next(model.parameters()).device
+    use_amp = (device.type == "cuda")
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     lengths = get_lengths_from_dataset(dataset)
     sampler = BucketBatchSampler(
@@ -623,6 +899,8 @@ def po_train(
     last_ckpt_path: str | None = None
     best_cov_greedy = -float("inf")
     best_cov_stoch  = -float("inf")
+    best_stop_score = -float("inf")
+    no_improve_epochs = 0
 
     epoch_iter = (
         tqdm(range(epochs), desc="PO epochs") if tqdm else range(epochs)
@@ -633,6 +911,11 @@ def po_train(
         total_loss   = 0.0
         total_reward = 0.0
         n_instances  = 0
+        epoch_pref_pairs = 0.0
+        epoch_tie_pairs  = 0.0
+        epoch_total_pairs = 0.0
+        epoch_lp_abs_sum = 0.0
+        epoch_lp_abs_count = 0.0
 
         batch_iter = (
             tqdm(loader, desc=f"Epoch {actual_epoch}", leave=False)
@@ -644,24 +927,48 @@ def po_train(
             pad_mask   = pad_mask.to(device, non_blocking=True)
             lens_t     = torch.tensor(lens, dtype=torch.long, device=device)
 
-            rewards, log_probs = _po_rollouts(
-                model, batch_data, pad_mask, lens_t, names,
-                reward_fn, K, episode_log=episode_log,
-            )
+            if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+                amp_ctx = torch.amp.autocast("cuda", enabled=use_amp)
+            else:
+                amp_ctx = torch.cuda.amp.autocast(enabled=use_amp)
 
-            # ── PO loss (Bradley-Terry) ───────────────────────────
-            pref = (rewards[:, :, None] > rewards[:, None, :]).float()   # (B,K,K)
-            lp_diff = log_probs[:, :, None] - log_probs[:, None, :]      # (B,K,K)
-            bt_log = F.logsigmoid(alpha * lp_diff)                       # (B,K,K)
+            with amp_ctx:
+                rewards, log_probs = _po_rollouts(
+                    model, batch_data, pad_mask, lens_t, names,
+                    reward_fn, K, episode_log=episode_log,
+                    no_eos=no_eos,
+                )
 
-            n_pairs = pref.sum().clamp(min=1.0)
-            loss = -(pref * bt_log).sum() / n_pairs
+                # ── PO loss (Bradley-Terry) ───────────────────────────
+                pref = (rewards[:, :, None] > rewards[:, None, :]).float()   # (B,K,K)
+                lp_diff = log_probs[:, :, None] - log_probs[:, None, :]      # (B,K,K)
+                n_pairs = pref.sum().clamp(min=1.0)
+                if preference_loss == "bt":
+                    bt_log = F.logsigmoid(alpha * lp_diff)                   # (B,K,K)
+                    loss = -(pref * bt_log).sum() / n_pairs
+                else:
+                    bt_log = None
+                    loss = -(pref * (alpha * lp_diff)).sum() / n_pairs
+
+                if debug_stats:
+                    B = rewards.size(0)
+                    diag = torch.eye(K, dtype=torch.bool, device=rewards.device).unsqueeze(0)
+                    tie = (rewards[:, :, None] == rewards[:, None, :]) & (~diag)
+                    non_diag = (~diag)
+
+                    epoch_pref_pairs += float(pref.sum().item())
+                    epoch_tie_pairs += float(tie.float().sum().item())
+                    epoch_total_pairs += float(B * K * (K - 1))
+                    epoch_lp_abs_sum += float(lp_diff.abs().masked_select(non_diag).sum().item())
+                    epoch_lp_abs_count += float(B * K * (K - 1))
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
             if max_grad_norm > 0:
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             bs = batch_data.size(0)
             total_loss   += loss.item() * bs
@@ -686,11 +993,42 @@ def po_train(
             f"loss={avg_loss:.4f}  best_reward_mean={avg_best:.3f}"
         )
 
+        if debug_stats and epoch_total_pairs > 0:
+            pref_rate = epoch_pref_pairs / epoch_total_pairs
+            tie_rate  = epoch_tie_pairs / epoch_total_pairs
+            mean_lp_abs = epoch_lp_abs_sum / max(1.0, epoch_lp_abs_count)
+            print(
+                f"  [po-debug] pref_rate={pref_rate:.3f} "
+                f"tie_rate={tie_rate:.3f} "
+                f"mean|Δlogπ|={mean_lp_abs:.4f}"
+            )
+
         # -- epoch eval --
         eval_metrics = None
         if epoch_eval_fn is not None:
             eval_metrics = epoch_eval_fn(actual_epoch)
             model.train()
+
+        # -- early stopping (optional) --
+        if early_stop_patience > 0:
+            if isinstance(eval_metrics, dict) and eval_metrics.get("coverage_stoch_mean") is not None:
+                stop_score = float(eval_metrics["coverage_stoch_mean"])
+            else:
+                # Fallback if epoch eval is disabled.
+                stop_score = float(avg_best)
+
+            if stop_score > best_stop_score + early_stop_min_delta:
+                best_stop_score = stop_score
+                no_improve_epochs = 0
+            else:
+                no_improve_epochs += 1
+
+            if no_improve_epochs >= early_stop_patience:
+                print(
+                    f"[early-stop] no improvement for {no_improve_epochs} epochs "
+                    f"(best_score={best_stop_score:.4f}, min_delta={early_stop_min_delta})"
+                )
+                break
 
         # -- best-checkpoint saving --
         if save_best and checkpoint_dir and isinstance(eval_metrics, dict):
@@ -773,6 +1111,11 @@ def po_finetune(
     ls_max_iter: int = 50,
     ls_swap: bool = True,
     verbose: bool = False,
+    # Reward params forwarded to local_search_improve for fast vis-cache path
+    lam: float | None = None,
+    tau: float | None = None,
+    tau_penalty: float | None = None,
+    cap_at_tau: bool = False,
 ) -> None:
     """Fine-tune via LS-based preference pairs (paper §3.4, Eq. 9).
 
@@ -853,6 +1196,7 @@ def po_finetune(
                 ls_sol, r_ls, _ = local_search_improve(
                     pts_cache[b], sol, names[b], n, reward_fn,
                     max_iter=ls_max_iter, enable_swap=ls_swap,
+                    lam=lam, tau=tau, tau_penalty=tau_penalty, cap_at_tau=cap_at_tau,
                 )
 
                 if r_ls > r_tau + 1e-9:
@@ -963,8 +1307,13 @@ def evaluate_po(
     local_search: bool = False,
     ls_max_iter: int = 50,
     ls_swap: bool = True,
+    no_eos: bool = False,
+    tau: float = 0.99,
 ) -> list[dict]:
     """Evaluate with greedy decode + stochastic best-of-(aug*K).
+
+    If ``no_eos=True``, the model produces full permutations and the
+    guard set is the shortest prefix achieving coverage ≥ τ.
 
     If ``local_search=True``, the best solution (greedy or stochastic)
     is refined via remove/add/swap hill-climbing on the reward function.
@@ -975,6 +1324,54 @@ def evaluate_po(
         dataset, batch_size=1, shuffle=False,
         collate_fn=collate_fn, num_workers=0,
     )
+
+    def _perm_to_guards(perm: list[int], pts: np.ndarray, name: str,
+                        n: int) -> tuple[list[int], float]:
+        """Extract shortest prefix of permutation achieving coverage ≥ τ."""
+        valid = [v for v in perm if 0 <= v < n]
+        if not valid:
+            return [], 0.0
+
+        # Fast path: incremental union using prebuilt visibility cache.
+        try:
+            vcache = _get_or_build_vis_cache(pts, name)
+            if not vcache.get("invalid"):
+                import skgeom
+                guard_vis = vcache["guard_visibility_cache"]
+                poly_area = float(vcache["poly_area"])
+                union = skgeom.PolygonSet()
+                current: list[int] = []
+                current_set: set[int] = set()
+                cov = 0.0
+                for v in valid:
+                    current.append(v)
+                    if v not in current_set:
+                        current_set.add(v)
+                        if v in guard_vis:
+                            union = union.union(guard_vis[v])
+                    cov = (_union_area(union) / poly_area) if poly_area > 0 else 0.0
+                    if cov >= tau:
+                        return current, cov
+                return current, cov
+        except Exception:
+            pass
+
+        for k in range(1, len(valid) + 1):
+            prefix = valid[:k]
+            try:
+                cov = evaluate_polygon_visibility_numpy_wo_gt(
+                    pts, np.array(prefix, dtype=np.int64), name)
+            except Exception:
+                cov = 0.0
+            if cov >= tau:
+                return prefix, cov
+        # Never reached τ — return all
+        try:
+            cov = evaluate_polygon_visibility_numpy_wo_gt(
+                pts, np.array(valid, dtype=np.int64), name) if valid else 0.0
+        except Exception:
+            cov = 0.0
+        return valid, cov
 
     per_instance: list[dict] = []
     count = 0
@@ -997,16 +1394,20 @@ def evaluate_po(
         det_idxs, _ = model(
             batch_data, padding_mask=pad_mask,
             lengths=lens_t, deterministic=True,
+            no_eos=no_eos,
         )
-        det_sol = [idx for idx in det_idxs[0] if idx < n]
-        det_cov = 0.0
-        if det_sol:
-            try:
-                det_cov = evaluate_polygon_visibility_numpy_wo_gt(
-                    pts, np.array(det_sol, dtype=np.int64), name,
-                )
-            except Exception:
-                det_cov = 0.0
+        if no_eos:
+            det_sol, det_cov = _perm_to_guards(det_idxs[0], pts, name, n)
+        else:
+            det_sol = [idx for idx in det_idxs[0] if idx < n]
+            det_cov = 0.0
+            if det_sol:
+                try:
+                    det_cov = evaluate_polygon_visibility_numpy_wo_gt(
+                        pts, np.array(det_sol, dtype=np.int64), name,
+                    )
+                except Exception:
+                    det_cov = 0.0
 
         # -- stochastic best-of-(aug*K) --
         best_stoch_cov = -1.0
@@ -1024,18 +1425,22 @@ def evaluate_po(
             all_idxs, _ = model(
                 exp_data, padding_mask=exp_mask,
                 lengths=exp_lengths, deterministic=False,
+                no_eos=no_eos,
             )
 
             for k_idx in range(K):
-                sol = [idx for idx in all_idxs[k_idx] if idx < n]
-                if not sol:
-                    continue
-                try:
-                    cov = evaluate_polygon_visibility_numpy_wo_gt(
-                        pts, np.array(sol, dtype=np.int64), name,
-                    )
-                except Exception:
-                    cov = 0.0
+                if no_eos:
+                    sol, cov = _perm_to_guards(all_idxs[k_idx], pts, name, n)
+                else:
+                    sol = [idx for idx in all_idxs[k_idx] if idx < n]
+                    if not sol:
+                        continue
+                    try:
+                        cov = evaluate_polygon_visibility_numpy_wo_gt(
+                            pts, np.array(sol, dtype=np.int64), name,
+                        )
+                    except Exception:
+                        cov = 0.0
                 if (cov > best_stoch_cov
                         or (cov == best_stoch_cov
                             and len(sol) < len(best_stoch_guards or []))):
@@ -1150,6 +1555,17 @@ def main() -> None:
                    help="Dihedral augmentations at inference (1=none, 8=full)")
     g.add_argument("--alpha",        type=float, default=0.05,
                    help="PO scaling α (higher=more exploration). 0.03–0.05 recommended.")
+    g.add_argument("--preference-loss", type=str, default="bt", choices=["bt", "exponential"],
+                   help="Preference model loss. 'bt' uses log-sigmoid Bradley-Terry; 'exponential' uses linear exp-style objective.")
+    g.add_argument("--ranking-mode", action="store_true", default=False,
+                   help="Ranking formulation: model outputs full vertex permutation "
+                        "(no EOS), guard set = shortest prefix achieving coverage ≥ τ.")
+    g.add_argument("--po-debug-stats", action="store_true", default=False,
+                   help="Print per-epoch PO diagnostics: preference rate, tie rate, and mean |Δlogπ|.")
+    g.add_argument("--early-stop-patience", type=int, default=0,
+                   help="Stop training if coverage_stoch_mean does not improve for this many epochs (0 disables).")
+    g.add_argument("--early-stop-min-delta", type=float, default=1e-4,
+                   help="Minimum improvement to reset early-stop patience.")
 
     # -- Local search --
     g = p.add_argument_group("Local Search")
@@ -1162,6 +1578,10 @@ def main() -> None:
 
     # -- LS Fine-tuning (§3.4) --
     g = p.add_argument_group("LS Fine-tuning")
+    g.add_argument("--finetune-only",   action="store_true", default=False,
+                   help="Skip PO training, run only LS fine-tuning (requires --resume-from).")
+    g.add_argument("--skip-finetune",   action="store_true", default=False,
+                   help="Skip LS fine-tuning stage (useful for quick smoke runs).")
     g.add_argument("--finetune-epochs", type=int, default=0,
                    help="Post-training LS fine-tune epochs (0=disabled). "
                         "Paper recommends ~5%% of total epochs.")
@@ -1169,6 +1589,12 @@ def main() -> None:
                    help="Learning rate for LS fine-tuning (lower than main training).")
     g.add_argument("--finetune-k",      type=int, default=4,
                    help="Rollouts per instance during fine-tuning.")
+    g.add_argument("--ft-reward-lambda",  type=float, default=None,
+                   help="Override reward λ during FT (default: same as --reward-lambda).")
+    g.add_argument("--ft-tau-penalty",    type=float, default=None,
+                   help="Override τ-penalty during FT (default: same as --tau-penalty).")
+    g.add_argument("--ft-cap-coverage",   type=str, default=None, choices=["true", "false"],
+                   help="Override cap-coverage during FT (default: same as --cap-coverage).")
 
     # -- Reward --
     g = p.add_argument_group("Reward")
@@ -1189,6 +1615,8 @@ def main() -> None:
     g.add_argument("--lr",            type=float, default=2e-4)
     g.add_argument("--max-grad-norm", type=float, default=0.5)
     g.add_argument("--train-size",    type=int,   default=8000)
+    g.add_argument("--seed",          type=int,   default=1234,
+                   help="Global random seed for reproducible runs.")
     g.add_argument("--epoch-eval-k",  type=int,   default=200,
                    help="Instances to evaluate per epoch (-1 = all)")
 
@@ -1214,17 +1642,37 @@ def main() -> None:
         config = _load_json_config(args.config)
         config_keys = [
             "epochs", "batch_size", "lr", "temperature", "train_size",
-            "epoch_eval_k", "resume_from", "checkpoint_dir",
-            "num_rollouts", "aug_factor", "alpha",
+            "seed", "epoch_eval_k", "resume_from", "checkpoint_dir",
+            "num_rollouts", "aug_factor", "alpha", "ranking_mode",
+            "po_debug_stats", "preference_loss",
+            "early_stop_patience", "early_stop_min_delta",
             "reward_lambda", "coverage_threshold", "tau_penalty",
             "cap_coverage", "max_grad_norm",
             "local_search", "ls_max_iter",
             "finetune_epochs", "finetune_lr", "finetune_k",
+            "finetune_only", "skip_finetune",
+            "ft_reward_lambda", "ft_tau_penalty", "ft_cap_coverage",
         ]
         _apply_config_to_args(args, config, defaults, config_keys, explicit_args)
 
+    # Validate --finetune-only
+    if args.finetune_only:
+        if not args.resume_from:
+            p.error("--finetune-only requires --resume-from")
+        if args.finetune_epochs <= 0:
+            args.finetune_epochs = max(args.finetune_epochs, 3)
+            print(f"[warn] --finetune-only with finetune_epochs<=0, defaulting to {args.finetune_epochs}")
+    if args.finetune_only and args.skip_finetune:
+        p.error("--finetune-only and --skip-finetune cannot be used together")
+
     vprint = print if args.verbose else (lambda *a, **kw: None)
-    vprint(f"[config] α={args.alpha}  K={args.num_rollouts}  LS={args.local_search}")
+    vprint(
+        f"[config] α={args.alpha}  K={args.num_rollouts}  loss={args.preference_loss}  "
+        f"LS={args.local_search}  ranking={args.ranking_mode}"
+    )
+    vprint(f"[config] seed={args.seed}")
+
+    _set_global_seed(args.seed)
 
     # -- datasets --
     vprint("[phase] preparing datasets")
@@ -1262,11 +1710,19 @@ def main() -> None:
     tau_pen = args.tau_penalty
     cap_cov = args.cap_coverage
 
-    def reward_fn(points, solution, name, length=None):
-        return po_reward_smooth(
-            points, solution, name, length=length,
-            lam=lam, tau=tau, tau_penalty=tau_pen, cap_at_tau=cap_cov,
-        )
+    if args.ranking_mode:
+        def reward_fn(points, solution, name, length=None):
+            return permutation_reward(
+                points, solution, name, length=length,
+                lam=lam, tau=tau, tau_penalty=tau_pen,
+                cap_at_tau=cap_cov,
+            )
+    else:
+        def reward_fn(points, solution, name, length=None):
+            return po_reward_smooth(
+                points, solution, name, length=length,
+                lam=lam, tau=tau, tau_penalty=tau_pen, cap_at_tau=cap_cov,
+            )
 
     # -- epoch eval callback --
     def epoch_eval(epoch: int) -> dict:
@@ -1278,6 +1734,7 @@ def main() -> None:
             model, small_train, args.agp_train_dir,
             K=args.num_rollouts, aug_factor=1,
             reward_fn=reward_fn, eval_k=ek,
+            no_eos=args.ranking_mode, tau=tau,
         )
         covs_g = [x["coverage_greedy"] for x in per if x.get("coverage_greedy") is not None]
         gr_g   = [x["guard_ratio_greedy"] for x in per]
@@ -1316,14 +1773,29 @@ def main() -> None:
         "temperature":    args.temperature,
         "num_rollouts":   args.num_rollouts,
         "alpha":          args.alpha,
+        "seed":           args.seed,
         "reward_lambda":  args.reward_lambda,
         "tau":            args.coverage_threshold,
     }
 
+    # -- FT-specific reward overrides --
+    ft_lam     = args.ft_reward_lambda if args.ft_reward_lambda is not None else lam
+    ft_tau_pen = args.ft_tau_penalty   if args.ft_tau_penalty   is not None else tau_pen
+    ft_cap_cov = (args.ft_cap_coverage.lower() == "true") if args.ft_cap_coverage is not None else cap_cov
+
+    def ft_reward_fn(points, solution, name, length=None):
+        return po_reward_smooth(
+            points, solution, name, length=length,
+            lam=ft_lam, tau=tau, tau_penalty=ft_tau_pen, cap_at_tau=ft_cap_cov,
+        )
+
+    if ft_lam != lam or ft_tau_pen != tau_pen or ft_cap_cov != cap_cov:
+        vprint(f"[config] FT reward overrides: λ={ft_lam} π={ft_tau_pen} cap={ft_cap_cov}")
+
     # -- train --
     vprint("[phase] training")
     remaining = args.epochs - start_epoch
-    if remaining > 0:
+    if remaining > 0 and not args.finetune_only:
         po_train(
             model, small_train, reward_fn,
             K=args.num_rollouts,
@@ -1338,15 +1810,24 @@ def main() -> None:
             episode_log=args.verbose,
             max_grad_norm=args.max_grad_norm,
             resume_optimizer_state=resume_optimizer_state,
+            no_eos=args.ranking_mode,
+            debug_stats=args.po_debug_stats,
+            preference_loss=args.preference_loss,
+            early_stop_patience=args.early_stop_patience,
+            early_stop_min_delta=args.early_stop_min_delta,
         )
+    elif args.finetune_only:
+        vprint(f"[skip] --finetune-only, skipping PO training")
     else:
         vprint(f"[skip] start_epoch={start_epoch} >= epochs={args.epochs}")
 
     # -- LS fine-tuning (§3.4) --
-    if args.finetune_epochs > 0:
+    if args.skip_finetune:
+        vprint("[skip] --skip-finetune set, skipping LS fine-tuning")
+    elif args.finetune_epochs > 0:
         vprint(f"[phase] LS fine-tuning ({args.finetune_epochs} epochs)")
         po_finetune(
-            model, small_train, reward_fn,
+            model, small_train, ft_reward_fn,
             K=args.finetune_k,
             alpha=args.alpha,
             epochs=args.finetune_epochs,
@@ -1358,6 +1839,10 @@ def main() -> None:
             ls_max_iter=args.ls_max_iter,
             ls_swap=not args.ls_no_swap,
             verbose=args.verbose,
+            lam=ft_lam,
+            tau=tau,
+            tau_penalty=ft_tau_pen,
+            cap_at_tau=ft_cap_cov,
         )
 
     # -- save final --
@@ -1384,6 +1869,8 @@ def main() -> None:
         local_search=args.local_search,
         ls_max_iter=args.ls_max_iter,
         ls_swap=not args.ls_no_swap,
+        no_eos=args.ranking_mode,
+        tau=tau,
     )
     report = make_report(
         method="po_agp",

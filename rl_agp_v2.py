@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 import argparse
 from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor, create_critic
-from utils import createPolygon, compute_visibility
+from utils import createPolygon, compute_visibility, _get_or_build_vis_cache
 import torch
 import json
 import time
@@ -163,6 +163,132 @@ def get_lengths_from_dataset(dataset):
     return [sample[0].shape[0] for sample in dataset]
 
 
+def _prefix_until_tau_from_permutation(
+    points: np.ndarray,
+    permutation,
+    name: str,
+    tau: float,
+    length: Optional[int] = None,
+):
+    """Convert a full permutation into the shortest prefix reaching coverage >= tau.
+
+    Returns
+    -------
+    guards : list[int]
+        Prefix guard set candidate.
+    coverage : float
+        Coverage of returned prefix (or full permutation if tau not reached).
+    """
+    n = int(length if length is not None else len(points))
+    pts = points[:n] if length is not None else points
+    valid = [int(v) for v in permutation if 0 <= int(v) < n]
+    if not valid:
+        return [], 0.0
+
+    for k in range(1, len(valid) + 1):
+        prefix = valid[:k]
+        try:
+            cov = evaluate_polygon_visibility_numpy_wo_gt(
+                pts,
+                np.array(prefix, dtype=np.int64),
+                name,
+            )
+        except Exception:
+            cov = 0.0
+        if cov >= float(tau):
+            return prefix, float(cov)
+
+    # Soft-constraint fallback: use full permutation when tau is not reached
+    try:
+        cov = evaluate_polygon_visibility_numpy_wo_gt(
+            pts,
+            np.array(valid, dtype=np.int64),
+            name,
+        )
+    except Exception:
+        cov = 0.0
+    return valid, float(cov)
+
+
+def _union_area(polygon_set) -> float:
+    total = 0.0
+    for vis in polygon_set.polygons:
+        outer = abs(float(vis.outer_boundary().area()))
+        holes = sum(abs(float(h.area())) for h in vis.holes)
+        total += outer - holes
+    return total
+
+
+def _dense_prefix_reward_from_permutation(
+    points: np.ndarray,
+    permutation,
+    name: str,
+    *,
+    length: Optional[int] = None,
+    lam: float = 0.24,
+    tau: float = 0.99,
+    tau_penalty: float = 3.0,
+    cap_at_tau: bool = True,
+):
+    """PO-style dense reward: max over all permutation prefixes.
+
+    r_k = cov_eff - lam*(k/n) - tau_penalty*max(0, tau-cov_k)
+    cov_eff = min(cov_k, tau) if cap_at_tau else cov_k
+    """
+    n = int(length if length is not None else len(points))
+    pts = points[:n] if length is not None else points
+    valid = [int(v) for v in permutation if 0 <= int(v) < n]
+    if not valid:
+        return float(-tau_penalty), 0.0, 0
+
+    best_r = -float("inf")
+    best_cov = 0.0
+    best_k = len(valid)
+
+    try:
+        vcache = _get_or_build_vis_cache(pts, name)
+        if not vcache.get("invalid"):
+            import skgeom
+            guard_vis = vcache["guard_visibility_cache"]
+            poly_area = float(vcache["poly_area"])
+            cov_cache = vcache["coverage_cache"]
+
+            union = skgeom.PolygonSet()
+            current_set: set[int] = set()
+            for k, v in enumerate(valid, start=1):
+                if v not in current_set:
+                    current_set.add(v)
+                    if v in guard_vis:
+                        union = union.union(guard_vis[v])
+                cov = (_union_area(union) / poly_area) if poly_area > 0 else 0.0
+                cov_cache[tuple(sorted(current_set))] = cov
+                cov_eff = min(cov, tau) if cap_at_tau else cov
+                r_k = cov_eff - lam * (k / max(1, n)) - tau_penalty * max(0.0, tau - cov)
+                if r_k > best_r:
+                    best_r = r_k
+                    best_cov = float(cov)
+                    best_k = int(k)
+
+            return float(best_r), float(best_cov), int(best_k)
+    except Exception:
+        pass
+
+    for k in range(1, len(valid) + 1):
+        prefix = np.array(valid[:k], dtype=np.int64)
+        try:
+            cov = evaluate_polygon_visibility_numpy_wo_gt(pts, prefix, name)
+        except Exception:
+            cov = 0.0
+        cov_eff = min(cov, tau) if cap_at_tau else cov
+        r_k = cov_eff - lam * (k / max(1, n)) - tau_penalty * max(0.0, tau - cov)
+        if r_k > best_r:
+            best_r = r_k
+            best_cov = float(cov)
+            best_k = int(k)
+
+    return float(best_r), float(best_cov), int(best_k)
+
+
 def _best_of_k_rollouts(
     model,
     batch_data,
@@ -172,6 +298,7 @@ def _best_of_k_rollouts(
     reward_fn,
     multi_start,
     episode_log,
+    ranking_mode=False,
 ):
     device = batch_data.device
     bsz = batch_data.size(0)
@@ -189,7 +316,13 @@ def _best_of_k_rollouts(
         points_list.append(batch_data[i, :n].detach().cpu().numpy())
 
     for _ in range(int(multi_start)):
-        selected_idxs, log_probs = model(batch_data, padding_mask=mask, lengths=lengths, deterministic=False)
+        selected_idxs, log_probs = model(
+            batch_data,
+            padding_mask=mask,
+            lengths=lengths,
+            deterministic=False,
+            no_eos=bool(ranking_mode),
+        )
         for i, (idxs, name) in enumerate(zip(selected_idxs, batch_names)):
             n = lengths_list[i]
             real_solution = [idx for idx in idxs if idx < n]
@@ -233,9 +366,16 @@ def _greedy_baseline_rewards(
     lengths,
     batch_names,
     reward_fn,
+    ranking_mode=False,
 ):
     device = batch_data.device
-    selected_idxs, _ = model(batch_data, padding_mask=mask, lengths=lengths, deterministic=True)
+    selected_idxs, _ = model(
+        batch_data,
+        padding_mask=mask,
+        lengths=lengths,
+        deterministic=True,
+        no_eos=bool(ranking_mode),
+    )
     rewards_list = []
     for i, (data_tensor, idxs, name) in enumerate(zip(batch_data.cpu(), selected_idxs, batch_names)):
         n = lengths[i].item() if lengths is not None else len(data_tensor)
@@ -272,6 +412,7 @@ def reinforce_train_ema(
     collapse_patience=2,
     collapse_min_good_cov=0.5,
     collapse_low_cov=0.3,
+    ranking_mode=False,
 ):
     """
     Train the model using REINFORCE with exponential moving average (EMA) baseline for variance reduction.
@@ -340,6 +481,7 @@ def reinforce_train_ema(
                 reward_fn,
                 multi_start=multi_start,
                 episode_log=episode_log,
+                ranking_mode=ranking_mode,
             )
 
             if baseline_mode == "greedy":
@@ -350,6 +492,7 @@ def reinforce_train_ema(
                     lengths,
                     batch_names,
                     reward_fn,
+                    ranking_mode=ranking_mode,
                 )
                 advantages = rewards - greedy_rewards
             else:
@@ -488,6 +631,7 @@ def reinforce_train_critic(
     episode_log=False,
     multi_start=1,
     epoch_start_fn=None,
+    ranking_mode=False,
 ):
     """
     Actor-critic training: policy network (actor) and value network (critic).
@@ -539,6 +683,7 @@ def reinforce_train_critic(
                 reward_fn,
                 multi_start=multi_start,
                 episode_log=episode_log,
+                ranking_mode=ranking_mode,
             )
             # Critic forward
             values = critic(batch_data, mask, lengths)
@@ -783,7 +928,7 @@ def _read_opt_solution(sol_dir: str, name: str):
 
 
 @torch.no_grad()
-def evaluate_rl_agp_simple(model, dataset, sol_dir: str, eval_k: int):
+def evaluate_rl_agp_simple(model, dataset, sol_dir: str, eval_k: int, ranking_mode: bool = False, tau: float = 0.99):
     model.eval()
     per_instance = []
     device = next(model.parameters()).device
@@ -799,17 +944,45 @@ def evaluate_rl_agp_simple(model, dataset, sol_dir: str, eval_k: int):
 
         # Deterministic (greedy) decode
         t0 = time.perf_counter()
-        selected_idxs, _ = model(batch_data, padding_mask=mask, lengths=lengths, deterministic=True)
+        selected_idxs, _ = model(
+            batch_data,
+            padding_mask=mask,
+            lengths=lengths,
+            deterministic=True,
+            no_eos=bool(ranking_mode),
+        )
         dt = float(time.perf_counter() - t0)
 
         # Also do one stochastic decode for comparison
-        selected_idxs_stoch, _ = model(batch_data, padding_mask=mask, lengths=lengths, deterministic=False)
+        selected_idxs_stoch, _ = model(
+            batch_data,
+            padding_mask=mask,
+            lengths=lengths,
+            deterministic=False,
+            no_eos=bool(ranking_mode),
+        )
 
         name = batch_names[0]
         n = int(lengths[0].item())
 
-        pred_indices = [int(idx) for idx in selected_idxs[0] if int(idx) < n]
-        pred_indices_stoch = [int(idx) for idx in selected_idxs_stoch[0] if int(idx) < n]
+        if ranking_mode:
+            pred_indices, _ = _prefix_until_tau_from_permutation(
+                batch_data[0, :n].detach().cpu().numpy(),
+                selected_idxs[0],
+                name,
+                tau=float(tau),
+                length=n,
+            )
+            pred_indices_stoch, _ = _prefix_until_tau_from_permutation(
+                batch_data[0, :n].detach().cpu().numpy(),
+                selected_idxs_stoch[0],
+                name,
+                tau=float(tau),
+                length=n,
+            )
+        else:
+            pred_indices = [int(idx) for idx in selected_idxs[0] if int(idx) < n]
+            pred_indices_stoch = [int(idx) for idx in selected_idxs_stoch[0] if int(idx) < n]
 
         try:
             coverage = evaluate_polygon_visibility_numpy_wo_gt(
@@ -990,6 +1163,16 @@ def main():
     parser.add_argument('--multi-start', type=int, default=1, help='Number of rollouts per instance (best-of-K).')
     parser.add_argument('--baseline', type=str, default='ema', choices=['ema', 'greedy'], help='Baseline mode for EMA training.')
     parser.add_argument('--guard-weight', type=float, default=0.5, help='Weight for guard penalty in R = coverage - gw*(|S|/n).')
+    parser.add_argument('--tau-penalty', type=float, default=3.0,
+                        help='Penalty for coverage deficit max(0, tau-cov) in ranking-mode dense prefix reward.')
+    parser.add_argument('--cap-coverage', action='store_true', default=True,
+                        help='Cap coverage term at tau in ranking-mode dense prefix reward (default: enabled).')
+    parser.add_argument('--no-cap-coverage', dest='cap_coverage', action='store_false',
+                        help='Disable capping of coverage term at tau in ranking-mode dense prefix reward.')
+    parser.add_argument('--ranking-mode', action='store_true', default=False,
+                        help='Decode full permutation (no EOS) and score shortest prefix reaching coverage threshold.')
+    parser.add_argument('--coverage-threshold', type=float, default=0.99,
+                        help='Coverage threshold tau used to extract permutation prefix in ranking mode.')
     parser.add_argument('--eos-bias-init', type=float, default=None, help='Initial EOS logit bias (e.g. 2.0). None = no bias.')
     parser.add_argument('--eos-bias-final', type=float, default=None, help='Final EOS logit bias for linear decay schedule.')
     parser.add_argument('--eos-bias-decay-epochs', type=int, default=0, help='Epochs for linear EOS bias decay (<=0 uses total epochs when final is set).')
@@ -1019,6 +1202,10 @@ def main():
             'multi_start',
             'baseline',
             'guard_weight',
+            'tau_penalty',
+            'cap_coverage',
+            'ranking_mode',
+            'coverage_threshold',
             'eos_bias_init',
             'eos_bias_final',
             'eos_bias_decay_epochs',
@@ -1070,27 +1257,45 @@ def main():
             resume_baseline = ckpt.get('baseline', None)
             vprint(f"[phase] resuming from epoch {start_epoch}")
     
-    # --- Weighted-sum reward: R = coverage - guard_weight * (|S| / n) ---
+    # --- Reward function ---
     def reward_fn(points, solution, name, length=None, return_meta=False):
-        try:
-            coverage = evaluate_polygon_visibility_numpy_wo_gt(
+        if bool(args.ranking_mode):
+            reward_value, coverage, num_guards = _dense_prefix_reward_from_permutation(
                 points,
-                np.array(solution, dtype=np.int64),
+                solution,
                 name,
+                length=length,
+                lam=float(args.guard_weight),
+                tau=float(args.coverage_threshold),
+                tau_penalty=float(args.tau_penalty),
+                cap_at_tau=bool(args.cap_coverage),
             )
-        except Exception:
-            coverage = 0.0
-        num_guards = int(len(solution))
+            regime = "ranking_prefix"
+        else:
+            try:
+                coverage = evaluate_polygon_visibility_numpy_wo_gt(
+                    points,
+                    np.array(solution, dtype=np.int64),
+                    name,
+                )
+            except Exception:
+                coverage = 0.0
+            num_guards = int(len(solution))
+            regime = "direct_set"
+            n = float(max(1, length if length is not None else num_guards))
+            cov = float(coverage)
+            guard_cost = float(args.guard_weight) * (float(num_guards) / n)
+            reward_value = cov - guard_cost
+
         n = float(max(1, length if length is not None else num_guards))
         cov = float(coverage)
-        guard_cost = float(args.guard_weight) * (float(num_guards) / n)
-        reward_value = cov - guard_cost
         if return_meta:
             return reward_value, {
                 "coverage": cov,
                 "num_guards": num_guards,
                 "guard_ratio": float(num_guards) / n,
                 "reward": reward_value,
+                "regime": regime,
             }
         return reward_value
 
@@ -1132,6 +1337,8 @@ def main():
             small_train_dataset,
             args.agp_train_dir,
             eval_k=eval_k,
+            ranking_mode=bool(args.ranking_mode),
+            tau=float(args.coverage_threshold),
         )
         # Deterministic metrics
         covs = [x.get("coverage") for x in per_instance if x.get("coverage") is not None]
@@ -1201,7 +1408,8 @@ def main():
                                 entropy_weight=float(args.entropy_weight),
                                 grad_clip=float(args.grad_clip),
                                 resume_optimizer_state=resume_optimizer_state,
-                                resume_baseline=resume_baseline)
+                                resume_baseline=resume_baseline,
+                                ranking_mode=bool(args.ranking_mode))
             training_method = 'reinforcement_learning_ema'
         elif args.critic:
             reinforce_train_critic(agp_model, critic_model, small_train_dataset, reward_fn,
@@ -1209,7 +1417,8 @@ def main():
                                    checkpoint_dir=args.checkpoint_dir, checkpoint_params=checkpoint_params,
                                    epoch_eval_fn=epoch_eval_train_metrics, start_epoch=start_epoch,
                                    episode_log=bool(args.verbose),
-                                   multi_start=int(args.multi_start))
+                                   multi_start=int(args.multi_start),
+                                   ranking_mode=bool(args.ranking_mode))
             training_method = 'reinforcement_learning_critic'
 
     vprint("[phase] saving model")
@@ -1236,7 +1445,14 @@ def main():
     vprint("[phase] evaluating")
     # evaluate the model on the validation dataset (simple report format)
     eval_k = len(small_val_dataset)
-    per_instance = evaluate_rl_agp_simple(agp_model, small_val_dataset, args.agp_val_dir, eval_k)
+    per_instance = evaluate_rl_agp_simple(
+        agp_model,
+        small_val_dataset,
+        args.agp_val_dir,
+        eval_k,
+        ranking_mode=bool(args.ranking_mode),
+        tau=float(args.coverage_threshold),
+    )
     report = make_report(
         method="rl_agp",
         per_instance=per_instance,

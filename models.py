@@ -173,7 +173,7 @@ class PointerNet(nn.Module):
         
         return masked_logits, clone_mask
             
-    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None):
+    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None, no_eos: bool = False):
         """
         Args: 
             inputs: [batch_size x num_points x 2]
@@ -185,13 +185,121 @@ class PointerNet(nn.Module):
                 broadcast to every sample; a per-sample tensor lets each
                 polygon use its own ⌊n/3⌋ budget.
                 When a sample reaches its budget, EOS is forced.
+            no_eos: bool.  If True, the model produces a full permutation of
+                the n real vertices (no EOS appended/available).  Each sample
+                decodes for exactly lengths[b] steps.  Used for the
+                ranking-based AGP formulation.
         Returns:
             output_idxs: list of [num_selected_guards] tensors, one per instance, with EOS as end
         """
         batch_size = inputs.size(0)
         seq_len = inputs.size(1)
         device = inputs.device
+
+        if no_eos:
+            # ── Permutation mode: no EOS token ──────────────────
+            embedded = self.embedding(inputs.transpose(1, 2))  # [B, N, emb]
+
+            if lengths is not None:
+                enc_lengths = lengths.cpu() if torch.is_tensor(lengths) else torch.tensor(lengths, device='cpu')
+                packed_embedded = nn.utils.rnn.pack_padded_sequence(
+                    embedded, enc_lengths, batch_first=True, enforce_sorted=False)
+                packed_outputs, (hidden, context) = self.encoder(packed_embedded)
+                encoder_outputs, _ = nn.utils.rnn.pad_packed_sequence(
+                    packed_outputs, batch_first=True, total_length=seq_len)
+            else:
+                encoder_outputs, (hidden, context) = self.encoder(embedded)
+
+            # Build mask: True = invalid
+            if padding_mask is not None:
+                mask = ~padding_mask  # True for padded positions
+            else:
+                mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+            if lengths is not None:
+                for b in range(batch_size):
+                    n = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                    if n < seq_len:
+                        mask[b, n:] = True
+
+            idxs = None
+            decoder_input = self.decoder_start_input.unsqueeze(0).repeat(batch_size, 1)
+            output_idxs = [[] for _ in range(batch_size)]
+            finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            per_sample_steps = lengths if lengths is not None else torch.full(
+                (batch_size,), seq_len, dtype=torch.long, device=device)
+            if not torch.is_tensor(per_sample_steps):
+                per_sample_steps = torch.tensor(per_sample_steps, dtype=torch.long, device=device)
+            max_steps = int(per_sample_steps.max().item())
+
+            log_probs_list = [[] for _ in range(batch_size)]
+            for step in range(max_steps):
+                _, (hidden, context) = self.decoder(decoder_input.unsqueeze(1), (hidden, context))
+                query = hidden.squeeze(0)
+                for _ in range(self.n_glimpses):
+                    ref, logits = self.glimpse(query, encoder_outputs)
+                    # Simple mask for permutation mode (no EOS logic)
+                    clone_mask = mask.clone()
+                    if idxs is not None:
+                        clone_mask[torch.arange(batch_size), idxs] = True
+                    masked_logits = logits.masked_fill(clone_mask, float('-inf'))
+                    # Safety: ensure no all-inf rows
+                    for b in range(batch_size):
+                        if not finished[b] and torch.all(torch.isinf(masked_logits[b]) & (masked_logits[b] < 0)):
+                            # Unmask first valid position
+                            n = per_sample_steps[b].item()
+                            for v in range(n):
+                                if not mask[b, v]:
+                                    masked_logits[b, v] = logits[b, v]
+                                    clone_mask[b, v] = False
+                                    break
+                    logits = masked_logits / self.temperature
+                    query = torch.bmm(ref, F.softmax(logits, dim=1).unsqueeze(2)).squeeze(2)
+
+                _, logits = self.pointer(query, encoder_outputs)
+                clone_mask = mask.clone()
+                if idxs is not None:
+                    clone_mask[torch.arange(batch_size), idxs] = True
+                logits = logits.masked_fill(clone_mask, float('-inf'))
+                for b in range(batch_size):
+                    if not finished[b] and torch.all(torch.isinf(logits[b]) & (logits[b] < 0)):
+                        n = per_sample_steps[b].item()
+                        for v in range(n):
+                            if not mask[b, v]:
+                                logits[b, v] = 0.0
+                                break
+
+                probs = F.softmax(logits, dim=1)
+                nan_rows = torch.isnan(probs).any(dim=1, keepdim=True)
+                if nan_rows.any():
+                    fallback = torch.zeros_like(probs)
+                    fallback[:, 0] = 1.0
+                    probs = torch.where(nan_rows, fallback, probs)
+
+                if deterministic:
+                    idxs = torch.argmax(probs, dim=1)
+                else:
+                    idxs = probs.multinomial(1).squeeze(1)
+
+                for b in range(batch_size):
+                    if not finished[b]:
+                        output_idxs[b].append(idxs[b].item())
+                        log_prob = torch.log(probs[b, idxs[b]].clamp(min=1e-20))
+                        log_probs_list[b].append(log_prob)
+                        if len(output_idxs[b]) >= per_sample_steps[b].item():
+                            finished[b] = True
+
+                selected_mask = F.one_hot(idxs, seq_len).bool()
+                mask = mask | selected_mask
+                decoder_input = embedded[torch.arange(batch_size), idxs, :]
+                if finished.all():
+                    break
+
+            log_probs = [torch.stack(lp).sum() if len(lp) > 0
+                         else torch.tensor(0., device=device) for lp in log_probs_list]
+            log_probs = torch.stack(log_probs)
+            return output_idxs, log_probs
         
+        # ── Original EOS mode below ─────────────────────────────
         # Add EOS token to input (as zeros)
         eos_vec = torch.zeros(batch_size, 1, 2, device=inputs.device)
         inputs_ext = torch.cat([inputs, eos_vec], dim=1)  # [B, N+1, 2]
@@ -277,15 +385,16 @@ class PointerNet(nn.Module):
                     logits[b, actual_eos] = 0.0  # Only EOS for this sample is valid
             probs = F.softmax(logits, dim=1)
             # Safety: replace any NaN rows with one-hot on their respective EOS
-            nan_rows = torch.isnan(probs).any(dim=1)
+            nan_rows = torch.isnan(probs).any(dim=1, keepdim=True)
             if nan_rows.any():
-                probs[nan_rows] = 0.0
-                # Set EOS for each NaN row based on their individual lengths
+                fallback = torch.zeros_like(probs)
                 if lengths is not None:
                     for b in range(batch_size):
-                        if nan_rows[b]:
-                            actual_eos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
-                            probs[b, actual_eos] = 1.0
+                        actual_eos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                        fallback[b, actual_eos] = 1.0
+                else:
+                    fallback[:, 0] = 1.0
+                probs = torch.where(nan_rows, fallback, probs)
             if deterministic:
                 idxs = torch.argmax(probs, dim=1)
             else:
@@ -343,11 +452,11 @@ class CombinatorialRL(nn.Module):
                 eos_logit_bias_learnable=eos_logit_bias_learnable)
 
 
-    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None):
+    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None, no_eos: bool = False):
         """
         Run the PointerNet actor with padding_mask and lengths to ignore padded vertices and return selected guard indices and log-probabilities for REINFORCE.
         """
-        action_idxs, log_probs = self.actor(inputs, padding_mask=padding_mask, lengths=lengths, deterministic=deterministic, max_decode_steps=max_decode_steps)
+        action_idxs, log_probs = self.actor(inputs, padding_mask=padding_mask, lengths=lengths, deterministic=deterministic, max_decode_steps=max_decode_steps, no_eos=no_eos)
         return action_idxs, log_probs
 
 
