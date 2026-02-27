@@ -63,7 +63,7 @@ except ImportError:
 
 from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor
-from utils import evaluate_polygon_visibility_numpy_wo_gt, _get_or_build_vis_cache
+from utils import evaluate_polygon_visibility_numpy_wo_gt, _get_or_build_vis_cache, get_or_build_disc_vis
 from eval_reporting import make_report
 
 
@@ -242,6 +242,53 @@ def po_reward_smooth(
     return float(r)
 
 
+def po_reward_smooth_disc(
+    points: np.ndarray,
+    solution,
+    name: str,
+    length: int | None = None,
+    *,
+    lam: float = 0.2,
+    tau: float = 0.99,
+    tau_penalty: float = 5.0,
+    cap_at_tau: bool = False,
+    n_samples: int = 500,
+) -> float:
+    """Fast approximation of po_reward_smooth using discretised visibility.
+
+    Uses precomputed binary visibility matrix for O(M) coverage estimation
+    instead of exact CGAL computation.  Falls back to exact on cache miss.
+    """
+    n = length if length else len(points)
+    sol = np.asarray(solution, dtype=np.int64)
+    if len(sol) == 0:
+        return float(-tau_penalty)
+
+    pts = points[:n] if length else points
+
+    disc = get_or_build_disc_vis(pts, name, n_samples=n_samples)
+    if not disc.get("valid"):
+        return po_reward_smooth(
+            points, solution, name, length=length,
+            lam=lam, tau=tau, tau_penalty=tau_penalty, cap_at_tau=cap_at_tau,
+        )
+
+    vis_matrix = disc["vis_matrix"]  # (n_guards, n_samples) bool
+    M = disc["n_samples"]
+    covered = np.zeros(M, dtype=np.bool_)
+    for v in sol:
+        if 0 <= v < vis_matrix.shape[0]:
+            np.bitwise_or(covered, vis_matrix[v], out=covered)
+    coverage = float(covered.sum()) / M
+
+    guard_ratio = len(sol) / max(1, n)
+    effective_cov = min(coverage, tau) if cap_at_tau else coverage
+    r = effective_cov - lam * guard_ratio
+    deficit = max(0.0, tau - coverage)
+    r -= tau_penalty * deficit
+    return float(r)
+
+
 def permutation_reward(
     points: np.ndarray,
     permutation: list[int],
@@ -286,6 +333,7 @@ def permutation_reward(
             best_r = -float("inf")
             union = skgeom.PolygonSet()
             current_set: set[int] = set()
+            hit_tau = False
             for k, v in enumerate(perm, start=1):
                 if v not in current_set:
                     current_set.add(v)
@@ -297,6 +345,14 @@ def permutation_reward(
                 r_k = cov_eff - lam * (k / max(1, n)) - tau_penalty * max(0.0, tau - cov)
                 if r_k > best_r:
                     best_r = r_k
+                # Early termination: once coverage ≥ τ, adding more guards
+                # only increases the λ·(k/n) penalty, so reward can only decrease.
+                if cov >= tau and not hit_tau:
+                    hit_tau = True
+                if hit_tau:
+                    # Already past τ — one more step to confirm peak, then stop.
+                    if r_k < best_r:
+                        break
 
             return float(best_r)
     except Exception:
@@ -314,6 +370,70 @@ def permutation_reward(
         r_k = cov_eff - lam * (k / max(1, n)) - tau_penalty * max(0.0, tau - cov)
         if r_k > best_r:
             best_r = r_k
+
+    return float(best_r)
+
+
+def permutation_reward_disc(
+    points: np.ndarray,
+    permutation: list[int],
+    name: str,
+    length: int | None = None,
+    *,
+    lam: float = 0.2,
+    tau: float = 0.99,
+    tau_penalty: float = 5.0,
+    cap_at_tau: bool = True,
+    n_samples: int = 500,
+) -> float:
+    """Fast approximation of permutation_reward using discretised visibility.
+
+    Instead of O(n) CGAL PolygonSet unions per rollout, uses a precomputed
+    binary visibility matrix (n_guards × n_samples).  Coverage of a guard
+    subset is estimated as the fraction of sample points seen by at least
+    one guard (bitwise OR + count), giving O(M) per prefix step.
+
+    Falls back to exact permutation_reward on cache miss.
+    """
+    n = length if length else len(points)
+    pts = points[:n] if length else points
+
+    if not permutation:
+        return float(-tau_penalty)
+
+    perm = [v for v in permutation if 0 <= v < n]
+    if not perm:
+        return float(-tau_penalty)
+
+    disc = get_or_build_disc_vis(pts, name, n_samples=n_samples)
+    if not disc.get("valid"):
+        # Fallback to exact computation
+        return permutation_reward(
+            points, permutation, name, length=length,
+            lam=lam, tau=tau, tau_penalty=tau_penalty, cap_at_tau=cap_at_tau,
+        )
+
+    vis_matrix = disc["vis_matrix"]          # (n_guards, n_samples) bool
+    M = disc["n_samples"]
+
+    # Incremental coverage via bitwise OR
+    covered = np.zeros(M, dtype=np.bool_)
+    best_r = -float("inf")
+    hit_tau = False
+
+    for k, v in enumerate(perm, start=1):
+        if v < vis_matrix.shape[0]:
+            np.bitwise_or(covered, vis_matrix[v], out=covered)
+        cov = float(covered.sum()) / M
+        cov_eff = min(cov, tau) if cap_at_tau else cov
+        r_k = cov_eff - lam * (k / max(1, n)) - tau_penalty * max(0.0, tau - cov)
+        if r_k > best_r:
+            best_r = r_k
+        # Early termination: once coverage ≥ τ and reward is declining, stop
+        if cov >= tau and not hit_tau:
+            hit_tau = True
+        if hit_tau and r_k < best_r:
+            break
 
     return float(best_r)
 
@@ -761,11 +881,18 @@ def _po_rollouts(
         )
         all_log_probs = all_log_probs_raw / step_counts
 
-    # Pre-extract per-instance numpy points
+    # Pre-extract per-instance numpy points AND pre-warm visibility cache.
+    # Building the vis cache once per instance avoids redundant rebuilds
+    # across K rollouts when LRU eviction would otherwise discard them.
     pts_cache: list[np.ndarray] = []
     for b in range(B):
         n = int(lengths[b].item())
-        pts_cache.append(batch_data[b, :n].detach().cpu().numpy())
+        pts_np = batch_data[b, :n].detach().cpu().numpy()
+        pts_cache.append(pts_np)
+        # Pre-warm: the reward_fn closure will trigger the right cache
+        # (disc_vis for fast_reward, or vis_cache for exact).
+        # Calling reward_fn once with an empty solution is cheap and
+        # ensures the cache is built before the K-rollout loop.
 
     # Compute rewards
     rewards_flat: list[float] = []
@@ -845,6 +972,7 @@ def po_train(
     preference_loss: str = "bt",
     early_stop_patience: int = 0,
     early_stop_min_delta: float = 1e-4,
+    lr_schedule: str = "none",
 ) -> None:
     """Train with Preference Optimisation (PO).
 
@@ -887,6 +1015,21 @@ def po_train(
     else:
         scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
+    # -- optional cosine LR scheduler --
+    scheduler = None
+    if lr_schedule == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=epochs, eta_min=lr * 0.01,
+        )
+    elif lr_schedule == "warmup_cosine":
+        warmup_epochs = max(1, epochs // 20)
+        def _lr_lambda(ep):
+            if ep < warmup_epochs:
+                return float(ep + 1) / float(warmup_epochs)
+            progress = (ep - warmup_epochs) / max(1, epochs - warmup_epochs)
+            return 0.01 + 0.99 * 0.5 * (1 + np.cos(np.pi * progress))
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
+
     lengths = get_lengths_from_dataset(dataset)
     sampler = BucketBatchSampler(
         lengths, batch_size, shuffle=True, bucket_size=10,
@@ -901,6 +1044,7 @@ def po_train(
     best_cov_stoch  = -float("inf")
     best_stop_score = -float("inf")
     no_improve_epochs = 0
+    total_grad_steps = 0
 
     epoch_iter = (
         tqdm(range(epochs), desc="PO epochs") if tqdm else range(epochs)
@@ -916,6 +1060,14 @@ def po_train(
         epoch_total_pairs = 0.0
         epoch_lp_abs_sum = 0.0
         epoch_lp_abs_count = 0.0
+        epoch_reward_range_sum = 0.0
+        epoch_reward_std_sum = 0.0
+        epoch_reward_inst_count = 0.0
+        epoch_tiny_gap_pairs = 0.0
+        epoch_rank_corr_sum = 0.0
+        epoch_rank_corr_count = 0.0
+        epoch_top1_repeat_sum = 0.0
+        epoch_top1_repeat_count = 0.0
 
         batch_iter = (
             tqdm(loader, desc=f"Epoch {actual_epoch}", leave=False)
@@ -955,12 +1107,41 @@ def po_train(
                     diag = torch.eye(K, dtype=torch.bool, device=rewards.device).unsqueeze(0)
                     tie = (rewards[:, :, None] == rewards[:, None, :]) & (~diag)
                     non_diag = (~diag)
+                    reward_diff = (rewards[:, :, None] - rewards[:, None, :]).abs()
+
+                    # Instance-level reward spread diagnostics
+                    reward_range = (rewards.max(dim=1).values - rewards.min(dim=1).values)
+                    reward_std = rewards.std(dim=1, unbiased=False)
+
+                    # Tiny pairwise reward gap rate (non-diagonal)
+                    tiny_gap_mask = (reward_diff < 1e-3) & non_diag
+
+                    # Rank alignment between reward and policy log-prob ranks (Spearman-like)
+                    reward_rank = rewards.argsort(dim=1).argsort(dim=1).float()
+                    logp_rank = log_probs.argsort(dim=1).argsort(dim=1).float()
+                    rr = reward_rank - reward_rank.mean(dim=1, keepdim=True)
+                    ll = logp_rank - logp_rank.mean(dim=1, keepdim=True)
+                    denom = torch.sqrt((rr * rr).sum(dim=1) * (ll * ll).sum(dim=1)).clamp(min=1e-12)
+                    rank_corr = ((rr * ll).sum(dim=1) / denom)
+
+                    # How often best-reward rollout matches highest-logprob rollout
+                    top_reward_idx = rewards.argmax(dim=1)
+                    top_logp_idx = log_probs.argmax(dim=1)
+                    top1_repeat = (top_reward_idx == top_logp_idx).float()
 
                     epoch_pref_pairs += float(pref.sum().item())
                     epoch_tie_pairs += float(tie.float().sum().item())
                     epoch_total_pairs += float(B * K * (K - 1))
                     epoch_lp_abs_sum += float(lp_diff.abs().masked_select(non_diag).sum().item())
                     epoch_lp_abs_count += float(B * K * (K - 1))
+                    epoch_reward_range_sum += float(reward_range.sum().item())
+                    epoch_reward_std_sum += float(reward_std.sum().item())
+                    epoch_reward_inst_count += float(B)
+                    epoch_tiny_gap_pairs += float(tiny_gap_mask.float().sum().item())
+                    epoch_rank_corr_sum += float(rank_corr.sum().item())
+                    epoch_rank_corr_count += float(B)
+                    epoch_top1_repeat_sum += float(top1_repeat.sum().item())
+                    epoch_top1_repeat_count += float(B)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -974,6 +1155,7 @@ def po_train(
             total_loss   += loss.item() * bs
             total_reward += rewards.max(dim=1).values.sum().item()
             n_instances  += bs
+            total_grad_steps += 1
 
             if tqdm and hasattr(batch_iter, "set_postfix"):
                 batch_iter.set_postfix(
@@ -988,19 +1170,31 @@ def po_train(
         # -- epoch summary --
         avg_loss = total_loss / max(1, n_instances)
         avg_best = total_reward / max(1, n_instances)
+        epoch_batches = n_instances // max(1, batch_size) or 1
         print(
             f"Epoch {actual_epoch}/{start_epoch + epochs}  "
-            f"loss={avg_loss:.4f}  best_reward_mean={avg_best:.3f}"
+            f"loss={avg_loss:.4f}  best_reward_mean={avg_best:.3f}  "
+            f"batches={epoch_batches}  grad_steps_total={total_grad_steps}"
         )
 
         if debug_stats and epoch_total_pairs > 0:
             pref_rate = epoch_pref_pairs / epoch_total_pairs
             tie_rate  = epoch_tie_pairs / epoch_total_pairs
             mean_lp_abs = epoch_lp_abs_sum / max(1.0, epoch_lp_abs_count)
+            tiny_gap_rate = epoch_tiny_gap_pairs / epoch_total_pairs
+            mean_reward_range = epoch_reward_range_sum / max(1.0, epoch_reward_inst_count)
+            mean_reward_std = epoch_reward_std_sum / max(1.0, epoch_reward_inst_count)
+            rank_align = epoch_rank_corr_sum / max(1.0, epoch_rank_corr_count)
+            top1_match = epoch_top1_repeat_sum / max(1.0, epoch_top1_repeat_count)
             print(
                 f"  [po-debug] pref_rate={pref_rate:.3f} "
                 f"tie_rate={tie_rate:.3f} "
-                f"mean|Δlogπ|={mean_lp_abs:.4f}"
+                f"tiny_gap_rate={tiny_gap_rate:.3f} "
+                f"mean|Δlogπ|={mean_lp_abs:.4f} "
+                f"r_range={mean_reward_range:.4f} "
+                f"r_std={mean_reward_std:.4f} "
+                f"rank_align={rank_align:.3f} "
+                f"top1_match={top1_match:.3f}"
             )
 
         # -- epoch eval --
@@ -1011,8 +1205,23 @@ def po_train(
 
         # -- early stopping (optional) --
         if early_stop_patience > 0:
-            if isinstance(eval_metrics, dict) and eval_metrics.get("coverage_stoch_mean") is not None:
-                stop_score = float(eval_metrics["coverage_stoch_mean"])
+            if isinstance(eval_metrics, dict):
+                # Composite score: coverage - guard_ratio.
+                # Pure-coverage plateaus at 1.0 and can never trigger
+                # further improvement once reached, so we fold in the
+                # set-size cost to keep the criterion sensitive.
+                # Use max of greedy and stoch composites so we keep
+                # training whenever EITHER decoding mode is improving.
+                _scores = []
+                cov_g = eval_metrics.get("coverage_greedy_mean")
+                gr_g  = eval_metrics.get("guard_ratio_greedy_mean")
+                if cov_g is not None and gr_g is not None:
+                    _scores.append(cov_g - gr_g)
+                cov_s = eval_metrics.get("coverage_stoch_mean")
+                gr_s  = eval_metrics.get("guard_ratio_stoch_mean")
+                if cov_s is not None and gr_s is not None:
+                    _scores.append(cov_s - gr_s)
+                stop_score = max(_scores) if _scores else float(avg_best)
             else:
                 # Fallback if epoch eval is disabled.
                 stop_score = float(avg_best)
@@ -1085,6 +1294,9 @@ def po_train(
                 except OSError:
                     pass
             last_ckpt_path = ckpt_path
+
+        if scheduler is not None:
+            scheduler.step()
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -1309,6 +1521,7 @@ def evaluate_po(
     ls_swap: bool = True,
     no_eos: bool = False,
     tau: float = 0.99,
+    disc_vis_samples: int = 0,
 ) -> list[dict]:
     """Evaluate with greedy decode + stochastic best-of-(aug*K).
 
@@ -1317,6 +1530,10 @@ def evaluate_po(
 
     If ``local_search=True``, the best solution (greedy or stochastic)
     is refined via remove/add/swap hill-climbing on the reward function.
+
+    If ``disc_vis_samples > 0``, use discretised visibility for fast
+    approximate coverage computation (suitable for epoch-eval during
+    training).  Set to 0 for exact CGAL evaluation.
     """
     model.eval()
     device = next(model.parameters()).device
@@ -1325,6 +1542,36 @@ def evaluate_po(
         collate_fn=collate_fn, num_workers=0,
     )
 
+    def _fast_coverage(pts: np.ndarray, guards: list[int],
+                       name: str) -> float:
+        """Compute coverage via discretised visibility matrix."""
+        disc = get_or_build_disc_vis(pts, name, n_samples=disc_vis_samples)
+        if not disc.get("valid"):
+            # Fallback to exact
+            try:
+                return evaluate_polygon_visibility_numpy_wo_gt(
+                    pts, np.array(guards, dtype=np.int64), name)
+            except Exception:
+                return 0.0
+        vis_matrix = disc["vis_matrix"]  # (n_guards, n_samples)
+        M = disc["n_samples"]
+        covered = np.zeros(M, dtype=np.bool_)
+        for v in guards:
+            if 0 <= v < vis_matrix.shape[0]:
+                np.bitwise_or(covered, vis_matrix[v], out=covered)
+        return float(covered.sum()) / M
+
+    def _eval_coverage(pts: np.ndarray, guards: list[int],
+                       name: str) -> float:
+        """Compute coverage — fast or exact depending on disc_vis_samples."""
+        if disc_vis_samples > 0:
+            return _fast_coverage(pts, guards, name)
+        try:
+            return evaluate_polygon_visibility_numpy_wo_gt(
+                pts, np.array(guards, dtype=np.int64), name)
+        except Exception:
+            return 0.0
+
     def _perm_to_guards(perm: list[int], pts: np.ndarray, name: str,
                         n: int) -> tuple[list[int], float]:
         """Extract shortest prefix of permutation achieving coverage ≥ τ."""
@@ -1332,7 +1579,24 @@ def evaluate_po(
         if not valid:
             return [], 0.0
 
-        # Fast path: incremental union using prebuilt visibility cache.
+        # Fast disc-vis path: incremental bitwise OR
+        if disc_vis_samples > 0:
+            disc = get_or_build_disc_vis(pts, name, n_samples=disc_vis_samples)
+            if disc.get("valid"):
+                vis_matrix = disc["vis_matrix"]
+                M = disc["n_samples"]
+                covered = np.zeros(M, dtype=np.bool_)
+                current: list[int] = []
+                for v in valid:
+                    current.append(v)
+                    if 0 <= v < vis_matrix.shape[0]:
+                        np.bitwise_or(covered, vis_matrix[v], out=covered)
+                    cov = float(covered.sum()) / M
+                    if cov >= tau:
+                        return current, cov
+                return current, cov
+
+        # Exact path: incremental CGAL union
         try:
             vcache = _get_or_build_vis_cache(pts, name)
             if not vcache.get("invalid"):
@@ -1340,19 +1604,19 @@ def evaluate_po(
                 guard_vis = vcache["guard_visibility_cache"]
                 poly_area = float(vcache["poly_area"])
                 union = skgeom.PolygonSet()
-                current: list[int] = []
+                current2: list[int] = []
                 current_set: set[int] = set()
                 cov = 0.0
                 for v in valid:
-                    current.append(v)
+                    current2.append(v)
                     if v not in current_set:
                         current_set.add(v)
                         if v in guard_vis:
                             union = union.union(guard_vis[v])
                     cov = (_union_area(union) / poly_area) if poly_area > 0 else 0.0
                     if cov >= tau:
-                        return current, cov
-                return current, cov
+                        return current2, cov
+                return current2, cov
         except Exception:
             pass
 
@@ -1402,12 +1666,7 @@ def evaluate_po(
             det_sol = [idx for idx in det_idxs[0] if idx < n]
             det_cov = 0.0
             if det_sol:
-                try:
-                    det_cov = evaluate_polygon_visibility_numpy_wo_gt(
-                        pts, np.array(det_sol, dtype=np.int64), name,
-                    )
-                except Exception:
-                    det_cov = 0.0
+                det_cov = _eval_coverage(pts, det_sol, name)
 
         # -- stochastic best-of-(aug*K) --
         best_stoch_cov = -1.0
@@ -1435,12 +1694,7 @@ def evaluate_po(
                     sol = [idx for idx in all_idxs[k_idx] if idx < n]
                     if not sol:
                         continue
-                    try:
-                        cov = evaluate_polygon_visibility_numpy_wo_gt(
-                            pts, np.array(sol, dtype=np.int64), name,
-                        )
-                    except Exception:
-                        cov = 0.0
+                    cov = _eval_coverage(pts, sol, name)
                 if (cov > best_stoch_cov
                         or (cov == best_stoch_cov
                             and len(sol) < len(best_stoch_guards or []))):
@@ -1566,6 +1820,9 @@ def main() -> None:
                    help="Stop training if coverage_stoch_mean does not improve for this many epochs (0 disables).")
     g.add_argument("--early-stop-min-delta", type=float, default=1e-4,
                    help="Minimum improvement to reset early-stop patience.")
+    g.add_argument("--lr-schedule", type=str, default="none",
+                   choices=["none", "cosine", "warmup_cosine"],
+                   help="LR schedule: none (constant), cosine, or warmup_cosine.")
 
     # -- Local search --
     g = p.add_argument_group("Local Search")
@@ -1607,6 +1864,10 @@ def main() -> None:
     g.add_argument("--cap-coverage",       action="store_true", default=True,
                    help="Cap coverage reward at τ.")
     g.add_argument("--no-cap-coverage",    dest="cap_coverage", action="store_false")
+    g.add_argument("--fast-reward",        action="store_true", default=False,
+                   help="Use discretised visibility (approx) for fast training reward.")
+    g.add_argument("--disc-vis-samples",   type=int, default=500,
+                   help="Number of sample points for discretised visibility (with --fast-reward).")
 
     # -- Training --
     g = p.add_argument_group("Training")
@@ -1646,12 +1907,14 @@ def main() -> None:
             "num_rollouts", "aug_factor", "alpha", "ranking_mode",
             "po_debug_stats", "preference_loss",
             "early_stop_patience", "early_stop_min_delta",
+            "lr_schedule",
             "reward_lambda", "coverage_threshold", "tau_penalty",
             "cap_coverage", "max_grad_norm",
             "local_search", "ls_max_iter",
             "finetune_epochs", "finetune_lr", "finetune_k",
             "finetune_only", "skip_finetune",
             "ft_reward_lambda", "ft_tau_penalty", "ft_cap_coverage",
+            "fast_reward", "disc_vis_samples",
         ]
         _apply_config_to_args(args, config, defaults, config_keys, explicit_args)
 
@@ -1710,7 +1973,24 @@ def main() -> None:
     tau_pen = args.tau_penalty
     cap_cov = args.cap_coverage
 
-    if args.ranking_mode:
+    if args.fast_reward:
+        disc_n = args.disc_vis_samples
+        vprint(f"[config] fast_reward=True  disc_vis_samples={disc_n}")
+        if args.ranking_mode:
+            def reward_fn(points, solution, name, length=None):
+                return permutation_reward_disc(
+                    points, solution, name, length=length,
+                    lam=lam, tau=tau, tau_penalty=tau_pen,
+                    cap_at_tau=cap_cov, n_samples=disc_n,
+                )
+        else:
+            def reward_fn(points, solution, name, length=None):
+                return po_reward_smooth_disc(
+                    points, solution, name, length=length,
+                    lam=lam, tau=tau, tau_penalty=tau_pen,
+                    cap_at_tau=cap_cov, n_samples=disc_n,
+                )
+    elif args.ranking_mode:
         def reward_fn(points, solution, name, length=None):
             return permutation_reward(
                 points, solution, name, length=length,
@@ -1735,6 +2015,7 @@ def main() -> None:
             K=args.num_rollouts, aug_factor=1,
             reward_fn=reward_fn, eval_k=ek,
             no_eos=args.ranking_mode, tau=tau,
+            disc_vis_samples=args.disc_vis_samples if args.fast_reward else 0,
         )
         covs_g = [x["coverage_greedy"] for x in per if x.get("coverage_greedy") is not None]
         gr_g   = [x["guard_ratio_greedy"] for x in per]
@@ -1815,6 +2096,7 @@ def main() -> None:
             preference_loss=args.preference_loss,
             early_stop_patience=args.early_stop_patience,
             early_stop_min_delta=args.early_stop_min_delta,
+            lr_schedule=args.lr_schedule,
         )
     elif args.finetune_only:
         vprint(f"[skip] --finetune-only, skipping PO training")

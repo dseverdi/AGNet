@@ -51,6 +51,125 @@ def compute_visibility(vs, arr, poly, eps, edges, i):
     except RuntimeError:
         return None, i, q
 
+
+# ===================================================================
+#  Discretised visibility matrix (for fast training reward)
+# ===================================================================
+
+_DISC_VIS_CACHE_LOCK = threading.Lock()
+_DISC_VIS_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+
+
+def _sample_points_in_polygon(poly, n_samples: int, rng=None):
+    """Sample n_samples points uniformly inside a skgeom.Polygon via rejection."""
+    if rng is None:
+        rng = np.random.default_rng(42)
+    verts = np.array([[float(v.x()), float(v.y())] for v in poly.vertices])
+    xmin, xmax = verts[:, 0].min(), verts[:, 0].max()
+    ymin, ymax = verts[:, 1].min(), verts[:, 1].max()
+    pts = []
+    batch = max(n_samples * 4, 1024)
+    while len(pts) < n_samples:
+        cands = np.column_stack([
+            rng.uniform(xmin, xmax, batch),
+            rng.uniform(ymin, ymax, batch),
+        ])
+        for x, y in cands:
+            p = skgeom.Point2(float(x), float(y))
+            if poly.oriented_side(p) == skgeom.Sign.POSITIVE:
+                pts.append((float(x), float(y)))
+                if len(pts) >= n_samples:
+                    break
+    return np.array(pts[:n_samples], dtype=np.float64)
+
+
+def _point_in_visibility_polygon(vis_poly, px, py):
+    """Check if point (px,py) is inside a visibility polygon."""
+    p = skgeom.Point2(float(px), float(py))
+    side = vis_poly.oriented_side(p)
+    return side != skgeom.Sign.NEGATIVE  # POSITIVE or ON_BOUNDARY
+
+
+def get_or_build_disc_vis(points: np.ndarray, name: str,
+                          n_samples: int = 500) -> dict:
+    """Build or retrieve a discretised visibility matrix.
+
+    Returns dict with:
+        vis_matrix: np.ndarray shape (n_guards, n_samples) bool
+            vis_matrix[g, s] = True iff guard g sees sample point s
+        n: int (number of guards/vertices)
+        valid: bool
+    """
+    key = _cache_key(points, name)
+    max_cache = int(os.getenv("AGNET_DISC_VIS_CACHE_SIZE", "10000"))
+
+    with _DISC_VIS_CACHE_LOCK:
+        cache = _DISC_VIS_CACHE.get(key)
+        if cache is not None and cache.get("n") == int(points.shape[0]):
+            _DISC_VIS_CACHE.move_to_end(key)
+            return cache
+
+    n = int(points.shape[0])
+    poly = createPolygon(points)
+    if poly is None or poly is False:
+        cache = {"valid": False, "n": n}
+        with _DISC_VIS_CACHE_LOCK:
+            _DISC_VIS_CACHE[key] = cache
+            _DISC_VIS_CACHE.move_to_end(key)
+        return cache
+
+    # Sample points inside the polygon (deterministic seed per polygon)
+    seed = hash(name) % (2**31)
+    rng = np.random.default_rng(seed)
+    sample_pts = _sample_points_in_polygon(poly, n_samples, rng)
+    if len(sample_pts) < n_samples:
+        cache = {"valid": False, "n": n}
+        with _DISC_VIS_CACHE_LOCK:
+            _DISC_VIS_CACHE[key] = cache
+            _DISC_VIS_CACHE.move_to_end(key)
+        return cache
+
+    # Build arrangement & visibility
+    arr = skgeom.arrangement.Arrangement()
+    try:
+        for edge in poly.edges:
+            arr.insert(edge)
+    except RuntimeError:
+        cache = {"valid": False, "n": n}
+        with _DISC_VIS_CACHE_LOCK:
+            _DISC_VIS_CACHE[key] = cache
+            _DISC_VIS_CACHE.move_to_end(key)
+        return cache
+
+    vs = skgeom.TriangularExpansionVisibility(arr)
+    edges = list(poly.edges)
+    eps = 1e-8
+
+    vis_matrix = np.zeros((n, n_samples), dtype=np.bool_)
+    for guard_idx in range(n):
+        vis_poly, err_idx, _ = compute_visibility(vs, arr, poly, eps, edges, guard_idx)
+        if vis_poly:
+            for s in range(n_samples):
+                vis_matrix[guard_idx, s] = _point_in_visibility_polygon(
+                    vis_poly, sample_pts[s, 0], sample_pts[s, 1]
+                )
+
+    del vs, arr, poly, edges
+
+    cache = {
+        "valid": True,
+        "n": n,
+        "vis_matrix": vis_matrix,
+        "n_samples": n_samples,
+    }
+    with _DISC_VIS_CACHE_LOCK:
+        _DISC_VIS_CACHE[key] = cache
+        _DISC_VIS_CACHE.move_to_end(key)
+        while len(_DISC_VIS_CACHE) > max_cache:
+            _DISC_VIS_CACHE.popitem(last=False)
+    return cache
+
+
 # Merge a list of PolygonSet into one
 def merge_polygon_sets(polygon_sets):
     merged = skgeom.PolygonSet()
@@ -101,7 +220,7 @@ def _points_bbox(points: np.ndarray) -> tuple:
 def _get_or_build_vis_cache(points: np.ndarray, name: str) -> dict:
     key = _cache_key(points, name)
     bbox = _points_bbox(points)
-    max_cache = int(os.getenv("AGNET_VIS_CACHE_SIZE", "512"))
+    max_cache = int(os.getenv("AGNET_VIS_CACHE_SIZE", "10000"))
     verbose = bool(int(os.getenv("AGNET_VIS_CACHE_VERBOSE", "0")))
     max_threads = int(os.getenv("AGNET_VIS_THREADS", "0"))
 
