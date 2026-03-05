@@ -62,7 +62,7 @@ except ImportError:
     tqdm = None  # type: ignore[assignment]
 
 from dataset import Dataset, agp_read_samples, collate_fn
-from models import create_actor
+from models import create_actor, create_transformer_actor
 from utils import evaluate_polygon_visibility_numpy_wo_gt, _get_or_build_vis_cache, get_or_build_disc_vis
 from eval_reporting import make_report
 
@@ -180,7 +180,21 @@ def prepare_datasets(train_path, val_path, normalize=True):
 
 
 def create_agp_model(embedding_size, hidden_size, n_glimpses, tanh_exploration,
-                     use_tanh, temperature):
+                     use_tanh, temperature,
+                     model_type="lstm",
+                     n_heads=8, n_enc_layers=3, ff_dim=512):
+    """Factory that dispatches to LSTM PointerNet or Transformer AM model."""
+    if model_type == "transformer":
+        return create_transformer_actor(
+            embedding_size=embedding_size,
+            n_heads=n_heads,
+            n_enc_layers=n_enc_layers,
+            ff_dim=ff_dim,
+            n_glimpses=n_glimpses,
+            tanh_exploration=tanh_exploration,
+            temperature=temperature,
+        )
+    # default: original LSTM Pointer Network
     return create_actor(
         embedding_size, hidden_size, None, n_glimpses,
         tanh_exploration, use_tanh, "Bahdanau", None,
@@ -1794,12 +1808,23 @@ def main() -> None:
 
     # -- Model --
     g = p.add_argument_group("Model")
+    g.add_argument("--model-type",       type=str,   default="lstm",
+                   choices=["lstm", "transformer"],
+                   help="Architecture: 'lstm' (LSTM PointerNet) or 'transformer' (AM-style).")
     g.add_argument("--embedding-size",   type=int,   default=128)
-    g.add_argument("--hidden-size",      type=int,   default=128)
+    g.add_argument("--hidden-size",      type=int,   default=128,
+                   help="LSTM hidden size (only used when model_type=lstm).")
     g.add_argument("--n-glimpses",       type=int,   default=1)
     g.add_argument("--tanh-exploration", type=float, default=10)
     g.add_argument("--use-tanh",         action="store_true", default=True)
     g.add_argument("--temperature",      type=float, default=1.0)
+    # Transformer-specific
+    g.add_argument("--n-heads",          type=int,   default=8,
+                   help="Number of attention heads (transformer only).")
+    g.add_argument("--n-enc-layers",     type=int,   default=3,
+                   help="Number of Transformer encoder layers (transformer only).")
+    g.add_argument("--ff-dim",           type=int,   default=512,
+                   help="FFN inner dimension in Transformer encoder (transformer only).")
 
     # -- PO --
     g = p.add_argument_group("Preference Optimisation")
@@ -1951,6 +1976,8 @@ def main() -> None:
     model = create_agp_model(
         args.embedding_size, args.hidden_size, args.n_glimpses,
         args.tanh_exploration, args.use_tanh, args.temperature,
+        model_type=args.model_type,
+        n_heads=args.n_heads, n_enc_layers=args.n_enc_layers, ff_dim=args.ff_dim,
     )
 
     # -- resume --
@@ -2048,9 +2075,13 @@ def main() -> None:
 
     # -- checkpoint params --
     checkpoint_params = {
+        "model_type":     args.model_type,
         "embedding_size": args.embedding_size,
         "hidden_size":    args.hidden_size,
         "n_glimpses":     args.n_glimpses,
+        "n_heads":        args.n_heads,
+        "n_enc_layers":   args.n_enc_layers,
+        "ff_dim":         args.ff_dim,
         "temperature":    args.temperature,
         "num_rollouts":   args.num_rollouts,
         "alpha":          args.alpha,
