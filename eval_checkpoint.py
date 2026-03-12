@@ -12,6 +12,7 @@ import torch
 from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor
 from po_agp import evaluate_po, make_report, prepare_datasets, create_agp_model
+from utils import prewarm_vis_cache
 
 DATASET_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -85,6 +86,10 @@ def main():
 
     print(f"Evaluating {n_eval} instances | K={args.K} | aug={args.aug} | "
           f"disc_vis={'exact' if args.disc_vis_samples == 0 else args.disc_vis_samples}")
+
+    # Pre-build CGAL visibility caches in parallel (exact mode only)
+    if args.disc_vis_samples == 0:
+        prewarm_vis_cache(dataset, verbose=True)
 
     # Reward fn for LS (if needed)
     tau = params.get("tau", 0.99)

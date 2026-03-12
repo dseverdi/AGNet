@@ -9,10 +9,11 @@ faulthandler.enable()
 
 import numpy as np
 import skgeom
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import math  # for sqrt
 from collections import OrderedDict
 import threading
+import atexit
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from dataset import Dataset, agp_read_samples, collate_fn
@@ -50,6 +51,269 @@ def compute_visibility(vs, arr, poly, eps, edges, i):
         return visibility_polygon, None, None
     except RuntimeError:
         return None, i, q
+
+
+# ===================================================================
+#  Multiprocessing pool for parallel CGAL visibility
+# ===================================================================
+
+_PROC_POOL = None
+_PROC_POOL_LOCK = threading.Lock()
+
+
+def _get_proc_pool():
+    """Lazy-initialise a persistent ProcessPoolExecutor.
+
+    Controlled by ``AGNET_VIS_WORKERS`` env-var (default 0 = sequential).
+    """
+    global _PROC_POOL
+    n = int(os.getenv("AGNET_VIS_WORKERS", "0"))
+    if n <= 1:
+        return None
+    with _PROC_POOL_LOCK:
+        if _PROC_POOL is None:
+            _PROC_POOL = ProcessPoolExecutor(max_workers=n)
+            atexit.register(_PROC_POOL.shutdown, wait=False)
+        return _PROC_POOL
+
+
+def _compute_guards_vis_vertices(points_arr, guard_indices):
+    """Worker (runs in a subprocess): build CGAL arrangement from scratch
+    and compute visibility polygons for *guard_indices*.
+
+    Returns a list of ``(guard_idx, verts_or_None)`` where *verts* is an
+    ``(M, 2)`` float64 ndarray of visibility-polygon vertices, or ``None``
+    if the computation failed for that guard.
+    """
+    poly = createPolygon(points_arr)
+    if poly is None or poly is False:
+        return [(gi, None) for gi in guard_indices]
+
+    arr = skgeom.arrangement.Arrangement()
+    try:
+        for edge in poly.edges:
+            arr.insert(edge)
+    except RuntimeError:
+        return [(gi, None) for gi in guard_indices]
+
+    vs = skgeom.TriangularExpansionVisibility(arr)
+    edges = list(poly.edges)
+    eps = 1e-8
+
+    results = []
+    for gi in guard_indices:
+        vis_poly, _, _ = compute_visibility(vs, arr, poly, eps, edges, gi)
+        if vis_poly:
+            verts = np.array([[float(v.x()), float(v.y())]
+                              for v in vis_poly.vertices])
+            results.append((gi, verts))
+        else:
+            results.append((gi, None))
+
+    del vs, arr, poly, edges
+    return results
+
+
+def _compute_guards_disc_vis(points_arr, guard_indices, sample_pts):
+    """Worker (runs in a subprocess): build CGAL arrangement from scratch
+    and compute a boolean visibility row for each guard in *guard_indices*.
+
+    *sample_pts* is ``(S, 2)`` float64 ndarray of sample points inside the
+    polygon.  Returns ``[(guard_idx, bool_row), ...]`` where *bool_row* is
+    a 1-D bool ndarray of length ``S``.
+    """
+    n_samples = len(sample_pts)
+    poly = createPolygon(points_arr)
+    if poly is None or poly is False:
+        return [(gi, np.zeros(n_samples, dtype=np.bool_))
+                for gi in guard_indices]
+
+    arr = skgeom.arrangement.Arrangement()
+    try:
+        for edge in poly.edges:
+            arr.insert(edge)
+    except RuntimeError:
+        return [(gi, np.zeros(n_samples, dtype=np.bool_))
+                for gi in guard_indices]
+
+    vs = skgeom.TriangularExpansionVisibility(arr)
+    edges = list(poly.edges)
+    eps = 1e-8
+
+    results = []
+    for gi in guard_indices:
+        vis_poly, _, _ = compute_visibility(vs, arr, poly, eps, edges, gi)
+        if vis_poly:
+            row = np.array([
+                _point_in_visibility_polygon(vis_poly,
+                                             sample_pts[s, 0],
+                                             sample_pts[s, 1])
+                for s in range(n_samples)
+            ], dtype=np.bool_)
+        else:
+            row = np.zeros(n_samples, dtype=np.bool_)
+        results.append((gi, row))
+
+    del vs, arr, poly, edges
+    return results
+
+
+def _build_full_vis_cache_worker(points_arr):
+    """Worker (runs in a subprocess): build visibility polygons for ALL
+    guards of one polygon.
+
+    Returns ``(poly_area_or_None, all_verts, offsets)`` where:
+    - *all_verts* is ``(total_verts, 2)`` float64 ndarray with concatenated
+      visibility polygon vertices for all guards.
+    - *offsets* is ``(n+1,)`` int32 ndarray: guard *i*'s vertices are
+      ``all_verts[offsets[i]:offsets[i+1]]`` (empty range = guard failed).
+    """
+    poly = createPolygon(points_arr)
+    if poly is None or poly is False:
+        return (None, None, None)
+
+    poly_area = abs(float(poly.area()))
+    arr = skgeom.arrangement.Arrangement()
+    try:
+        for edge in poly.edges:
+            arr.insert(edge)
+    except RuntimeError:
+        return (None, None, None)
+
+    vs = skgeom.TriangularExpansionVisibility(arr)
+    edges = list(poly.edges)
+    n = int(points_arr.shape[0])
+    eps = 1e-8
+
+    parts = []
+    offsets = [0]
+    total = 0
+    for gi in range(n):
+        vis_poly, _, _ = compute_visibility(vs, arr, poly, eps, edges, gi)
+        if vis_poly:
+            verts = np.array([[float(v.x()), float(v.y())]
+                              for v in vis_poly.vertices])
+            parts.append(verts)
+            total += len(verts)
+        offsets.append(total)
+
+    del vs, arr, poly, edges
+
+    if parts:
+        all_verts = np.concatenate(parts)
+    else:
+        all_verts = np.empty((0, 2), dtype=np.float64)
+    offsets = np.array(offsets, dtype=np.int32)
+    return (poly_area, all_verts, offsets)
+
+
+def _build_batch_vis_cache_worker(batch):
+    """Worker: process a batch of polygons.
+
+    *batch* is a list of ``(points_arr, name)`` tuples.
+    Returns a list of ``(name, poly_area, all_verts, offsets)`` in the
+    same order.
+    """
+    results = []
+    for points_arr, name in batch:
+        poly_area, all_verts, offsets = _build_full_vis_cache_worker(
+            points_arr)
+        results.append((name, poly_area, all_verts, offsets))
+    return results
+
+
+def _reconstruct_guard_vis_cache(all_verts, offsets, n):
+    """Reconstruct guard_visibility_cache dict from packed arrays."""
+    guard_visibility_cache = {}
+    for gi in range(n):
+        start, end = int(offsets[gi]), int(offsets[gi + 1])
+        if start < end:
+            verts = all_verts[start:end]
+            vis_poly = skgeom.Polygon(
+                [skgeom.Point2(float(x), float(y))
+                 for x, y in verts])
+            guard_visibility_cache[gi] = skgeom.PolygonSet([vis_poly])
+        else:
+            guard_visibility_cache[gi] = skgeom.PolygonSet()
+    return guard_visibility_cache
+
+
+def prewarm_vis_cache(dataset, n_workers=None, verbose=True):
+    """Pre-build visibility caches for all polygons in *dataset* using
+    a process pool (one polygon per task).  Skips polygons already cached.
+
+    Uses ProcessPoolExecutor to bypass the GIL entirely — each subprocess
+    builds its own CGAL objects, serialises results as packed numpy arrays,
+    and the main process reconstructs the skgeom PolygonSet objects.
+
+    Call before training / evaluation with exact CGAL to amortise the
+    heavy per-polygon visibility work across all CPU cores.
+    """
+    if n_workers is None:
+        n_workers = int(os.getenv("AGNET_VIS_WORKERS", "0"))
+        if n_workers <= 1:
+            n_workers = max(1, min(os.cpu_count() or 1, 16))
+
+    # Collect polygons not yet cached
+    items = []  # (points_array, name)
+    for i in range(len(dataset)):
+        data, _, name = dataset[i]
+        pts = np.ascontiguousarray(data.numpy(), dtype=np.float64)
+        key = _cache_key(pts, name)
+        with _VIS_CACHE_LOCK:
+            if key in _VIS_CACHE:
+                continue
+        items.append((pts, name))
+
+    if not items:
+        if verbose:
+            print("[prewarm] All polygons already cached.")
+        return
+
+    if verbose:
+        print(f"[prewarm] Building vis cache for {len(items)} polygons "
+              f"with {n_workers} workers ...")
+
+    done = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = {
+            pool.submit(_build_full_vis_cache_worker, pts): (pts, name)
+            for pts, name in items
+        }
+        for future in as_completed(futures):
+            pts, name = futures[future]
+            poly_area, all_verts, offsets = future.result()
+            done += 1
+
+            n = int(pts.shape[0])
+            bbox = _points_bbox(pts)
+            key = _cache_key(pts, name)
+
+            if poly_area is None:
+                cache = {"invalid": True, "n": n, "bbox": bbox}
+            else:
+                guard_vis = _reconstruct_guard_vis_cache(
+                    all_verts, offsets, n)
+                cache = {
+                    "invalid": False,
+                    "n": n,
+                    "bbox": bbox,
+                    "poly_area": poly_area,
+                    "guard_visibility_cache": guard_vis,
+                    "coverage_cache": {},
+                }
+
+            with _VIS_CACHE_LOCK:
+                _VIS_CACHE[key] = cache
+                max_cache = int(os.getenv("AGNET_VIS_CACHE_SIZE", "10000"))
+                while len(_VIS_CACHE) > max_cache:
+                    _VIS_CACHE.popitem(last=False)
+
+            if verbose and (done % 100 == 0 or done == len(items)):
+                print(f"[prewarm] {done}/{len(items)} done")
+
+    if verbose:
+        print(f"[prewarm] Complete. Cache size: {len(_VIS_CACHE)}")
 
 
 # ===================================================================
@@ -130,31 +394,53 @@ def get_or_build_disc_vis(points: np.ndarray, name: str,
         return cache
 
     # Build arrangement & visibility
-    arr = skgeom.arrangement.Arrangement()
-    try:
-        for edge in poly.edges:
-            arr.insert(edge)
-    except RuntimeError:
-        cache = {"valid": False, "n": n}
-        with _DISC_VIS_CACHE_LOCK:
-            _DISC_VIS_CACHE[key] = cache
-            _DISC_VIS_CACHE.move_to_end(key)
-        return cache
-
-    vs = skgeom.TriangularExpansionVisibility(arr)
-    edges = list(poly.edges)
-    eps = 1e-8
-
     vis_matrix = np.zeros((n, n_samples), dtype=np.bool_)
-    for guard_idx in range(n):
-        vis_poly, err_idx, _ = compute_visibility(vs, arr, poly, eps, edges, guard_idx)
-        if vis_poly:
-            for s in range(n_samples):
-                vis_matrix[guard_idx, s] = _point_in_visibility_polygon(
-                    vis_poly, sample_pts[s, 0], sample_pts[s, 1]
-                )
+    pool = _get_proc_pool()
 
-    del vs, arr, poly, edges
+    if pool is None:
+        # Sequential path
+        arr = skgeom.arrangement.Arrangement()
+        try:
+            for edge in poly.edges:
+                arr.insert(edge)
+        except RuntimeError:
+            cache = {"valid": False, "n": n}
+            with _DISC_VIS_CACHE_LOCK:
+                _DISC_VIS_CACHE[key] = cache
+                _DISC_VIS_CACHE.move_to_end(key)
+            return cache
+
+        vs = skgeom.TriangularExpansionVisibility(arr)
+        edges = list(poly.edges)
+        eps = 1e-8
+
+        for guard_idx in range(n):
+            vis_poly, err_idx, _ = compute_visibility(vs, arr, poly, eps, edges, guard_idx)
+            if vis_poly:
+                for s in range(n_samples):
+                    vis_matrix[guard_idx, s] = _point_in_visibility_polygon(
+                        vis_poly, sample_pts[s, 0], sample_pts[s, 1]
+                    )
+
+        del vs, arr, edges
+    else:
+        # Parallel path — each worker builds its own CGAL objects
+        n_workers = int(os.getenv("AGNET_VIS_WORKERS", "0"))
+        chunk_size = max(1, (n + n_workers - 1) // n_workers)
+        chunks = [list(range(i, min(i + chunk_size, n)))
+                  for i in range(0, n, chunk_size)]
+
+        points_arr = np.ascontiguousarray(points, dtype=np.float64)
+        sample_pts_arr = np.ascontiguousarray(sample_pts, dtype=np.float64)
+        futures = [pool.submit(_compute_guards_disc_vis,
+                               points_arr, chunk, sample_pts_arr)
+                   for chunk in chunks]
+
+        for future in futures:
+            for gi, row in future.result():
+                vis_matrix[gi] = row
+
+    del poly
 
     cache = {
         "valid": True,
@@ -222,7 +508,6 @@ def _get_or_build_vis_cache(points: np.ndarray, name: str) -> dict:
     bbox = _points_bbox(points)
     max_cache = int(os.getenv("AGNET_VIS_CACHE_SIZE", "10000"))
     verbose = bool(int(os.getenv("AGNET_VIS_CACHE_VERBOSE", "0")))
-    max_threads = int(os.getenv("AGNET_VIS_THREADS", "0"))
 
     with _VIS_CACHE_LOCK:
         cache = _VIS_CACHE.get(key)
@@ -239,28 +524,31 @@ def _get_or_build_vis_cache(points: np.ndarray, name: str) -> dict:
             _VIS_CACHE.move_to_end(key)
         return cache
 
-    arr = skgeom.arrangement.Arrangement()
-    try:
-        for edge in poly.edges:
-            arr.insert(edge)
-    except RuntimeError as e:
-        if verbose:
-            print(f"[vis-cache] arrangement build failed for {name}: {e}", file=sys.stderr)
-        cache = {"invalid": True, "n": int(points.shape[0]), "bbox": bbox}
-        with _VIS_CACHE_LOCK:
-            _VIS_CACHE[key] = cache
-            _VIS_CACHE.move_to_end(key)
-        return cache
-
-    vs = skgeom.TriangularExpansionVisibility(arr)
-    edges = list(poly.edges)
     n = int(points.shape[0])
-    eps = 1e-8
     poly_area = abs(float(poly.area()))
 
     guard_visibility_cache = {}
+    pool = _get_proc_pool()
 
-    if max_threads <= 1:
+    if pool is None:
+        # Sequential path (AGNET_VIS_WORKERS <= 1)
+        arr = skgeom.arrangement.Arrangement()
+        try:
+            for edge in poly.edges:
+                arr.insert(edge)
+        except RuntimeError as e:
+            if verbose:
+                print(f"[vis-cache] arrangement build failed for {name}: {e}", file=sys.stderr)
+            cache = {"invalid": True, "n": int(points.shape[0]), "bbox": bbox}
+            with _VIS_CACHE_LOCK:
+                _VIS_CACHE[key] = cache
+                _VIS_CACHE.move_to_end(key)
+            return cache
+
+        vs = skgeom.TriangularExpansionVisibility(arr)
+        edges = list(poly.edges)
+        eps = 1e-8
+
         for guard_idx in range(n):
             vis_poly, err_idx, _ = compute_visibility(vs, arr, poly, eps, edges, guard_idx)
             if vis_poly:
@@ -269,25 +557,34 @@ def _get_or_build_vis_cache(points: np.ndarray, name: str) -> dict:
                 if verbose:
                     print(f"[vis-cache] visibility failed at guard {err_idx} for {name}", file=sys.stderr)
                 guard_visibility_cache[guard_idx] = skgeom.PolygonSet()
+
+        del vs, arr, edges
     else:
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
-            futures = {
-                guard_idx: executor.submit(compute_visibility, vs, arr, poly, eps, edges, guard_idx)
-                for guard_idx in range(n)
-            }
-            for guard_idx, future in futures.items():
-                vis_poly, err_idx, _ = future.result()
-                if vis_poly:
-                    guard_visibility_cache[guard_idx] = skgeom.PolygonSet([vis_poly])
+        # Parallel path — each worker builds its own CGAL objects (safe)
+        n_workers = int(os.getenv("AGNET_VIS_WORKERS", "0"))
+        chunk_size = max(1, (n + n_workers - 1) // n_workers)
+        chunks = [list(range(i, min(i + chunk_size, n)))
+                  for i in range(0, n, chunk_size)]
+
+        points_arr = np.ascontiguousarray(points, dtype=np.float64)
+        futures = [pool.submit(_compute_guards_vis_vertices,
+                               points_arr, chunk)
+                   for chunk in chunks]
+
+        for future in futures:
+            for gi, verts in future.result():
+                if verts is not None:
+                    vis_poly = skgeom.Polygon(
+                        [skgeom.Point2(float(x), float(y))
+                         for x, y in verts])
+                    guard_visibility_cache[gi] = skgeom.PolygonSet([vis_poly])
                 else:
                     if verbose:
-                        print(f"[vis-cache] visibility failed at guard {err_idx} for {name}", file=sys.stderr)
-                    guard_visibility_cache[guard_idx] = skgeom.PolygonSet()
+                        print(f"[vis-cache] visibility failed at guard {gi} for {name}",
+                              file=sys.stderr)
+                    guard_visibility_cache[gi] = skgeom.PolygonSet()
 
-    # Free CGAL C++ objects in controlled order to avoid double-free
-    # (TriangularExpansionVisibility holds internal ref to Arrangement;
-    #  destroying them in wrong order corrupts the heap)
-    del vs, arr, poly, edges
+    del poly
 
     cache = {
         "invalid": False,
@@ -353,54 +650,58 @@ def evaluate_polygon_visibility_numpy_wo_gt(points: np.ndarray, solution: np.nda
     if poly is None or poly is False:
         print(f"Skipping invalid polygon in {name}: less than 3 vertices or zero area", file=sys.stderr)
         return 0.0
-    
 
-    # Build arrangement
-    arr = skgeom.arrangement.Arrangement()
-    arrangement_ok = True
-    for edge in poly.edges:
-        try:
-            arr.insert(edge)
-        except RuntimeError as e:
-            print(f"Skipping polygon {name} due to CGAL precondition violation during arrangement construction.", file=sys.stderr)
-            plot_problematic_polygon(points, name, edge)
-            arrangement_ok = False
-            break
-    if not arrangement_ok:
-        return 0.0
-    vs = skgeom.TriangularExpansionVisibility(arr)
-
-    # Compute visibility polygons (optionally threaded)
-    edges = list(poly.edges)
+    # Compute visibility polygons (optionally parallel via multiprocessing)
     views = []
-    max_threads = int(os.getenv("AGNET_VIS_THREADS", "0"))
-    if max_threads <= 1:
+    pool = _get_proc_pool()
+
+    if pool is None:
+        # Sequential path
+        arr = skgeom.arrangement.Arrangement()
+        arrangement_ok = True
+        for edge in poly.edges:
+            try:
+                arr.insert(edge)
+            except RuntimeError as e:
+                print(f"Skipping polygon {name} due to CGAL precondition violation during arrangement construction.", file=sys.stderr)
+                plot_problematic_polygon(points, name, edge)
+                arrangement_ok = False
+                break
+        if not arrangement_ok:
+            return 0.0
+        vs = skgeom.TriangularExpansionVisibility(arr)
+        edges = list(poly.edges)
         for idx in solution:
             vis_poly, err_idx, err_q = compute_visibility(vs, arr, poly, eps, edges, idx)
             if vis_poly:
                 views.append(skgeom.PolygonSet([vis_poly]))
             else:
                 print(f"Warning: visibility failed at guard {err_idx}", file=sys.stderr)
+        del vs, arr, edges
     else:
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
-            futures = [executor.submit(compute_visibility, vs, arr, poly, eps, edges, idx) for idx in solution]
-            for future in futures:
-                vis_poly, err_idx, err_q = future.result()
-                if vis_poly:
-                    views.append(skgeom.PolygonSet([vis_poly]))
-                else:
-                    print(f"Warning: visibility failed at guard {err_idx}", file=sys.stderr)
+        # Parallel path — workers build own CGAL objects
+        sol_list = [int(idx) for idx in solution]
+        n_workers = int(os.getenv("AGNET_VIS_WORKERS", "0"))
+        chunk_size = max(1, (len(sol_list) + n_workers - 1) // n_workers)
+        chunks = [sol_list[i:i + chunk_size]
+                  for i in range(0, len(sol_list), chunk_size)]
 
-    # Merge partial regions (optionally threaded)
-    if max_threads <= 1 or len(views) <= 1:
-        region = merge_polygon_sets(views)
-    else:
-        merged_parts = []
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
-            chunk_size = max(1, len(views) // executor._max_workers)
-            chunks = [views[i:i + chunk_size] for i in range(0, len(views), chunk_size)]
-            merged_parts = [executor.submit(merge_polygon_sets, chunk).result() for chunk in chunks]
-        region = merge_polygon_sets(merged_parts)
+        points_arr = np.ascontiguousarray(points, dtype=np.float64)
+        futures = [pool.submit(_compute_guards_vis_vertices,
+                               points_arr, chunk)
+                   for chunk in chunks]
+        for future in futures:
+            for gi, verts in future.result():
+                if verts is not None:
+                    vp = skgeom.Polygon(
+                        [skgeom.Point2(float(x), float(y))
+                         for x, y in verts])
+                    views.append(skgeom.PolygonSet([vp]))
+                else:
+                    print(f"Warning: visibility failed at guard {gi}", file=sys.stderr)
+
+    # Merge partial regions
+    region = merge_polygon_sets(views)
 
     # Calculate total visible area
     total_area = 0.0
@@ -556,7 +857,6 @@ def test_coverage_on_sample(dataset, sol_dir, index=0, regime="opt", n_random_gu
     # --- Visualization with visibility regions ---
     # Compute visibility polygons for each guard
     import skgeom
-    from concurrent.futures import ThreadPoolExecutor
     eps = 1e-8
     poly_obj = createPolygon(points)
     if poly_obj is None:
@@ -568,14 +868,9 @@ def test_coverage_on_sample(dataset, sol_dir, index=0, regime="opt", n_random_gu
     vs = skgeom.TriangularExpansionVisibility(arr)
     edges = list(poly_obj.edges)
     vis_polys = []
-    with ThreadPoolExecutor() as executor:
-        futures = [executor.submit(compute_visibility, vs, arr, poly_obj, eps, edges, idx) for idx in guard_idxs]
-        for future in futures:
-            vis_poly, err_idx, err_q = future.result()
-            if vis_poly:
-                vis_polys.append(vis_poly)
-            else:
-                vis_polys.append(None)
+    for idx in guard_idxs:
+        vis_poly, err_idx, err_q = compute_visibility(vs, arr, poly_obj, eps, edges, idx)
+        vis_polys.append(vis_poly if vis_poly else None)
 
     fig, ax = plt.subplots()
     poly = np.array(points)
