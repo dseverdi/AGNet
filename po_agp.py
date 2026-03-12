@@ -62,7 +62,7 @@ except ImportError:
     tqdm = None  # type: ignore[assignment]
 
 from dataset import Dataset, agp_read_samples, collate_fn
-from models import create_actor, create_transformer_actor
+from models import create_actor
 from utils import evaluate_polygon_visibility_numpy_wo_gt, _get_or_build_vis_cache, get_or_build_disc_vis
 from eval_reporting import make_report
 
@@ -180,21 +180,8 @@ def prepare_datasets(train_path, val_path, normalize=True):
 
 
 def create_agp_model(embedding_size, hidden_size, n_glimpses, tanh_exploration,
-                     use_tanh, temperature,
-                     model_type="lstm",
-                     n_heads=8, n_enc_layers=3, ff_dim=512):
-    """Factory that dispatches to LSTM PointerNet or Transformer AM model."""
-    if model_type == "transformer":
-        return create_transformer_actor(
-            embedding_size=embedding_size,
-            n_heads=n_heads,
-            n_enc_layers=n_enc_layers,
-            ff_dim=ff_dim,
-            n_glimpses=n_glimpses,
-            tanh_exploration=tanh_exploration,
-            temperature=temperature,
-        )
-    # default: original LSTM Pointer Network
+                     use_tanh, temperature):
+    """Create an LSTM PointerNet for AGP."""
     return create_actor(
         embedding_size, hidden_size, None, n_glimpses,
         tanh_exploration, use_tanh, "Bahdanau", None,
@@ -987,6 +974,7 @@ def po_train(
     early_stop_patience: int = 0,
     early_stop_min_delta: float = 1e-4,
     lr_schedule: str = "none",
+    use_amp: bool | None = None,
 ) -> None:
     """Train with Preference Optimisation (PO).
 
@@ -1023,7 +1011,8 @@ def po_train(
             print(f"[warn] could not restore optimizer state: {e}")
 
     device = next(model.parameters()).device
-    use_amp = (device.type == "cuda")
+    if use_amp is None:
+        use_amp = (device.type == "cuda")
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
         scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     else:
@@ -1161,6 +1150,15 @@ def po_train(
             scaler.scale(loss).backward()
             if max_grad_norm > 0:
                 scaler.unscale_(optimizer)
+                # Skip step if gradients contain NaN/Inf (prevents weight corruption)
+                grad_finite = all(
+                    torch.isfinite(p.grad).all()
+                    for p in model.parameters()
+                    if p.grad is not None
+                )
+                if not grad_finite:
+                    scaler.update()  # still update scaler scale factor
+                    continue
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
@@ -1808,23 +1806,12 @@ def main() -> None:
 
     # -- Model --
     g = p.add_argument_group("Model")
-    g.add_argument("--model-type",       type=str,   default="lstm",
-                   choices=["lstm", "transformer"],
-                   help="Architecture: 'lstm' (LSTM PointerNet) or 'transformer' (AM-style).")
     g.add_argument("--embedding-size",   type=int,   default=128)
-    g.add_argument("--hidden-size",      type=int,   default=128,
-                   help="LSTM hidden size (only used when model_type=lstm).")
+    g.add_argument("--hidden-size",      type=int,   default=128)
     g.add_argument("--n-glimpses",       type=int,   default=1)
     g.add_argument("--tanh-exploration", type=float, default=10)
     g.add_argument("--use-tanh",         action="store_true", default=True)
     g.add_argument("--temperature",      type=float, default=1.0)
-    # Transformer-specific
-    g.add_argument("--n-heads",          type=int,   default=8,
-                   help="Number of attention heads (transformer only).")
-    g.add_argument("--n-enc-layers",     type=int,   default=3,
-                   help="Number of Transformer encoder layers (transformer only).")
-    g.add_argument("--ff-dim",           type=int,   default=512,
-                   help="FFN inner dimension in Transformer encoder (transformer only).")
 
     # -- PO --
     g = p.add_argument_group("Preference Optimisation")
@@ -1848,6 +1835,10 @@ def main() -> None:
     g.add_argument("--lr-schedule", type=str, default="none",
                    choices=["none", "cosine", "warmup_cosine"],
                    help="LR schedule: none (constant), cosine, or warmup_cosine.")
+    g.add_argument("--use-amp", type=str, default="auto",
+                   choices=["auto", "true", "false"],
+                   help="Enable FP16 AMP. 'auto' = enabled on CUDA. "
+                        "Disable for transformer models to avoid NaN from MHA overflow in FP16.")
 
     # -- Local search --
     g = p.add_argument_group("Local Search")
@@ -1927,6 +1918,8 @@ def main() -> None:
     if args.config:
         config = _load_json_config(args.config)
         config_keys = [
+            "embedding_size", "hidden_size",
+            "n_glimpses", "tanh_exploration",
             "epochs", "batch_size", "lr", "temperature", "train_size",
             "seed", "epoch_eval_k", "resume_from", "checkpoint_dir",
             "num_rollouts", "aug_factor", "alpha", "ranking_mode",
@@ -1940,6 +1933,7 @@ def main() -> None:
             "finetune_only", "skip_finetune",
             "ft_reward_lambda", "ft_tau_penalty", "ft_cap_coverage",
             "fast_reward", "disc_vis_samples",
+            "use_amp",
         ]
         _apply_config_to_args(args, config, defaults, config_keys, explicit_args)
 
@@ -1962,6 +1956,14 @@ def main() -> None:
 
     _set_global_seed(args.seed)
 
+    def _resolve_use_amp(a):
+        val = getattr(a, 'use_amp', 'auto')
+        if val == 'auto' or val is None:
+            return None  # po_train decides based on device.type
+        if isinstance(val, bool):
+            return val
+        return val.lower() in ('true', '1', 'yes')
+
     # -- datasets --
     vprint("[phase] preparing datasets")
     train_ds, val_ds = prepare_datasets(
@@ -1976,9 +1978,20 @@ def main() -> None:
     model = create_agp_model(
         args.embedding_size, args.hidden_size, args.n_glimpses,
         args.tanh_exploration, args.use_tanh, args.temperature,
-        model_type=args.model_type,
-        n_heads=args.n_heads, n_enc_layers=args.n_enc_layers, ff_dim=args.ff_dim,
     )
+
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"{'='*60}")
+    print(f"  params         = {n_params:,}")
+    print(f"  embedding_size = {args.embedding_size}")
+    print(f"  hidden_size={args.hidden_size}  n_glimpses={args.n_glimpses}")
+    print(f"  preference_loss = {args.preference_loss}  α = {args.alpha}  K = {args.num_rollouts}")
+    print(f"  batch_size={args.batch_size}  lr={args.lr}  lr_schedule={args.lr_schedule}")
+    print(f"  reward: λ={args.reward_lambda}  τ={args.coverage_threshold}  π={args.tau_penalty}  cap={args.cap_coverage}")
+    print(f"  fast_reward={args.fast_reward}  disc_vis_samples={args.disc_vis_samples}")
+    print(f"  epochs={args.epochs}  patience={args.early_stop_patience}  seed={args.seed}")
+    print(f"  checkpoint_dir = {args.checkpoint_dir}")
+    print(f"{'='*60}")
 
     # -- resume --
     start_epoch = 0
@@ -2075,13 +2088,9 @@ def main() -> None:
 
     # -- checkpoint params --
     checkpoint_params = {
-        "model_type":     args.model_type,
         "embedding_size": args.embedding_size,
         "hidden_size":    args.hidden_size,
         "n_glimpses":     args.n_glimpses,
-        "n_heads":        args.n_heads,
-        "n_enc_layers":   args.n_enc_layers,
-        "ff_dim":         args.ff_dim,
         "temperature":    args.temperature,
         "num_rollouts":   args.num_rollouts,
         "alpha":          args.alpha,
@@ -2128,6 +2137,7 @@ def main() -> None:
             early_stop_patience=args.early_stop_patience,
             early_stop_min_delta=args.early_stop_min_delta,
             lr_schedule=args.lr_schedule,
+            use_amp=_resolve_use_amp(args),
         )
     elif args.finetune_only:
         vprint(f"[skip] --finetune-only, skipping PO training")
