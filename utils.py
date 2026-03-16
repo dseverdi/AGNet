@@ -456,6 +456,124 @@ def get_or_build_disc_vis(points: np.ndarray, name: str,
     return cache
 
 
+def _build_full_disc_vis_worker(points_arr: np.ndarray,
+                                n_samples: int,
+                                seed: int) -> "tuple[np.ndarray | None, np.ndarray | None]":
+    """Subprocess worker: build the full disc_vis matrix for one polygon.
+
+    Returns ``(vis_matrix, sample_pts)`` where *vis_matrix* is shape
+    ``(n, n_samples)`` bool, or ``(None, None)`` if the polygon is invalid.
+    Builds the CGAL arrangement once and sweeps all guard vertices.
+    """
+    n = int(points_arr.shape[0])
+    poly = createPolygon(points_arr)
+    if poly is None or poly is False:
+        return None, None
+
+    rng = np.random.default_rng(seed)
+    sample_pts = _sample_points_in_polygon(poly, n_samples, rng)
+    if len(sample_pts) < n_samples:
+        return None, None
+
+    arr = skgeom.arrangement.Arrangement()
+    try:
+        for edge in poly.edges:
+            arr.insert(edge)
+    except RuntimeError:
+        return None, None
+
+    vs = skgeom.TriangularExpansionVisibility(arr)
+    edges = list(poly.edges)
+    eps = 1e-8
+
+    vis_matrix = np.zeros((n, n_samples), dtype=np.bool_)
+    for guard_idx in range(n):
+        vis_poly, _, _ = compute_visibility(vs, arr, poly, eps, edges, guard_idx)
+        if vis_poly:
+            for s in range(n_samples):
+                vis_matrix[guard_idx, s] = _point_in_visibility_polygon(
+                    vis_poly, float(sample_pts[s, 0]), float(sample_pts[s, 1])
+                )
+
+    del vs, arr, edges, poly
+    return vis_matrix, sample_pts
+
+
+def prewarm_disc_vis_cache(dataset, n_samples: int = 500,
+                           n_workers=None,
+                           verbose: bool = True) -> None:
+    """Pre-build discretised visibility caches for all polygons in *dataset*.
+
+    Uses ProcessPoolExecutor — one polygon per task.  Each worker builds the
+    CGAL arrangement once and sweeps all n guards, returning the full
+    (n × n_samples) boolean visibility matrix.  Skips polygons already cached.
+
+    Call this before LS fine-tuning to amortise the per-polygon CGAL cost
+    across all CPU cores instead of hitting it lazily during training.
+    """
+    if n_workers is None:
+        n_workers = int(os.getenv("AGNET_VIS_WORKERS", "0"))
+        if n_workers <= 1:
+            n_workers = max(1, min(os.cpu_count() or 1, 16))
+
+    items: list[tuple[np.ndarray, str, int]] = []
+    for i in range(len(dataset)):
+        data, _, name = dataset[i]
+        pts = np.ascontiguousarray(data.numpy(), dtype=np.float64)
+        key = _cache_key(pts, name)
+        with _DISC_VIS_CACHE_LOCK:
+            if key in _DISC_VIS_CACHE:
+                continue
+        seed = hash(name) % (2 ** 31)
+        items.append((pts, name, seed))
+
+    if not items:
+        if verbose:
+            print("[prewarm-disc] All disc_vis caches already built.")
+        return
+
+    if verbose:
+        print(f"[prewarm-disc] Building disc_vis for {len(items)} polygons "
+              f"with {n_workers} workers (n_samples={n_samples}) ...")
+
+    done = 0
+    max_cache = int(os.getenv("AGNET_DISC_VIS_CACHE_SIZE", "10000"))
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = {
+            pool.submit(_build_full_disc_vis_worker,
+                        pts, n_samples, seed): (pts, name)
+            for pts, name, seed in items
+        }
+        for future in as_completed(futures):
+            pts, name = futures[future]
+            vis_matrix, sample_pts = future.result()
+            done += 1
+
+            n = int(pts.shape[0])
+            key = _cache_key(pts, name)
+            if vis_matrix is None:
+                cache: dict = {"valid": False, "n": n}
+            else:
+                cache = {
+                    "valid": True,
+                    "n": n,
+                    "vis_matrix": vis_matrix,
+                    "n_samples": n_samples,
+                }
+
+            with _DISC_VIS_CACHE_LOCK:
+                _DISC_VIS_CACHE[key] = cache
+                _DISC_VIS_CACHE.move_to_end(key)
+                while len(_DISC_VIS_CACHE) > max_cache:
+                    _DISC_VIS_CACHE.popitem(last=False)
+
+            if verbose and (done % 100 == 0 or done == len(items)):
+                print(f"[prewarm-disc] {done}/{len(items)} done")
+
+    if verbose:
+        print(f"[prewarm-disc] Complete. Disc_vis cache size: {len(_DISC_VIS_CACHE)}")
+
+
 # Merge a list of PolygonSet into one
 def merge_polygon_sets(polygon_sets):
     merged = skgeom.PolygonSet()

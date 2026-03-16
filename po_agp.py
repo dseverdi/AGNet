@@ -63,7 +63,7 @@ except ImportError:
 
 from dataset import Dataset, agp_read_samples, collate_fn
 from models import create_actor
-from utils import evaluate_polygon_visibility_numpy_wo_gt, _get_or_build_vis_cache, get_or_build_disc_vis, prewarm_vis_cache
+from utils import evaluate_polygon_visibility_numpy_wo_gt, _get_or_build_vis_cache, get_or_build_disc_vis, prewarm_vis_cache, prewarm_disc_vis_cache
 from eval_reporting import make_report
 
 
@@ -732,6 +732,144 @@ def local_search_improve(
     return sorted(current), current_r, stats
 
 
+def local_search_improve_disc(
+    points: np.ndarray,
+    initial_guards: list[int],
+    name: str,
+    n: int,
+    *,
+    max_iter: int = 50,
+    enable_swap: bool = True,
+    lam: float = 0.2,
+    tau: float = 0.99,
+    tau_penalty: float = 5.0,
+    cap_at_tau: bool = False,
+    n_samples: int = 500,
+    reward_fn_fallback=None,
+) -> "tuple[list[int], float, dict]":
+    """Vectorized local-search using the prebuilt disc_vis matrix.
+
+    All ADD / REMOVE / SWAP candidates are evaluated with a single numpy
+    matrix operation per phase — no per-candidate Python function call.
+
+    Speedup over sequential disc reward calls:
+      REMOVE  : one (|S|, M) int subtraction + comparison
+      ADD     : one (|cands|, M) logical OR + row-sum
+      SWAP    : |S| iterations of (|cands|, M) logical OR + row-sum
+                (randomised first-improvement over guards → stops early)
+
+    Falls back to ``local_search_improve`` with ``reward_fn_fallback``
+    when the disc_vis cache is unavailable for this polygon.
+    """
+    disc = get_or_build_disc_vis(points, name, n_samples=n_samples)
+    if not disc.get("valid"):
+        if reward_fn_fallback is not None:
+            return local_search_improve(
+                points, initial_guards, name, n, reward_fn_fallback,
+                max_iter=max_iter, enable_swap=enable_swap,
+                greedy_swap=True, lam=lam, tau=tau,
+                tau_penalty=tau_penalty, cap_at_tau=cap_at_tau,
+            )
+        return sorted(initial_guards), 0.0, {}
+
+    vis = disc["vis_matrix"]  # (n, M) bool  — already in main-process cache
+    M = int(disc["n_samples"])
+
+    def _reward_scalar(coverage: float, k: int) -> float:
+        eff = min(coverage, tau) if cap_at_tau else coverage
+        return eff - lam * k / max(1, n) - tau_penalty * max(0.0, tau - coverage)
+
+    def _reward_vec(cov_arr: np.ndarray, k: int) -> np.ndarray:
+        eff = np.minimum(cov_arr, tau) if cap_at_tau else cov_arr
+        return eff - (lam * k / max(1, n)) - tau_penalty * np.maximum(0.0, tau - cov_arr)
+
+    current = set(initial_guards)
+    valid_guards = [g for g in current if 0 <= g < n]
+    guard_count = (
+        vis[np.array(valid_guards, dtype=np.int32)].astype(np.int32).sum(axis=0)
+        if valid_guards else np.zeros(M, dtype=np.int32)
+    )
+    covered = guard_count > 0
+    current_r = _reward_scalar(float(covered.sum()) / M, len(current))
+
+    n_remove = n_add = n_swap = 0
+
+    for iters in range(1, max_iter + 1):
+        improved = False
+        k = len(current)
+        guards_arr = np.array([g for g in current if 0 <= g < n], dtype=np.int32)
+
+        # ── REMOVE: evaluate all guards at once ──────────────────────
+        if k > 1 and len(guards_arr) > 0:
+            # new_gc[i, s] = guard_count[s] - vis[guards_arr[i], s]
+            new_gc = guard_count[None, :] - vis[guards_arr].astype(np.int32)
+            new_covs = (new_gc > 0).sum(axis=1).astype(np.float32) / M
+            r_vals = _reward_vec(new_covs, k - 1)
+            best_idx = int(np.argmax(r_vals))
+            if float(r_vals[best_idx]) > current_r + 1e-9:
+                g = int(guards_arr[best_idx])
+                current.discard(g)
+                guard_count = np.maximum(guard_count - vis[g].astype(np.int32), 0)
+                covered = guard_count > 0
+                current_r = float(r_vals[best_idx])
+                n_remove += 1
+                improved = True
+                continue
+
+        # ── ADD: evaluate all candidates at once ─────────────────────
+        cands = np.array([v for v in range(n) if v not in current], dtype=np.int32)
+        if len(cands) > 0:
+            new_covered_mat = covered[None, :] | vis[cands]  # (|cands|, M)
+            new_covs = new_covered_mat.sum(axis=1).astype(np.float32) / M
+            r_vals = _reward_vec(new_covs, k + 1)
+            best_idx = int(np.argmax(r_vals))
+            if float(r_vals[best_idx]) > current_r + 1e-9:
+                v = int(cands[best_idx])
+                current.add(v)
+                guard_count = guard_count + vis[v].astype(np.int32)
+                covered = new_covered_mat[best_idx]
+                current_r = float(r_vals[best_idx])
+                n_add += 1
+                improved = True
+                continue
+
+        # ── SWAP: vectorise over candidates, greedy over guards ───────
+        if enable_swap and len(guards_arr) > 0 and len(cands) > 0:
+            import random
+            guard_perm = list(range(len(guards_arr)))
+            random.shuffle(guard_perm)
+            for gi in guard_perm:
+                g = int(guards_arr[gi])
+                after_remove_gc = guard_count - vis[g].astype(np.int32)
+                after_remove_covered = after_remove_gc > 0  # (M,)
+                new_covered_mat = after_remove_covered[None, :] | vis[cands]  # (|cands|, M)
+                new_covs = new_covered_mat.sum(axis=1).astype(np.float32) / M
+                r_vals = _reward_vec(new_covs, k)
+                best_c_idx = int(np.argmax(r_vals))
+                if float(r_vals[best_c_idx]) > current_r + 1e-9:
+                    v = int(cands[best_c_idx])
+                    current.discard(g)
+                    current.add(v)
+                    guard_count = after_remove_gc + vis[v].astype(np.int32)
+                    covered = new_covered_mat[best_c_idx]
+                    current_r = float(r_vals[best_c_idx])
+                    n_swap += 1
+                    improved = True
+                    break
+            if improved:
+                continue
+
+        if not improved:
+            break
+
+    return sorted(current), current_r, {
+        "iterations": iters,
+        "n_remove": n_remove,
+        "n_add": n_add,
+        "n_swap": n_swap,
+    }
+
+
 # ===================================================================
 #  2c.  Teacher-forced log-prob  (for LS fine-tuning, paper §3.4)
 # ===================================================================
@@ -1344,8 +1482,24 @@ def po_train(
 
 
 # ===================================================================
-#  4b. LS Fine-tuning  (paper §3.4, Eq. 9)
+#  4b. Expert Fine-tuning  (paper §3.4, Eq. 9)
+#
+#  Two teacher modes:
+#    "ls"      — local search improves each rollout (original method)
+#    "optimal" — preloaded optimal solutions from .solution files
 # ===================================================================
+
+def _load_optimal_solutions(dataset: Dataset, sol_dir: str) -> dict[str, list[int]]:
+    """Load optimal solutions for all instances in *dataset*.
+    Returns {name: [guard_indices]} dict."""
+    opt = {}
+    for i in range(len(dataset)):
+        _, _, name = dataset[i]
+        sol = _read_opt_solution(sol_dir, name)
+        if sol is not None:
+            opt[name] = sol
+    return opt
+
 
 def po_finetune(
     model: torch.nn.Module,
@@ -1367,26 +1521,49 @@ def po_finetune(
     tau: float | None = None,
     tau_penalty: float | None = None,
     cap_at_tau: bool = False,
+    # Teacher method
+    finetune_method: str = "ls",
+    sol_dir: str | None = None,
+    # disc_vis_samples: number of sample points for vectorised disc LS.
+    # Only used when finetune_method="ls". Must match the value used during
+    # prewarm_disc_vis_cache (default 500).
+    disc_vis_samples: int = 500,
+    # Kept for backward compat but no longer used (disc LS is always vectorised)
+    ls_reward_fn: Callable | None = None,
 ) -> None:
-    """Fine-tune via LS-based preference pairs (paper §3.4, Eq. 9).
+    """Fine-tune via preference pairs (paper §3.4, Eq. 9).
 
-    For each mini-batch:
-      1) Sample K trajectories τ_k from π_θ (get solutions + log π(τ_k)).
-      2) Apply local search: LS(τ_k) for each k.
-      3) Teacher-force LS(τ_k) through model → get log π_θ(LS(τ_k)).
-      4) For each (τ_k, LS(τ_k)) pair where r(LS) > r(τ):
-              loss += -log σ(α · [log π(LS) − log π(τ)])
-      5) Update θ.
+    Teacher modes
+    -------------
+    ``finetune_method="ls"`` (original):
+      For each rollout τ_k, run local-search → LS(τ_k).
+      Preference pair: (τ_k, LS(τ_k)) where r(LS) > r(τ).
+      Set *ls_reward_fn* to a fast approximation (e.g. discrete visibility)
+      to make LS comparisons cheap while keeping exact reward for r_tau.
 
-    This teaches the policy to **internalise** local-search quality
-    solutions, so at inference time LS is no longer needed.
+    ``finetune_method="optimal"``:
+      Use preloaded optimal solutions from .solution files.
+      Preference pair: (τ_k, optimal) where r(optimal) > r(τ).
+      Zero runtime cost — no CGAL/LS calls during training.
     """
+    method_label = {"ls": "LS", "optimal": "Optimal"}[finetune_method]
     print(
         f"\n{'='*60}\n"
-        f"  LS Fine-tune (§3.4)  |  {len(dataset)} inst  |  K={K}  |"
+        f"  {method_label} Fine-tune (§3.4)  |  {len(dataset)} inst  |  K={K}  |"
         f"  {epochs} epochs  |  bs={batch_size}  |  α={alpha}\n"
         f"{'='*60}"
     )
+
+    # -- Preload optimal solutions if needed --
+    opt_solutions: dict[str, list[int]] = {}
+    if finetune_method == "optimal":
+        if sol_dir is None:
+            raise ValueError("finetune_method='optimal' requires sol_dir")
+        opt_solutions = _load_optimal_solutions(dataset, sol_dir)
+        n_found = len(opt_solutions)
+        print(f"  Loaded {n_found}/{len(dataset)} optimal solutions from {sol_dir}")
+        if n_found == 0:
+            raise RuntimeError("No optimal solutions found — cannot fine-tune")
 
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -1431,44 +1608,72 @@ def po_finetune(
                     n = int(lens_t[b].item())
                     pts_cache.append(batch_data[b, :n].detach().cpu().numpy())
 
-            # ── 2) Apply LS to each rollout ──────────────────────
-            tau_seqs: list[list[int]] = []      # original solution sequences
-            ls_seqs:  list[list[int]] = []       # LS-improved sequences (+ EOS)
-            tau_rewards: list[float]  = []
-            ls_rewards:  list[float]  = []
-            pair_b_idx:  list[int]    = []       # which batch element
+            # ── 2) Build preference pairs ────────────────────────
+            tau_seqs: list[list[int]] = []
+            teacher_seqs: list[list[int]] = []
+            pair_b_idx: list[int] = []
 
             for i in range(B * K):
                 b = i // K
                 n = int(lens_t[b].item())
                 sol = [idx for idx in all_idxs[i] if idx < n]
-                r_tau = reward_fn(pts_cache[b], sol, names[b], length=n)
 
-                ls_sol, r_ls, _ = local_search_improve(
-                    pts_cache[b], sol, names[b], n, reward_fn,
-                    max_iter=ls_max_iter, enable_swap=ls_swap,
-                    greedy_swap=True,
-                    lam=lam, tau=tau, tau_penalty=tau_penalty, cap_at_tau=cap_at_tau,
-                )
-
-                if r_ls > r_tau + 1e-9:
-                    # Preference pair: LS wins over tau
-                    tau_seqs.append(all_idxs[i])   # includes EOS from model
-                    ls_seqs.append(ls_sol + [n])    # append EOS index
-                    tau_rewards.append(r_tau)
-                    ls_rewards.append(r_ls)
+                if finetune_method == "optimal":
+                    # Optimal teacher: coverage=1.0, always better than
+                    # any model rollout.  Skip reward computation entirely
+                    # (no CGAL needed).
+                    opt_sol = opt_solutions.get(names[b])
+                    if opt_sol is None:
+                        n_total_pairs += 1
+                        continue
+                    # Always create preference pair — optimal dominates
+                    tau_seqs.append(all_idxs[i])
+                    teacher_seqs.append(opt_sol + [n])  # append EOS
                     pair_b_idx.append(b)
                     n_improved += 1
+                    n_total_pairs += 1
+                else:
+                    # LS teacher — fully vectorised via disc_vis matrix.
+                    # local_search_improve_disc evaluates all ADD/REMOVE/SWAP
+                    # candidates with a single numpy matrix op per phase.
+                    _lam = lam if lam is not None else 0.2
+                    _tau = tau if tau is not None else 0.99
+                    _tp  = tau_penalty if tau_penalty is not None else 5.0
+                    teacher_sol, r_teacher, _ = local_search_improve_disc(
+                        pts_cache[b], sol, names[b], n,
+                        max_iter=ls_max_iter,
+                        enable_swap=ls_swap,
+                        lam=_lam, tau=_tau, tau_penalty=_tp,
+                        cap_at_tau=cap_at_tau,
+                        n_samples=disc_vis_samples,
+                        reward_fn_fallback=reward_fn,
+                    )
+                    # Compute r_tau in same (disc) space for fair comparison
+                    from utils import get_or_build_disc_vis as _gdv
+                    _disc = _gdv(pts_cache[b], names[b], n_samples=disc_vis_samples)
+                    if _disc.get("valid"):
+                        _vis = _disc["vis_matrix"]; _M = _disc["n_samples"]
+                        _sol_idx = [g for g in sol if 0 <= g < n]
+                        _cov = (_vis[np.array(_sol_idx, dtype=np.int32)].any(axis=0).sum() / _M
+                                if _sol_idx else 0.0)
+                        _eff = min(_cov, _tau) if cap_at_tau else _cov
+                        r_tau = _eff - _lam * len(sol) / max(1, n) - _tp * max(0.0, _tau - _cov)
+                    else:
+                        r_tau = reward_fn(pts_cache[b], sol, names[b], length=n)
 
-                n_total_pairs += 1
+                    if r_teacher > r_tau + 1e-9:
+                        tau_seqs.append(all_idxs[i])
+                        teacher_seqs.append(teacher_sol + [n])  # append EOS
+                        pair_b_idx.append(b)
+                        n_improved += 1
+
+                    n_total_pairs += 1
 
             if not tau_seqs:
-                # No improvements found in this batch — skip
                 n_instances += B
                 continue
 
-            # ── 3) Teacher-force log π(LS(τ)) ────────────────────
-            # Gather the batch elements that have improvements
+            # ── 3) Teacher-force log π(teacher) and log π(τ) ─────
             P = len(tau_seqs)
             tf_data = torch.stack([batch_data[pair_b_idx[j]] for j in range(P)])
             tf_mask = torch.stack([pad_mask[pair_b_idx[j]] for j in range(P)])
@@ -1477,25 +1682,29 @@ def po_finetune(
                 dtype=torch.long, device=device,
             )
 
-            # log π(LS(τ)) via teacher forcing
-            lp_ls = teacher_force_log_prob(model, tf_data, ls_seqs, tf_mask, tf_lens)
-
-            # log π(τ) via teacher forcing (original sampled sequence)
-            lp_tau = teacher_force_log_prob(model, tf_data, tau_seqs, tf_mask, tf_lens)
+            lp_teacher = teacher_force_log_prob(
+                model, tf_data, teacher_seqs, tf_mask, tf_lens,
+            )
+            lp_tau = teacher_force_log_prob(
+                model, tf_data, tau_seqs, tf_mask, tf_lens,
+            )
 
             # Length-normalise
-            ls_steps = torch.tensor(
-                [max(1, len(s)) for s in ls_seqs], dtype=torch.float32, device=device,
+            teacher_steps = torch.tensor(
+                [max(1, len(s)) for s in teacher_seqs],
+                dtype=torch.float32, device=device,
             )
             tau_steps = torch.tensor(
-                [max(1, len(s)) for s in tau_seqs], dtype=torch.float32, device=device,
+                [max(1, len(s)) for s in tau_seqs],
+                dtype=torch.float32, device=device,
             )
-            lp_ls_norm = lp_ls / ls_steps
+            lp_teacher_norm = lp_teacher / teacher_steps
             lp_tau_norm = lp_tau / tau_steps
 
-            # ── 4) BT loss: LS preferred over τ ─────────────────
-            # y=1 (LS always wins here), so loss = -log σ(α·(log π(LS) − log π(τ)))
-            loss = -F.logsigmoid(alpha * (lp_ls_norm - lp_tau_norm)).mean()
+            # ── 4) BT loss: teacher preferred over τ ─────────────
+            loss = -F.logsigmoid(
+                alpha * (lp_teacher_norm - lp_tau_norm)
+            ).mean()
 
             optimizer.zero_grad()
             loss.backward()
@@ -1512,7 +1721,7 @@ def po_finetune(
                     improved=f"{n_improved}/{n_total_pairs}",
                 )
 
-            del tf_data, tf_mask, tf_lens, lp_ls, lp_tau
+            del tf_data, tf_mask, tf_lens, lp_teacher, lp_tau
             torch.cuda.empty_cache()
 
         avg_loss = total_loss / max(1, n_improved)
@@ -1532,6 +1741,7 @@ def po_finetune(
                 "optimizer_state_dict": optimizer.state_dict(),
                 "epoch": epoch,
                 "finetune": True,
+                "finetune_method": finetune_method,
                 "K": K, "alpha": alpha,
                 "checkpoint_params": checkpoint_params,
             }, p)
@@ -1540,7 +1750,7 @@ def po_finetune(
         gc.collect()
         torch.cuda.empty_cache()
 
-    print("LS fine-tuning complete.\n")
+    print(f"{method_label} fine-tuning complete.\n")
 
 
 # ===================================================================
@@ -1877,17 +2087,21 @@ def main() -> None:
     g.add_argument("--ls-no-swap",      action="store_true", default=False,
                    help="Disable swap moves in LS (faster, less thorough).")
 
-    # -- LS Fine-tuning (§3.4) --
-    g = p.add_argument_group("LS Fine-tuning")
+    # -- Expert Fine-tuning (§3.4) --
+    g = p.add_argument_group("Expert Fine-tuning")
     g.add_argument("--finetune-only",   action="store_true", default=False,
-                   help="Skip PO training, run only LS fine-tuning (requires --resume-from).")
+                   help="Skip PO training, run only fine-tuning (requires --resume-from).")
     g.add_argument("--skip-finetune",   action="store_true", default=False,
-                   help="Skip LS fine-tuning stage (useful for quick smoke runs).")
+                   help="Skip fine-tuning stage (useful for quick smoke runs).")
+    g.add_argument("--finetune-method", type=str, default="optimal",
+                   choices=["ls", "optimal"],
+                   help="Teacher method: 'optimal' uses precomputed .solution files "
+                        "(fast, strongest signal); 'ls' runs local search per rollout.")
     g.add_argument("--finetune-epochs", type=int, default=0,
-                   help="Post-training LS fine-tune epochs (0=disabled). "
+                   help="Post-training fine-tune epochs (0=disabled). "
                         "Paper recommends ~5%% of total epochs.")
     g.add_argument("--finetune-lr",     type=float, default=1e-5,
-                   help="Learning rate for LS fine-tuning (lower than main training).")
+                   help="Learning rate for fine-tuning (lower than main training).")
     g.add_argument("--finetune-k",      type=int, default=4,
                    help="Rollouts per instance during fine-tuning.")
     g.add_argument("--ft-reward-lambda",  type=float, default=None,
@@ -1958,7 +2172,7 @@ def main() -> None:
             "cap_coverage", "max_grad_norm",
             "local_search", "ls_max_iter",
             "finetune_epochs", "finetune_lr", "finetune_k",
-            "finetune_only", "skip_finetune",
+            "finetune_only", "skip_finetune", "finetune_method",
             "ft_reward_lambda", "ft_tau_penalty", "ft_cap_coverage",
             "fast_reward", "disc_vis_samples",
             "use_amp",
@@ -2146,11 +2360,14 @@ def main() -> None:
     remaining = args.epochs - start_epoch
 
     # Pre-build CGAL visibility caches in parallel (exact reward only)
-    if not args.fast_reward:
-        if remaining > 0 and not args.finetune_only:
-            prewarm_vis_cache(small_train, verbose=args.verbose)
-        elif args.finetune_only:
-            prewarm_vis_cache(small_train, verbose=args.verbose)
+    # Skip when fine-tuning only: optimal uses no CGAL, LS uses disc reward.
+    need_cgal_train_prewarm = (
+        not args.fast_reward
+        and not args.finetune_only
+        and remaining > 0
+    )
+    if need_cgal_train_prewarm:
+        prewarm_vis_cache(small_train, verbose=args.verbose)
 
     if remaining > 0 and not args.finetune_only:
         po_train(
@@ -2180,11 +2397,19 @@ def main() -> None:
     else:
         vprint(f"[skip] start_epoch={start_epoch} >= epochs={args.epochs}")
 
-    # -- LS fine-tuning (§3.4) --
+    # -- Expert fine-tuning (§3.4) --
     if args.skip_finetune:
-        vprint("[skip] --skip-finetune set, skipping LS fine-tuning")
+        vprint("[skip] --skip-finetune set, skipping fine-tuning")
     elif args.finetune_epochs > 0:
-        vprint(f"[phase] LS fine-tuning ({args.finetune_epochs} epochs)")
+        # Pre-build disc_vis caches for LS fine-tuning (amortises per-polygon
+        # CGAL cost across all CPU cores before the training loop starts).
+        if args.finetune_method == "ls" and not args.fast_reward:
+            prewarm_disc_vis_cache(
+                small_train,
+                n_samples=args.disc_vis_samples,
+                verbose=args.verbose,
+            )
+        vprint(f"[phase] {args.finetune_method} fine-tuning ({args.finetune_epochs} epochs)")
         po_finetune(
             model, small_train, ft_reward_fn,
             K=args.finetune_k,
@@ -2202,6 +2427,9 @@ def main() -> None:
             tau=tau,
             tau_penalty=ft_tau_pen,
             cap_at_tau=ft_cap_cov,
+            finetune_method=args.finetune_method,
+            sol_dir=args.agp_train_dir,
+            disc_vis_samples=args.disc_vis_samples,
         )
 
     # -- save final --
