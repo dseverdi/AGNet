@@ -37,6 +37,7 @@ Reference:
 
 from __future__ import annotations
 
+import copy
 import gc
 import json
 import os
@@ -1530,6 +1531,8 @@ def po_finetune(
     disc_vis_samples: int = 500,
     # Kept for backward compat but no longer used (disc LS is always vectorised)
     ls_reward_fn: Callable | None = None,
+    # DPO-style reference-model regularisation (prevents distributional shift)
+    use_ref_model: bool = True,
 ) -> None:
     """Fine-tune via preference pairs (paper §3.4, Eq. 9).
 
@@ -1564,6 +1567,15 @@ def po_finetune(
         print(f"  Loaded {n_found}/{len(dataset)} optimal solutions from {sol_dir}")
         if n_found == 0:
             raise RuntimeError("No optimal solutions found — cannot fine-tune")
+
+    # -- Frozen reference model for DPO regularisation --
+    ref_model = None
+    if use_ref_model:
+        ref_model = copy.deepcopy(model)
+        ref_model.eval()
+        for p in ref_model.parameters():
+            p.requires_grad = False
+        print("  DPO mode: frozen reference model created")
 
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -1639,7 +1651,7 @@ def po_finetune(
                     _lam = lam if lam is not None else 0.2
                     _tau = tau if tau is not None else 0.99
                     _tp  = tau_penalty if tau_penalty is not None else 5.0
-                    teacher_sol, r_teacher, _ = local_search_improve_disc(
+                    teacher_sol, _, _ = local_search_improve_disc(
                         pts_cache[b], sol, names[b], n,
                         max_iter=ls_max_iter,
                         enable_swap=ls_swap,
@@ -1648,18 +1660,11 @@ def po_finetune(
                         n_samples=disc_vis_samples,
                         reward_fn_fallback=reward_fn,
                     )
-                    # Compute r_tau in same (disc) space for fair comparison
-                    from utils import get_or_build_disc_vis as _gdv
-                    _disc = _gdv(pts_cache[b], names[b], n_samples=disc_vis_samples)
-                    if _disc.get("valid"):
-                        _vis = _disc["vis_matrix"]; _M = _disc["n_samples"]
-                        _sol_idx = [g for g in sol if 0 <= g < n]
-                        _cov = (_vis[np.array(_sol_idx, dtype=np.int32)].any(axis=0).sum() / _M
-                                if _sol_idx else 0.0)
-                        _eff = min(_cov, _tau) if cap_at_tau else _cov
-                        r_tau = _eff - _lam * len(sol) / max(1, n) - _tp * max(0.0, _tau - _cov)
-                    else:
-                        r_tau = reward_fn(pts_cache[b], sol, names[b], length=n)
+                    # Validate with exact reward to avoid disc approximation
+                    # errors causing spurious acceptance (esp. for REMOVE moves
+                    # at high coverage thresholds where disc error is ~5%).
+                    r_tau    = reward_fn(pts_cache[b], sol,         names[b], length=n)
+                    r_teacher = reward_fn(pts_cache[b], teacher_sol, names[b], length=n)
 
                     if r_teacher > r_tau + 1e-9:
                         tau_seqs.append(all_idxs[i])
@@ -1701,10 +1706,27 @@ def po_finetune(
             lp_teacher_norm = lp_teacher / teacher_steps
             lp_tau_norm = lp_tau / tau_steps
 
-            # ── 4) BT loss: teacher preferred over τ ─────────────
-            loss = -F.logsigmoid(
-                alpha * (lp_teacher_norm - lp_tau_norm)
-            ).mean()
+            # ── 4) DPO / BT loss: teacher preferred over τ ──────
+            if ref_model is not None:
+                # DPO: anchor updates to frozen reference policy
+                # L = -log σ(α·((logπ-logπ_ref)/|S|_teacher - (logπ-logπ_ref)/|S|_τ))
+                with torch.no_grad():
+                    lp_ref_teacher = teacher_force_log_prob(
+                        ref_model, tf_data, teacher_seqs, tf_mask, tf_lens,
+                    )
+                    lp_ref_tau = teacher_force_log_prob(
+                        ref_model, tf_data, tau_seqs, tf_mask, tf_lens,
+                    )
+                delta_teacher = (lp_teacher - lp_ref_teacher) / teacher_steps
+                delta_tau     = (lp_tau     - lp_ref_tau)     / tau_steps
+                loss = -F.logsigmoid(
+                    alpha * (delta_teacher - delta_tau)
+                ).mean()
+            else:
+                # Plain BT (no reference model)
+                loss = -F.logsigmoid(
+                    alpha * (lp_teacher_norm - lp_tau_norm)
+                ).mean()
 
             optimizer.zero_grad()
             loss.backward()
@@ -1722,6 +1744,8 @@ def po_finetune(
                 )
 
             del tf_data, tf_mask, tf_lens, lp_teacher, lp_tau
+            if ref_model is not None:
+                del lp_ref_teacher, lp_ref_tau
             torch.cuda.empty_cache()
 
         avg_loss = total_loss / max(1, n_improved)
@@ -2110,6 +2134,9 @@ def main() -> None:
                    help="Override τ-penalty during FT (default: same as --tau-penalty).")
     g.add_argument("--ft-cap-coverage",   type=str, default=None, choices=["true", "false"],
                    help="Override cap-coverage during FT (default: same as --cap-coverage).")
+    g.add_argument("--ft-no-ref-model",  action="store_true", default=False,
+                   help="Disable DPO reference-model regularisation during fine-tuning. "
+                        "Without ref model, BT loss alone can cause distributional shift.")
 
     # -- Reward --
     g = p.add_argument_group("Reward")
@@ -2360,11 +2387,14 @@ def main() -> None:
     remaining = args.epochs - start_epoch
 
     # Pre-build CGAL visibility caches in parallel (exact reward only)
-    # Skip when fine-tuning only: optimal uses no CGAL, LS uses disc reward.
+    # Also needed for LS fine-tuning: exact CGAL used to validate
+    # pair acceptance (disc LS generates candidates, exact validates them).
     need_cgal_train_prewarm = (
         not args.fast_reward
-        and not args.finetune_only
-        and remaining > 0
+        and (
+            (not args.finetune_only and remaining > 0)
+            or (args.finetune_only and args.finetune_method == "ls")
+        )
     )
     if need_cgal_train_prewarm:
         prewarm_vis_cache(small_train, verbose=args.verbose)
@@ -2430,6 +2460,7 @@ def main() -> None:
             finetune_method=args.finetune_method,
             sol_dir=args.agp_train_dir,
             disc_vis_samples=args.disc_vis_samples,
+            use_ref_model=not args.ft_no_ref_model,
         )
 
     # -- save final --
