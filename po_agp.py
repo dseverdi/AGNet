@@ -1575,6 +1575,10 @@ def po_finetune(
         ref_model.eval()
         for p in ref_model.parameters():
             p.requires_grad = False
+        # Re-flatten LSTM weights after deepcopy to restore contiguous layout
+        for m in ref_model.modules():
+            if isinstance(m, torch.nn.LSTM):
+                m.flatten_parameters()
         print("  DPO mode: frozen reference model created")
 
     model.train()
