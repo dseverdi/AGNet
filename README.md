@@ -10,6 +10,7 @@ A comprehensive implementation of multiple algorithms for the Art Gallery Proble
 2. [Problem Definition](#problem-definition)
 3. [Methods Implemented](#methods-implemented)
    - [3b. RL v2 — Weighted-Sum Reward](#3b-reinforcement-learning-v2--weighted-sum-reward-rl_agp_v2py--new)
+   - [9. Preference Optimisation NCO](#9-preference-optimisation-nco-po_agppy-)
 4. [Installation](#installation)
 5. [Quick Start](#quick-start)
 6. [Evaluation (Recommended)](#evaluation-recommended)
@@ -29,6 +30,7 @@ This repository implements multiple approaches:
 - **Greedy algorithms** (baseline heuristic)
 - **Supervised learning** (learn from optimal solutions)
 - **Self-supervised NCO** (learn from a coverage/cost oracle; solution-sampler policy) ✨
+- **Preference Optimisation NCO** (PO with Bradley-Terry loss + LS fine-tuning) ✨ NEW
 - **Reinforcement learning** (learn through trial and error)
   - Additive RL (build solution incrementally)
   - **Pruning RL** (start full, remove redundant guards) ✨ NEW
@@ -612,6 +614,174 @@ python ss_agp.py \
   --train-size 2000 --epochs 30 --batch-size 64 --eval-k 100 \
   --penalty-weight 50 --lambda-card 0.2 --coverage-gate 0.95 \
   --log-every 10
+```
+
+---
+
+### 9. Preference Optimisation NCO (`po_agp.py`) ✨
+
+**Approach**: Train the same LSTM PointerNet architecture with **Preference Optimisation (PO)** (Pan et al., ICML 2025, arXiv:2505.08735) instead of REINFORCE.
+PO replaces single-sample policy-gradient advantages with *pairwise preferences* between stochastic rollouts: for every pair where rollout $\tau_i$ scores higher than $\tau_j$, the Bradley-Terry loss pushes $\pi(\tau_i)$ up and $\pi(\tau_j)$ down.
+
+**Why PO over REINFORCE**:
+- Binary preferences do not vanish as rewards converge (addresses reward-signal diminishment).
+- Scale-invariant: no sensitivity to absolute reward magnitude.
+- Implicit entropy regularisation via $\alpha$ — no separate entropy bonus needed.
+
+#### Architecture
+
+Same LSTM PointerNet as RL v2 (§3b):
+
+```
+Input:  Polygon vertices  V = {v₁, …, vₙ}  (2D coordinates)
+Append: EOS token (zero vector)  →  V' = {v₁, …, vₙ, v_EOS}
+Encode: bi-LSTM produces hidden states  h₁, …, hₙ₊₁
+Decode: At each step t, Bahdanau attention over encoder states
+        produces pointer logits  u_t ∈ ℝⁿ⁺¹, softmax → π(aₜ | a<t, V)
+        If aₜ = EOS  →  stop (variable-length output)
+Output: Guard set  S = {aₜ : aₜ ≠ EOS}
+```
+
+Default hyperparameters: `embedding_size=128`, `hidden_size=128`, `n_glimpses=1`, `temperature=1.0`.
+
+#### Reward Function
+
+The smooth reward trades off coverage and guard-set sparsity:
+
+$$r(S) = \min(c, \tau) - \lambda \cdot \frac{|S|}{n} - \pi \cdot \max(0, \tau - c)$$
+
+where:
+- $c = \text{Coverage}(S, P)$ — exact CGAL visibility area ratio
+- $\tau$ — coverage feasibility threshold (default 0.99)
+- $\lambda$ — guard-sparsity penalty (default 0.2, CLI `--reward-lambda`)
+- $\pi$ — penalty for undercoverage (default 5.0, CLI `--tau-penalty`)
+- $|S|/n$ — fraction of vertices selected as guards
+
+With `--cap-coverage` (default True), coverage above $\tau$ yields zero marginal reward, so the only way to improve is to reduce $|S|$.
+
+**Fast approximation** (`po_reward_smooth_disc`): Uses a precomputed binary visibility matrix with $M=500$ sample points for $O(M)$ coverage estimation. Falls back to exact CGAL on cache miss.
+
+#### Main PO Training
+
+For each mini-batch of $B$ instances:
+
+1. **Sample** $K$ stochastic rollouts per instance ($K=8$ default)
+2. **Pairwise preferences**: $\text{pref}_{b,i,j} = \mathbb{1}(r_{b,i} > r_{b,j})$ — all $K \times K$ pairs
+3. **Bradley-Terry loss** on length-normalised log-probs (paper §4.2):
+
+$$\mathcal{L} = -\frac{1}{n_{\text{pairs}}} \sum_{b,i,j} \text{pref}_{b,i,j} \cdot \log \sigma\!\bigl(\alpha \cdot [\overline{\log \pi}(\tau_i) - \overline{\log \pi}(\tau_j)]\bigr)$$
+
+where $\overline{\log \pi}(\tau) = \frac{1}{|\tau|}\sum_{t=1}^{|\tau|}\log \pi(a_t \mid a_{<t}, V)$ is the length-normalised log-probability, and $\alpha$ (default 0.05) controls the exploration–exploitation trade-off.
+
+4. **Adam + gradient clipping** (`max_grad_norm=0.5`), optional AMP (FP16), optional cosine/warmup-cosine LR schedule.
+
+#### Fine-Tuning with Local Search (§3.4)
+
+The fine-tuning stage improves the trained policy by constructing preference pairs where the "teacher" is a local-search-improved version of the model's own rollouts. Two key design decisions prevent distributional collapse:
+
+##### Phase 1: Offline Pair Precomputation
+
+All preference pairs are generated **once** from the original (pre-fine-tuning) model. This prevents the cascading guard-removal collapse observed when pairs are re-sampled each epoch.
+
+```
+For each training instance:
+  1. Sample K rollouts from frozen model: τ₁, …, τ_K
+  2. For each τ_k, run vectorised local search → teacher_k = LS(τ_k)
+  3. Verify improvement with Pareto acceptance (exact CGAL):
+     - Coverage must not decrease: cov(teacher) ≥ cov(τ) - ε
+     - Guard count must not increase: |teacher| ≤ |τ|
+     - At least one strictly better: cov(teacher) > cov(τ) + ε  OR  |teacher| < |τ|
+  4. If accepted, store pair (τ_k, teacher_k)
+```
+
+The Pareto acceptance criterion ensures the teacher is a genuine Pareto improvement — preventing the local search from trading coverage for sparsity in a way that confuses the policy.
+
+##### Vectorised Local Search (`local_search_improve_disc`)
+
+The local search operates on a precomputed **discretised visibility matrix** $V \in \{0,1\}^{n \times M}$, where $V_{g,s} = 1$ if guard $g$ sees sample point $s$ ($M = 500$ by default). Three move types, all vectorised via NumPy matrix operations:
+
+| Move | Operation | Complexity | Selection |
+|------|-----------|------------|-----------|
+| **REMOVE** | Drop guard $g$. New coverage = $\mathbb{1}(\text{gc} - V_g > 0)$ | $O(\|S\| \cdot M)$ | Best-improvement |
+| **ADD** | Add vertex $v$. New coverage = $\text{covered} \lor V_v$ | $O(\|C\| \cdot M)$ | Best-improvement |
+| **SWAP** | Replace guard $g$ with candidate $v$ | $O(\|S\| \cdot \|C\| \cdot M)$ | First-improvement (random order) |
+
+where $\text{gc}_s = \sum_{g \in S} V_{g,s}$ is the per-sample guard count, $|C| = n - |S|$ is the number of candidate vertices. Each iteration tries REMOVE → ADD → SWAP, stopping when no move improves the reward.
+
+##### Phase 2: Fixed-Pair Training
+
+Training iterates over the precomputed offline pairs with **DPO-style reference-model regularisation** to prevent distributional shift:
+
+$$\mathcal{L}_{\text{DPO}} = -\log \sigma\!\bigl(\alpha \cdot [\Delta_{\text{teacher}} - \Delta_{\tau}]\bigr)$$
+
+where:
+$$\Delta_{\text{teacher}} = \frac{\log \pi_\theta(\text{teacher}) - \log \pi_{\text{ref}}(\text{teacher})}{|\text{teacher}|}$$
+$$\Delta_{\tau} = \frac{\log \pi_\theta(\tau) - \log \pi_{\text{ref}}(\tau)}{|\tau|}$$
+
+The frozen reference model $\pi_{\text{ref}}$ (a deep copy of the pre-fine-tuning model) anchors the policy, preventing it from drifting too far from the initial distribution. Both teacher and rollout log-probs are length-normalised.
+
+Without the reference model (`--ft-no-ref-model`), the loss simplifies to standard Bradley-Terry on length-normalised log-probs.
+
+##### Discretised Visibility Cache
+
+The binary visibility matrix ($n \times M$ `bool` array, $M=500$ sample points) is expensive to build (requires CGAL per-vertex visibility polygons). The system supports:
+
+- **Parallel prewarming** (`prewarm_disc_vis_cache`): builds matrices for all polygons using `ProcessPoolExecutor` (16 workers)
+- **Disk persistence** (`--disc-vis-cache-path`): saves/loads the entire cache via pickle, avoiding recomputation across runs
+
+#### Evaluation
+
+Two decoding modes:
+- **Greedy** (`deterministic=True`): single argmax solution
+- **Stochastic best-of-K** (`deterministic=False`): $\text{aug} \times K$ rollouts, best by coverage then guard count
+
+Metrics per instance: coverage, $|S|/n$, $|S|/\text{opt}$ (when `.solution` files available).
+
+#### Key CLI Arguments
+
+| Category | Argument | Default | Description |
+|----------|----------|---------|-------------|
+| **PO** | `--num-rollouts` | 8 | $K$ stochastic rollouts per instance |
+| | `--alpha` | 0.05 | PO scaling $\alpha$ (0.03–0.05 recommended) |
+| | `--preference-loss` | `bt` | `bt` (Bradley-Terry) or `exponential` |
+| **Reward** | `--reward-lambda` | 1.0 | Guard-sparsity penalty $\lambda$ |
+| | `--coverage-threshold` | 0.99 | Coverage threshold $\tau$ |
+| | `--tau-penalty` | 3.0 | Undercoverage penalty $\pi$ |
+| | `--cap-coverage` | True | Cap coverage reward at $\tau$ |
+| **Fine-tune** | `--finetune-method` | `ls` | `ls` (local search) or `optimal` |
+| | `--finetune-epochs` | 0 | Fine-tuning epochs |
+| | `--finetune-lr` | 1e-5 | Fine-tuning learning rate |
+| | `--finetune-k` | 4 | Rollouts during fine-tuning |
+| | `--ft-no-ref-model` | False | Disable DPO reference model |
+| | `--ft-ls-swap-only` | False | Only SWAP moves in LS |
+| | `--disc-vis-cache-path` | None | Path to save/load disc\_vis cache |
+| **Training** | `--epochs` | 50 | Main training epochs |
+| | `--batch-size` | 64 | Batch size |
+| | `--lr` | 2e-4 | Learning rate |
+| | `--config` | None | JSON config file (CLI overrides) |
+
+#### Usage
+
+```bash
+# Main PO training
+python po_agp.py --config configs/po_agp_train.json \
+    --checkpoint-dir checkpoints/v3/po_agp/lstm_bt \
+    --epochs 50 --verbose
+
+# Fine-tune with local search (offline pairs + DPO)
+python po_agp.py \
+    --finetune-only \
+    --resume-from checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt \
+    --finetune-method ls \
+    --finetune-epochs 5 --finetune-lr 1e-5 --finetune-k 4 \
+    --alpha 0.05 --batch-size 32 \
+    --disc-vis-cache-path data/disc_vis_cache.pkl \
+    --checkpoint-dir checkpoints/v3/po_agp/lstm_bt_ft \
+    --verbose
+
+# Evaluation only
+python po_agp.py --epochs 0 \
+    --resume-from checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt
 ```
 
 ---

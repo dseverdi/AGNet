@@ -574,6 +574,38 @@ def prewarm_disc_vis_cache(dataset, n_samples: int = 500,
         print(f"[prewarm-disc] Complete. Disc_vis cache size: {len(_DISC_VIS_CACHE)}")
 
 
+def save_disc_vis_cache(path: str, verbose: bool = True) -> None:
+    """Persist the disc_vis cache to disk as a compressed .npz file."""
+    import pickle
+    with _DISC_VIS_CACHE_LOCK:
+        data = dict(_DISC_VIS_CACHE)
+    with open(path, "wb") as f:
+        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    if verbose:
+        print(f"[disc_vis] Saved {len(data)} entries to {path}")
+
+
+def load_disc_vis_cache(path: str, verbose: bool = True) -> int:
+    """Load disc_vis cache from disk. Returns the number of entries loaded."""
+    import pickle
+    if not os.path.exists(path):
+        if verbose:
+            print(f"[disc_vis] No cache file at {path}")
+        return 0
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    loaded = 0
+    with _DISC_VIS_CACHE_LOCK:
+        for key, val in data.items():
+            if key not in _DISC_VIS_CACHE:
+                _DISC_VIS_CACHE[key] = val
+                loaded += 1
+    if verbose:
+        print(f"[disc_vis] Loaded {loaded} entries from {path} "
+              f"(cache size: {len(_DISC_VIS_CACHE)})")
+    return loaded
+
+
 # Merge a list of PolygonSet into one
 def merge_polygon_sets(polygon_sets):
     merged = skgeom.PolygonSet()
