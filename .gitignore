@@ -71,3 +71,5 @@ __pycache__/
 checkpoints/
 gfx/
 tsplib_cache/
+data/disc_vis_cache.pkl
+data/value_net_training_data.pkl
