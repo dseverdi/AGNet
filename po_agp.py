@@ -1537,6 +1537,12 @@ def po_finetune(
     use_ref_model: bool = True,
     # Swap-only LS: disable ADD/REMOVE (not needed with Pareto acceptance)
     ft_ls_swap_only: bool = False,
+    # Loss type: "dpo" (contrastive) or "sft" (supervised on teacher seqs)
+    ft_loss_type: str = "dpo",
+    # L2 weight penalty toward reference model (prevents catastrophic drift in SFT)
+    ft_kl_coeff: float = 0.0,
+    # LS iteration budget for REINFORCE+LS (low → placement signal; high → equalization)
+    ft_rl_ls_budget: int = 3,
 ) -> None:
     """Fine-tune via preference pairs (paper §3.4, Eq. 9).
 
@@ -1555,11 +1561,14 @@ def po_finetune(
     """
     method_label = {"ls": "LS", "optimal": "Optimal"}[finetune_method]
     ls_mode = "swap-only" if ft_ls_swap_only else "all moves"
+    loss_label = ft_loss_type.upper()
+    kl_label = f"  kl_coeff={ft_kl_coeff}" if ft_kl_coeff > 0 else ""
+    rl_ls_label = f"  rl_ls_budget={ft_rl_ls_budget}" if ft_loss_type == "reinforce_ls" else ""
     print(
         f"\n{'='*60}\n"
-        f"  {method_label} Fine-tune (§3.4)  |  {len(dataset)} inst  |  K={K}  |"
+        f"  {method_label} Fine-tune (§3.4)  |  {len(dataset)} inst  |  K={K}  |\n"
         f"  {epochs} epochs  |  bs={batch_size}  |  α={alpha}\n"
-        f"  LS moves: {ls_mode}\n"
+        f"  LS moves: {ls_mode}  |  loss: {loss_label}{kl_label}{rl_ls_label}\n"
         f"{'='*60}"
     )
 
@@ -1574,7 +1583,7 @@ def po_finetune(
         if n_found == 0:
             raise RuntimeError("No optimal solutions found — cannot fine-tune")
 
-    # -- Frozen reference model for DPO regularisation --
+    # -- Frozen reference model for DPO / SFT+KL regularisation --
     ref_model = None
     if use_ref_model:
         ref_model = copy.deepcopy(model)
@@ -1585,7 +1594,10 @@ def po_finetune(
         for m in ref_model.modules():
             if isinstance(m, torch.nn.LSTM):
                 m.flatten_parameters()
-        print("  DPO mode: frozen reference model created")
+        if ft_loss_type == "sft" and ft_kl_coeff > 0:
+            print(f"  SFT+L2 mode: frozen reference model (kl_coeff={ft_kl_coeff})")
+        else:
+            print("  DPO mode: frozen reference model created")
 
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -1605,10 +1617,15 @@ def po_finetune(
         collate_fn=collate_fn, num_workers=0,
     )
 
-    def _ft_quick_eval() -> tuple[float, float]:
-        """Greedy decode on ft_eval_k instances → (mean_cov, mean_guard_ratio)."""
+    # Reward params for FT eval (captured from enclosing scope)
+    _eval_lam = lam if lam is not None else 0.2
+    _eval_tau = tau if tau is not None else 0.99
+    _eval_tp  = tau_penalty if tau_penalty is not None else 5.0
+
+    def _ft_quick_eval() -> tuple[float, float, float]:
+        """Greedy decode on ft_eval_k instances → (mean_cov, mean_guard_ratio, mean_reward)."""
         model.eval()
-        covs, grs = [], []
+        covs, grs, rews = [], [], []
         for cnt, (bd, pm, lens_raw, names) in enumerate(ft_eval_loader):
             if cnt >= ft_eval_k:
                 break
@@ -1639,15 +1656,23 @@ def po_finetune(
                     cov = 0.0
             else:
                 cov = 0.0
+            gr = len(sol) / max(1, nn)
+            eff = min(cov, _eval_tau) if cap_at_tau else cov
+            rew = eff - _eval_lam * gr - _eval_tp * max(0.0, _eval_tau - cov)
             covs.append(cov)
-            grs.append(len(sol) / max(1, nn))
+            grs.append(gr)
+            rews.append(rew)
         model.train()
-        return float(np.mean(covs)) if covs else 0.0, float(np.mean(grs)) if grs else 0.0
+        return (
+            float(np.mean(covs)) if covs else 0.0,
+            float(np.mean(grs)) if grs else 0.0,
+            float(np.mean(rews)) if rews else -1e9,
+        )
 
-    # Baseline coverage before FT
-    pre_ft_cov, pre_ft_gr = _ft_quick_eval()
-    print(f"  [FT baseline] greedy cov={pre_ft_cov:.3f} |S|/n={pre_ft_gr:.3f}")
-    best_ft_cov = pre_ft_cov
+    # Baseline before FT
+    pre_ft_cov, pre_ft_gr, pre_ft_rew = _ft_quick_eval()
+    print(f"  [FT baseline] greedy cov={pre_ft_cov:.3f} |S|/n={pre_ft_gr:.3f} r={pre_ft_rew:.4f}")
+    best_ft_rew = pre_ft_rew
     best_ft_state = copy.deepcopy(model.state_dict())
 
     # ==================================================================
@@ -1656,123 +1681,161 @@ def po_finetune(
     # acceptance with exact CGAL coverage, and store fixed pairs.
     # Training iterates over these fixed pairs — no re-sampling per epoch,
     # which prevents the cascading guard-removal collapse.
+    #
+    # Pairs are cached to disk (checkpoint_dir/ft_pairs_K{K}.pkl) so
+    # subsequent runs with the same model skip the costly precomputation.
     # ==================================================================
-    if finetune_method == "ls":
-        print("  [offline] Precomputing preference pairs from original model ...")
-        model.eval()
-        all_pairs: list[dict] = []   # each: {tau_seq, teacher_seq, batch_data, pad_mask, length}
-        n_precomp_total = 0
-        n_precomp_improved = 0
-        n_batches = len(loader)
+    if finetune_method == "ls" and ft_loss_type != "reinforce_ls":
+        import pickle as _pkl
+        pairs_cache_path = os.path.join(
+            checkpoint_dir, f"ft_pairs_K{K}.pkl",
+        ) if checkpoint_dir else None
 
-        with torch.no_grad():
-            for batch_idx, (batch_data_raw, pad_mask_raw, lens_raw, names_raw) in enumerate(loader, 1):
-                pct_done = 100 * batch_idx / n_batches
-                print(f"\r  [offline] batch {batch_idx}/{n_batches} ({pct_done:.0f}%) "
-                      f"| pairs: {n_precomp_improved}/{n_precomp_total}", end="", flush=True)
-                bd = batch_data_raw.to(device, non_blocking=True)
-                pm = pad_mask_raw.to(device, non_blocking=True)
-                lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
-                B = bd.size(0)
+        all_pairs: list[dict] | None = None
+        if pairs_cache_path and os.path.isfile(pairs_cache_path):
+            try:
+                with open(pairs_cache_path, "rb") as _f:
+                    all_pairs = _pkl.load(_f)
+                print(f"  [offline] Loaded {len(all_pairs)} cached pairs from {pairs_cache_path}")
+            except Exception as e:
+                print(f"  [offline] Cache load failed ({e}), recomputing ...")
+                all_pairs = None
 
-                exp_data = bd.repeat_interleave(K, dim=0)
-                exp_mask = pm.repeat_interleave(K, dim=0)
-                exp_lens = lt.repeat_interleave(K)
-                all_idxs, _ = model(
-                    exp_data, padding_mask=exp_mask, lengths=exp_lens,
-                    deterministic=False,
-                )
+        if all_pairs is None:
+            print("  [offline] Precomputing preference pairs from original model ...")
+            model.eval()
+            all_pairs = []
+            n_precomp_total = 0
+            n_precomp_improved = 0
+            n_batches = len(loader)
 
-                pts_cache_pre = []
-                for b in range(B):
-                    nn = int(lt[b].item())
-                    pts_cache_pre.append(bd[b, :nn].detach().cpu().numpy())
+            with torch.no_grad():
+                for batch_idx, (batch_data_raw, pad_mask_raw, lens_raw, names_raw) in enumerate(loader, 1):
+                    pct_done = 100 * batch_idx / n_batches
+                    print(f"\r  [offline] batch {batch_idx}/{n_batches} ({pct_done:.0f}%) "
+                          f"| pairs: {n_precomp_improved}/{n_precomp_total}", end="", flush=True)
+                    bd = batch_data_raw.to(device, non_blocking=True)
+                    pm = pad_mask_raw.to(device, non_blocking=True)
+                    lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
+                    B = bd.size(0)
 
-                for i in range(B * K):
-                    b = i // K
-                    nn = int(lt[b].item())
-                    sol = [idx for idx in all_idxs[i] if idx < nn]
-                    n_precomp_total += 1
-
-                    _lam = lam if lam is not None else 0.2
-                    _tau = tau if tau is not None else 0.99
-                    _tp  = tau_penalty if tau_penalty is not None else 5.0
-                    teacher_sol, _, _ = local_search_improve_disc(
-                        pts_cache_pre[b], sol, names_raw[b], nn,
-                        max_iter=ls_max_iter,
-                        enable_swap=ls_swap,
-                        enable_remove=not ft_ls_swap_only,
-                        enable_add=not ft_ls_swap_only,
-                        lam=_lam, tau=_tau, tau_penalty=_tp,
-                        cap_at_tau=cap_at_tau,
-                        n_samples=disc_vis_samples,
-                        reward_fn_fallback=reward_fn,
+                    exp_data = bd.repeat_interleave(K, dim=0)
+                    exp_mask = pm.repeat_interleave(K, dim=0)
+                    exp_lens = lt.repeat_interleave(K)
+                    all_idxs, _ = model(
+                        exp_data, padding_mask=exp_mask, lengths=exp_lens,
+                        deterministic=False,
                     )
 
-                    # Pareto acceptance with exact CGAL coverage
-                    k_tau = len(sol)
-                    k_teacher = len(teacher_sol)
-                    sol_np = np.array(
-                        [g for g in sol if 0 <= g < nn], dtype=np.int64)
-                    teach_np = np.array(
-                        [g for g in teacher_sol if 0 <= g < nn], dtype=np.int64)
-                    try:
-                        cov_tau = evaluate_polygon_visibility_numpy_wo_gt(
-                            pts_cache_pre[b], sol_np, names_raw[b]) if len(sol_np) else 0.0
-                        cov_teacher = evaluate_polygon_visibility_numpy_wo_gt(
-                            pts_cache_pre[b], teach_np, names_raw[b]) if len(teach_np) else 0.0
-                    except Exception:
-                        cov_tau = cov_teacher = 0.0
+                    pts_cache_pre = []
+                    for b in range(B):
+                        nn = int(lt[b].item())
+                        pts_cache_pre.append(bd[b, :nn].detach().cpu().numpy())
 
-                    cov_ok = cov_teacher >= cov_tau - 1e-9
-                    guard_ok = k_teacher <= k_tau
-                    strictly_better = (
-                        cov_teacher > cov_tau + 1e-9 or k_teacher < k_tau
-                    )
-                    # Require teacher to meet the coverage target so
-                    # the model only learns from high-quality pairs
-                    # (prevents "use fewer guards everywhere" collapse).
-                    meets_tau = cov_teacher >= _tau - 1e-9
-                    rollout_below_tau = cov_tau < _tau - 1e-3
+                    for i in range(B * K):
+                        b = i // K
+                        nn = int(lt[b].item())
+                        sol = [idx for idx in all_idxs[i] if idx < nn]
+                        n_precomp_total += 1
 
-                    # Compute reward for both solutions to guard against
-                    # degenerate pairs (e.g. teacher selects all guards).
-                    def _inline_reward(cov, k_guards):
-                        eff = min(cov, _tau) if cap_at_tau else cov
-                        r = eff - _lam * (k_guards / max(1, nn))
-                        r -= _tp * max(0.0, _tau - cov)
-                        return r
-                    r_teacher = _inline_reward(cov_teacher, k_teacher)
-                    r_tau = _inline_reward(cov_tau, k_tau)
+                        _lam = lam if lam is not None else 0.2
+                        _tau = tau if tau is not None else 0.99
+                        _tp  = tau_penalty if tau_penalty is not None else 5.0
+                        teacher_sol, _, _ = local_search_improve_disc(
+                            pts_cache_pre[b], sol, names_raw[b], nn,
+                            max_iter=ls_max_iter,
+                            enable_swap=ls_swap,
+                            enable_remove=not ft_ls_swap_only,
+                            enable_add=not ft_ls_swap_only,
+                            lam=_lam, tau=_tau, tau_penalty=_tp,
+                            cap_at_tau=cap_at_tau,
+                            n_samples=disc_vis_samples,
+                            reward_fn_fallback=reward_fn,
+                        )
 
-                    # Accept pair in two cases (both require teacher
-                    # has strictly higher reward to prevent "select all"
-                    # or other degenerate solutions):
-                    # A) Guard-efficient: teacher Pareto-dominates AND meets τ
-                    #    → teaches "use fewer guards where coverage is fine"
-                    # B) Coverage-improving: teacher meets τ, rollout doesn't
-                    #    → teaches "add/move guards to fix under-coverage"
-                    reward_better = r_teacher > r_tau + 1e-6
-                    accept_guard_efficient = (
-                        cov_ok and guard_ok and strictly_better
-                        and meets_tau and reward_better
-                    )
-                    accept_cov_improving = (
-                        meets_tau and rollout_below_tau and reward_better
-                    )
+                        # Pareto acceptance with exact CGAL coverage
+                        k_tau = len(sol)
+                        k_teacher = len(teacher_sol)
+                        sol_np = np.array(
+                            [g for g in sol if 0 <= g < nn], dtype=np.int64)
+                        teach_np = np.array(
+                            [g for g in teacher_sol if 0 <= g < nn], dtype=np.int64)
+                        try:
+                            cov_tau = evaluate_polygon_visibility_numpy_wo_gt(
+                                pts_cache_pre[b], sol_np, names_raw[b]) if len(sol_np) else 0.0
+                            cov_teacher = evaluate_polygon_visibility_numpy_wo_gt(
+                                pts_cache_pre[b], teach_np, names_raw[b]) if len(teach_np) else 0.0
+                        except Exception:
+                            cov_tau = cov_teacher = 0.0
 
-                    if accept_guard_efficient or accept_cov_improving:
-                        all_pairs.append({
-                            "tau_seq": list(all_idxs[i]),
-                            "teacher_seq": teacher_sol + [nn],  # append EOS
-                            "batch_data": bd[b, :nn].cpu(),     # unpadded
-                            "length": nn,
-                        })
-                        n_precomp_improved += 1
+                        cov_ok = cov_teacher >= cov_tau - 1e-9
+                        guard_ok = k_teacher <= k_tau
+                        strictly_better = (
+                            cov_teacher > cov_tau + 1e-9 or k_teacher < k_tau
+                        )
+                        # Require teacher to meet the coverage target so
+                        # the model only learns from high-quality pairs
+                        # (prevents "use fewer guards everywhere" collapse).
+                        meets_tau = cov_teacher >= _tau - 1e-9
+                        rollout_below_tau = cov_tau < _tau - 1e-3
 
-        print()  # newline after progress
-        pct = 100 * n_precomp_improved / max(1, n_precomp_total)
-        print(f"  [offline] {n_precomp_improved}/{n_precomp_total} pairs accepted ({pct:.0f}%)")
+                        # Compute reward for both solutions to guard against
+                        # degenerate pairs (e.g. teacher selects all guards).
+                        def _inline_reward(cov, k_guards):
+                            eff = min(cov, _tau) if cap_at_tau else cov
+                            r = eff - _lam * (k_guards / max(1, nn))
+                            r -= _tp * max(0.0, _tau - cov)
+                            return r
+                        r_teacher = _inline_reward(cov_teacher, k_teacher)
+                        r_tau = _inline_reward(cov_tau, k_tau)
+
+                        # Accept pair in two cases (both require teacher
+                        # has strictly higher reward to prevent "select all"
+                        # or other degenerate solutions):
+                        # A) Guard-efficient: teacher Pareto-dominates AND meets τ
+                        #    → teaches "use fewer guards where coverage is fine"
+                        # B) Coverage-improving: teacher has meaningfully
+                        #    better coverage AND better reward.
+                        #    (No meets_τ gate — LS rarely reaches τ=0.99;
+                        #    requiring it starved this path to ~1% of pairs.)
+                        reward_better = r_teacher > r_tau + 1e-6
+                        accept_guard_efficient = (
+                            cov_ok and guard_ok and strictly_better
+                            and meets_tau and reward_better
+                        )
+                        accept_cov_improving = (
+                            cov_teacher > cov_tau + 0.005
+                            and reward_better
+                        )
+
+                        if accept_guard_efficient or accept_cov_improving:
+                            # Classify pair direction for balanced training
+                            d = len(list(all_idxs[i])) - (len(teacher_sol) + 1)
+                            if d > 0:
+                                ptype = "guard_reducing"
+                            elif d == 0:
+                                ptype = "same_count"
+                            else:
+                                ptype = "coverage_improving"
+                            all_pairs.append({
+                                "tau_seq": list(all_idxs[i]),
+                                "teacher_seq": teacher_sol + [nn],  # append EOS
+                                "batch_data": bd[b, :nn].cpu(),     # unpadded
+                                "length": nn,
+                                "pair_type": ptype,
+                            })
+                            n_precomp_improved += 1
+
+            print()  # newline after progress
+            pct = 100 * n_precomp_improved / max(1, n_precomp_total)
+            print(f"  [offline] {n_precomp_improved}/{n_precomp_total} pairs accepted ({pct:.0f}%)")
+
+            # Save pairs cache to disk
+            if pairs_cache_path and all_pairs:
+                os.makedirs(os.path.dirname(pairs_cache_path), exist_ok=True)
+                with open(pairs_cache_path, "wb") as _f:
+                    _pkl.dump(all_pairs, _f, protocol=4)
+                print(f"  [offline] Saved {len(all_pairs)} pairs to {pairs_cache_path}")
 
         # Diagnostic: pair composition
         if all_pairs:
@@ -1794,13 +1857,30 @@ def po_finetune(
         if not all_pairs:
             print("  [offline] No pairs found — skipping fine-tuning")
             return
+
+        # Compute per-pair loss weights to balance directional signal.
+        # Without this, guard-reducing pairs (typically 80-90%) dominate
+        # and the model learns "shorten output" → coverage collapse.
+        _n_gr = sum(1 for p in all_pairs if p["pair_type"] == "guard_reducing")
+        _n_other = len(all_pairs) - _n_gr
+        if _n_gr > 0 and _n_other > 0:
+            # Inverse-proportion: both directions contribute equally
+            # to total loss  (n_gr * w_gr == n_other * w_other).
+            _w_gr = _n_other / _n_gr
+            _w_other = 1.0
+            print(f"  [offline] pair weights: guard-reducing={_w_gr:.4f}, other={_w_other:.4f}")
+        else:
+            _w_gr = _w_other = 1.0
+        for p in all_pairs:
+            p["weight"] = _w_gr if p["pair_type"] == "guard_reducing" else _w_other
+
         model.train()
 
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
         n_pairs_epoch = 0
 
-        if finetune_method == "ls":
+        if finetune_method == "ls" and ft_loss_type != "reinforce_ls":
             # ── OFFLINE: iterate over precomputed fixed pairs ────
             import random as _rng
             indices = list(range(len(all_pairs)))
@@ -1826,41 +1906,72 @@ def po_finetune(
                 teacher_seqs = [all_pairs[j]["teacher_seq"] for j in chunk]
                 tau_seqs = [all_pairs[j]["tau_seq"] for j in chunk]
 
-                lp_teacher = teacher_force_log_prob(
-                    model, tf_data, teacher_seqs, tf_mask, tf_lens,
+                # In SFT mode, strip EOS from teacher sequences so loss
+                # only supervises guard placement, not stopping time.
+                sft_seqs = (
+                    [s[:-1] for s in teacher_seqs]
+                    if ft_loss_type == "sft" else teacher_seqs
                 )
-                lp_tau = teacher_force_log_prob(
-                    model, tf_data, tau_seqs, tf_mask, tf_lens,
+                lp_teacher = teacher_force_log_prob(
+                    model, tf_data, sft_seqs, tf_mask, tf_lens,
                 )
 
                 teacher_steps = torch.tensor(
-                    [max(1, len(s)) for s in teacher_seqs],
-                    dtype=torch.float32, device=device,
-                )
-                tau_steps = torch.tensor(
-                    [max(1, len(s)) for s in tau_seqs],
+                    [max(1, len(s)) for s in sft_seqs],
                     dtype=torch.float32, device=device,
                 )
 
-                if ref_model is not None:
-                    with torch.no_grad():
-                        lp_ref_teacher = teacher_force_log_prob(
-                            ref_model, tf_data, teacher_seqs, tf_mask, tf_lens,
+                # Per-pair weights for balanced directional signal
+                pair_weights = torch.tensor(
+                    [all_pairs[j]["weight"] for j in chunk],
+                    dtype=torch.float32, device=device,
+                )
+
+                if ft_loss_type == "sft":
+                    # SFT: maximise log P(teacher | polygon)
+                    per_pair = -lp_teacher / teacher_steps
+                    sft_loss = (per_pair * pair_weights).sum() / pair_weights.sum()
+                    # L2 regularization toward reference weights
+                    if ref_model is not None and ft_kl_coeff > 0:
+                        l2_reg = sum(
+                            (p - p_ref).pow(2).sum()
+                            for p, p_ref in zip(model.parameters(),
+                                                ref_model.parameters())
                         )
-                        lp_ref_tau = teacher_force_log_prob(
-                            ref_model, tf_data, tau_seqs, tf_mask, tf_lens,
-                        )
-                    delta_teacher = (lp_teacher - lp_ref_teacher) / teacher_steps
-                    delta_tau     = (lp_tau     - lp_ref_tau)     / tau_steps
-                    loss = -F.logsigmoid(
-                        alpha * (delta_teacher - delta_tau)
-                    ).mean()
+                        loss = sft_loss + ft_kl_coeff * l2_reg
+                    else:
+                        loss = sft_loss
                 else:
-                    lp_teacher_norm = lp_teacher / teacher_steps
-                    lp_tau_norm = lp_tau / tau_steps
-                    loss = -F.logsigmoid(
-                        alpha * (lp_teacher_norm - lp_tau_norm)
-                    ).mean()
+                    # DPO: contrastive preference loss
+                    lp_tau = teacher_force_log_prob(
+                        model, tf_data, tau_seqs, tf_mask, tf_lens,
+                    )
+                    tau_steps = torch.tensor(
+                        [max(1, len(s)) for s in tau_seqs],
+                        dtype=torch.float32, device=device,
+                    )
+                    norm_steps = torch.maximum(teacher_steps, tau_steps)
+
+                    if ref_model is not None:
+                        with torch.no_grad():
+                            lp_ref_teacher = teacher_force_log_prob(
+                                ref_model, tf_data, teacher_seqs, tf_mask, tf_lens,
+                            )
+                            lp_ref_tau = teacher_force_log_prob(
+                                ref_model, tf_data, tau_seqs, tf_mask, tf_lens,
+                            )
+                        delta_teacher = (lp_teacher - lp_ref_teacher) / norm_steps
+                        delta_tau     = (lp_tau     - lp_ref_tau)     / norm_steps
+                        per_pair = -F.logsigmoid(
+                            alpha * (delta_teacher - delta_tau)
+                        )
+                    else:
+                        lp_teacher_norm = lp_teacher / norm_steps
+                        lp_tau_norm = lp_tau / norm_steps
+                        per_pair = -F.logsigmoid(
+                            alpha * (lp_teacher_norm - lp_tau_norm)
+                        )
+                    loss = (per_pair * pair_weights).sum() / pair_weights.sum()
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -1874,9 +1985,7 @@ def po_finetune(
                 )
                 if not grad_finite:
                     optimizer.zero_grad()
-                    del tf_data, tf_mask, tf_lens, lp_teacher, lp_tau
-                    if ref_model is not None:
-                        del lp_ref_teacher, lp_ref_tau
+                    del tf_data, tf_mask, tf_lens, lp_teacher
                     torch.cuda.empty_cache()
                     continue
                 optimizer.step()
@@ -1884,9 +1993,136 @@ def po_finetune(
                 total_loss += loss.item() * P
                 n_pairs_epoch += P
 
-                del tf_data, tf_mask, tf_lens, lp_teacher, lp_tau
-                if ref_model is not None:
-                    del lp_ref_teacher, lp_ref_tau
+                del tf_data, tf_mask, tf_lens, lp_teacher
+                torch.cuda.empty_cache()
+
+        elif ft_loss_type == "reinforce_ls":
+            # ── ON-POLICY REINFORCE with partial-budget LS ────────
+            # For each batch: sample K rollouts, run LS with a small
+            # iteration budget on each, then use post-LS rewards with
+            # per-instance mean baseline.
+            #
+            # Why partial budget (not full convergence):
+            #   Full LS (50 iter) equalizes all K rollouts to the same
+            #   local optimum → zero advantages → zero gradient.
+            #   Partial LS (3-5 iter) improves good starting points
+            #   more than bad ones → reward variance reflects placement
+            #   quality, not just guard count.
+            _lam = lam if lam is not None else 0.2
+            _tau = tau if tau is not None else 0.99
+            _tp  = tau_penalty if tau_penalty is not None else 5.0
+            _ls_budget = ft_rl_ls_budget
+
+            def _rl_reward(cov, k_guards, n_verts):
+                eff = min(cov, _tau) if cap_at_tau else cov
+                return eff - _lam * (k_guards / max(1, n_verts)) - _tp * max(0.0, _tau - cov)
+
+            batch_iter = (
+                tqdm(loader, desc=f"FT epoch {epoch} [RL+LS({_ls_budget})]", leave=False)
+                if tqdm else loader
+            )
+
+            for batch_data_raw, pad_mask_raw, lens_raw, names_raw in batch_iter:
+                bd = batch_data_raw.to(device, non_blocking=True)
+                pm = pad_mask_raw.to(device, non_blocking=True)
+                lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
+                B = bd.size(0)
+
+                # Sample K rollouts per instance (on-policy)
+                exp_data = bd.repeat_interleave(K, dim=0)
+                exp_mask = pm.repeat_interleave(K, dim=0)
+                exp_lens = lt.repeat_interleave(K)
+
+                all_idxs, all_log_probs_raw = model(
+                    exp_data, padding_mask=exp_mask, lengths=exp_lens,
+                    deterministic=False,
+                )
+
+                # Length-normalise log-probs
+                step_counts = torch.tensor(
+                    [max(1, len(idxs)) for idxs in all_idxs],
+                    dtype=torch.float32, device=device,
+                )
+                all_log_probs = all_log_probs_raw / step_counts  # (B*K,)
+
+                # Pre-extract per-instance points
+                pts_cache_rl = []
+                for b in range(B):
+                    nn = int(lt[b].item())
+                    pts_cache_rl.append(bd[b, :nn].detach().cpu().numpy())
+
+                # Run partial-budget LS on each rollout, compute post-LS rewards
+                ls_rewards = []  # (B*K,)
+                for i in range(B * K):
+                    b = i // K
+                    nn = int(lt[b].item())
+                    sol = [idx for idx in all_idxs[i] if idx < nn]
+
+                    if not sol:
+                        ls_rewards.append(_rl_reward(0.0, 0, nn))
+                        continue
+
+                    # Partial LS: small budget → different starting quality
+                    # yields different post-LS quality → placement signal
+                    ls_sol, _, _ = local_search_improve_disc(
+                        pts_cache_rl[b], sol, names_raw[b], nn,
+                        max_iter=_ls_budget,
+                        enable_swap=True,
+                        enable_remove=True,
+                        enable_add=True,
+                        lam=_lam, tau=_tau, tau_penalty=_tp,
+                        cap_at_tau=cap_at_tau,
+                        n_samples=disc_vis_samples,
+                        reward_fn_fallback=reward_fn,
+                    )
+
+                    # Evaluate post-LS solution
+                    try:
+                        cov_ls = evaluate_polygon_visibility_numpy_wo_gt(
+                            pts_cache_rl[b],
+                            np.array(ls_sol, dtype=np.int64),
+                            names_raw[b],
+                        )
+                    except Exception:
+                        cov_ls = 0.0
+                    ls_rewards.append(_rl_reward(cov_ls, len(ls_sol), nn))
+
+                # REINFORCE: post-LS rewards with per-instance mean baseline
+                rew_t = torch.tensor(ls_rewards, dtype=torch.float32, device=device)
+                rew_2d = rew_t.view(B, K)                             # (B, K)
+                baseline = rew_2d.mean(dim=1, keepdim=True)           # (B, 1)
+                advantages = (rew_2d - baseline).view(B * K)          # (B*K,)
+
+                # Loss: -advantage * log_prob (REINFORCE estimator)
+                rl_loss = -(advantages.detach() * all_log_probs).mean()
+
+                # Optional: L2 regularisation toward reference model
+                if ref_model is not None and ft_kl_coeff > 0:
+                    l2_reg = sum(
+                        (p - p_ref).pow(2).sum()
+                        for p, p_ref in zip(model.parameters(),
+                                            ref_model.parameters())
+                    )
+                    rl_loss = rl_loss + ft_kl_coeff * l2_reg
+
+                optimizer.zero_grad()
+                rl_loss.backward()
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                grad_finite = all(
+                    torch.isfinite(p.grad).all()
+                    for p in model.parameters()
+                    if p.grad is not None
+                )
+                if not grad_finite:
+                    optimizer.zero_grad()
+                    continue
+                optimizer.step()
+
+                total_loss += rl_loss.item() * B * K
+                n_pairs_epoch += B * K
+
+                del exp_data, exp_mask, exp_lens, all_log_probs_raw
                 torch.cuda.empty_cache()
 
         else:
@@ -1936,41 +2172,61 @@ def po_finetune(
                     dtype=torch.long, device=device,
                 )
 
-                lp_teacher = teacher_force_log_prob(
-                    model, tf_data, teacher_seqs, tf_mask, tf_lens,
+                # In SFT mode, strip EOS from teacher sequences so loss
+                # only supervises guard placement, not stopping time.
+                sft_seqs = (
+                    [s[:-1] for s in teacher_seqs]
+                    if ft_loss_type == "sft" else teacher_seqs
                 )
-                lp_tau = teacher_force_log_prob(
-                    model, tf_data, tau_seqs, tf_mask, tf_lens,
+                lp_teacher = teacher_force_log_prob(
+                    model, tf_data, sft_seqs, tf_mask, tf_lens,
                 )
 
                 teacher_steps = torch.tensor(
-                    [max(1, len(s)) for s in teacher_seqs],
-                    dtype=torch.float32, device=device,
-                )
-                tau_steps = torch.tensor(
-                    [max(1, len(s)) for s in tau_seqs],
+                    [max(1, len(s)) for s in sft_seqs],
                     dtype=torch.float32, device=device,
                 )
 
-                if ref_model is not None:
-                    with torch.no_grad():
-                        lp_ref_teacher = teacher_force_log_prob(
-                            ref_model, tf_data, teacher_seqs, tf_mask, tf_lens,
+                if ft_loss_type == "sft":
+                    sft_loss = -(lp_teacher / teacher_steps).mean()
+                    if ref_model is not None and ft_kl_coeff > 0:
+                        l2_reg = sum(
+                            (p - p_ref).pow(2).sum()
+                            for p, p_ref in zip(model.parameters(),
+                                                ref_model.parameters())
                         )
-                        lp_ref_tau = teacher_force_log_prob(
-                            ref_model, tf_data, tau_seqs, tf_mask, tf_lens,
-                        )
-                    delta_teacher = (lp_teacher - lp_ref_teacher) / teacher_steps
-                    delta_tau     = (lp_tau     - lp_ref_tau)     / tau_steps
-                    loss = -F.logsigmoid(
-                        alpha * (delta_teacher - delta_tau)
-                    ).mean()
+                        loss = sft_loss + ft_kl_coeff * l2_reg
+                    else:
+                        loss = sft_loss
                 else:
-                    lp_teacher_norm = lp_teacher / teacher_steps
-                    lp_tau_norm = lp_tau / tau_steps
-                    loss = -F.logsigmoid(
-                        alpha * (lp_teacher_norm - lp_tau_norm)
-                    ).mean()
+                    lp_tau = teacher_force_log_prob(
+                        model, tf_data, tau_seqs, tf_mask, tf_lens,
+                    )
+                    tau_steps = torch.tensor(
+                        [max(1, len(s)) for s in tau_seqs],
+                        dtype=torch.float32, device=device,
+                    )
+                    norm_steps = torch.maximum(teacher_steps, tau_steps)
+
+                    if ref_model is not None:
+                        with torch.no_grad():
+                            lp_ref_teacher = teacher_force_log_prob(
+                                ref_model, tf_data, teacher_seqs, tf_mask, tf_lens,
+                            )
+                            lp_ref_tau = teacher_force_log_prob(
+                                ref_model, tf_data, tau_seqs, tf_mask, tf_lens,
+                            )
+                        delta_teacher = (lp_teacher - lp_ref_teacher) / norm_steps
+                        delta_tau     = (lp_tau     - lp_ref_tau)     / norm_steps
+                        loss = -F.logsigmoid(
+                            alpha * (delta_teacher - delta_tau)
+                        ).mean()
+                    else:
+                        lp_teacher_norm = lp_teacher / norm_steps
+                        lp_tau_norm = lp_tau / norm_steps
+                        loss = -F.logsigmoid(
+                            alpha * (lp_teacher_norm - lp_tau_norm)
+                        ).mean()
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -1983,9 +2239,7 @@ def po_finetune(
                 )
                 if not grad_finite:
                     optimizer.zero_grad()
-                    del tf_data, tf_mask, tf_lens, lp_teacher, lp_tau
-                    if ref_model is not None:
-                        del lp_ref_teacher, lp_ref_tau
+                    del tf_data, tf_mask, tf_lens, lp_teacher
                     torch.cuda.empty_cache()
                     continue
                 optimizer.step()
@@ -1993,13 +2247,17 @@ def po_finetune(
                 total_loss += loss.item() * P
                 n_pairs_epoch += P
 
-                del tf_data, tf_mask, tf_lens, lp_teacher, lp_tau
-                if ref_model is not None:
-                    del lp_ref_teacher, lp_ref_tau
+                del tf_data, tf_mask, tf_lens, lp_teacher
                 torch.cuda.empty_cache()
 
         avg_loss = total_loss / max(1, n_pairs_epoch)
-        if finetune_method == "ls":
+        if ft_loss_type == "reinforce_ls":
+            print(
+                f"FT epoch {epoch}/{epochs}  "
+                f"loss={avg_loss:.6f}  "
+                f"rollouts={n_pairs_epoch} (RL+LS({ft_rl_ls_budget}))"
+            )
+        elif finetune_method == "ls":
             print(
                 f"FT epoch {epoch}/{epochs}  "
                 f"loss={avg_loss:.4f}  "
@@ -2028,28 +2286,30 @@ def po_finetune(
             print(f"  FT checkpoint -> {p}")
 
         # -- quick greedy eval --
-        ft_cov, ft_gr = _ft_quick_eval()
+        ft_cov, ft_gr, ft_rew = _ft_quick_eval()
         cov_delta = ft_cov - pre_ft_cov
+        rew_delta = ft_rew - pre_ft_rew
         tag = ""
-        if ft_cov > best_ft_cov + 1e-6:
-            best_ft_cov = ft_cov
+        if ft_rew > best_ft_rew + 1e-6:
+            best_ft_rew = ft_rew
             best_ft_state = copy.deepcopy(model.state_dict())
             tag = " *best*"
-        print(f"  [FT eval] cov={ft_cov:.3f} (Δ={cov_delta:+.3f}) |S|/n={ft_gr:.3f}{tag}")
+        print(f"  [FT eval] cov={ft_cov:.3f} (Δ={cov_delta:+.3f}) "
+              f"|S|/n={ft_gr:.3f} r={ft_rew:.4f} (Δ={rew_delta:+.4f}){tag}")
 
-        # Early stop: if coverage dropped >5% from baseline, further
-        # epochs will only make it worse (the signal is one-directional).
-        if cov_delta < -0.05:
-            print(f"  [FT] Early stop: coverage dropped {cov_delta:.3f} from baseline")
+        # Early stop: halt if reward dropped significantly from baseline
+        # (reward accounts for both coverage AND guard efficiency).
+        if rew_delta < -0.10:
+            print(f"  [FT] Early stop: reward dropped {rew_delta:.4f} from baseline")
             break
 
         gc.collect()
         torch.cuda.empty_cache()
 
-    # Restore best model if coverage degraded
-    final_cov, _ = _ft_quick_eval()
-    if final_cov < best_ft_cov - 1e-6:
-        print(f"  [FT] Restoring best model (cov={best_ft_cov:.3f} > final {final_cov:.3f})")
+    # Restore best model if reward degraded
+    _, _, final_rew = _ft_quick_eval()
+    if final_rew < best_ft_rew - 1e-6:
+        print(f"  [FT] Restoring best model (r={best_ft_rew:.4f} > final {final_rew:.4f})")
         model.load_state_dict(best_ft_state)
 
     print(f"{method_label} fine-tuning complete.\n")
@@ -2412,12 +2672,23 @@ def main() -> None:
                    help="Override τ-penalty during FT (default: same as --tau-penalty).")
     g.add_argument("--ft-cap-coverage",   type=str, default=None, choices=["true", "false"],
                    help="Override cap-coverage during FT (default: same as --cap-coverage).")
+    g.add_argument("--ft-loss-type", type=str, default="dpo",
+                   choices=["dpo", "sft", "reinforce_ls"],
+                   help="Fine-tuning loss: 'dpo' (contrastive preference), "
+                        "'sft' (supervised on teacher sequences), or "
+                        "'reinforce_ls' (on-policy REINFORCE with LS rewards).")
+    g.add_argument("--ft-kl-coeff", type=float, default=0.0,
+                   help="L2 weight regularization toward reference model during SFT. "
+                        "Prevents catastrophic drift. Recommended: 50-200 for SFT.")
     g.add_argument("--ft-no-ref-model",  action="store_true", default=False,
                    help="Disable DPO reference-model regularisation during fine-tuning. "
                         "Without ref model, BT loss alone can cause distributional shift.")
     g.add_argument("--ft-ls-swap-only", action="store_true", default=False,
                    help="Only allow SWAP moves in fine-tuning LS (no ADD/REMOVE). "
                         "Not needed with Pareto acceptance but kept as option.")
+    g.add_argument("--ft-rl-ls-budget", type=int, default=3,
+                   help="LS iteration budget for REINFORCE+LS mode. Low (3-5) gives "
+                        "placement signal; high (50) equalizes rollouts to zero signal.")
     g.add_argument("--ft-ls-all-moves", dest="ft_ls_swap_only", action="store_false",
                    help="Allow all LS moves (ADD/REMOVE/SWAP) during fine-tuning.")
     g.add_argument("--disc-vis-cache-path", type=str, default=None,
@@ -2487,7 +2758,8 @@ def main() -> None:
             "finetune_epochs", "finetune_lr", "finetune_k",
             "finetune_only", "skip_finetune", "finetune_method",
             "ft_reward_lambda", "ft_tau_penalty", "ft_cap_coverage",
-            "ft_no_ref_model", "ft_ls_swap_only",
+            "ft_loss_type", "ft_kl_coeff", "ft_no_ref_model", "ft_ls_swap_only",
+            "ft_rl_ls_budget",
             "fast_reward", "disc_vis_samples",
             "use_amp",
         ]
@@ -2754,6 +3026,9 @@ def main() -> None:
             disc_vis_samples=args.disc_vis_samples,
             use_ref_model=not args.ft_no_ref_model,
             ft_ls_swap_only=args.ft_ls_swap_only,
+            ft_loss_type=args.ft_loss_type,
+            ft_kl_coeff=args.ft_kl_coeff,
+            ft_rl_ls_budget=args.ft_rl_ls_budget,
         )
 
     # -- save final --
