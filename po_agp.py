@@ -749,6 +749,7 @@ def local_search_improve_disc(
     cap_at_tau: bool = False,
     n_samples: int = 500,
     reward_fn_fallback=None,
+    monotone_coverage: bool = False,
 ) -> "tuple[list[int], float, dict]":
     """Vectorized local-search using the prebuilt disc_vis matrix.
 
@@ -793,7 +794,8 @@ def local_search_improve_disc(
         if valid_guards else np.zeros(M, dtype=np.int32)
     )
     covered = guard_count > 0
-    current_r = _reward_scalar(float(covered.sum()) / M, len(current))
+    current_cov = float(covered.sum()) / M
+    current_r = _reward_scalar(current_cov, len(current))
 
     n_remove = n_add = n_swap = 0
 
@@ -808,12 +810,15 @@ def local_search_improve_disc(
             new_gc = guard_count[None, :] - vis[guards_arr].astype(np.int32)
             new_covs = (new_gc > 0).sum(axis=1).astype(np.float32) / M
             r_vals = _reward_vec(new_covs, k - 1)
+            if monotone_coverage:
+                r_vals = np.where(new_covs >= current_cov - 1e-9, r_vals, -np.inf)
             best_idx = int(np.argmax(r_vals))
             if float(r_vals[best_idx]) > current_r + 1e-9:
                 g = int(guards_arr[best_idx])
                 current.discard(g)
                 guard_count = np.maximum(guard_count - vis[g].astype(np.int32), 0)
                 covered = guard_count > 0
+                current_cov = float(new_covs[best_idx])
                 current_r = float(r_vals[best_idx])
                 n_remove += 1
                 improved = True
@@ -831,6 +836,7 @@ def local_search_improve_disc(
                 current.add(v)
                 guard_count = guard_count + vis[v].astype(np.int32)
                 covered = new_covered_mat[best_idx]
+                current_cov = float(new_covs[best_idx])
                 current_r = float(r_vals[best_idx])
                 n_add += 1
                 improved = True
@@ -848,6 +854,8 @@ def local_search_improve_disc(
                 new_covered_mat = after_remove_covered[None, :] | vis[cands]  # (|cands|, M)
                 new_covs = new_covered_mat.sum(axis=1).astype(np.float32) / M
                 r_vals = _reward_vec(new_covs, k)
+                if monotone_coverage:
+                    r_vals = np.where(new_covs >= current_cov - 1e-9, r_vals, -np.inf)
                 best_c_idx = int(np.argmax(r_vals))
                 if float(r_vals[best_c_idx]) > current_r + 1e-9:
                     v = int(cands[best_c_idx])
@@ -855,6 +863,7 @@ def local_search_improve_disc(
                     current.add(v)
                     guard_count = after_remove_gc + vis[v].astype(np.int32)
                     covered = new_covered_mat[best_c_idx]
+                    current_cov = float(new_covs[best_c_idx])
                     current_r = float(r_vals[best_c_idx])
                     n_swap += 1
                     improved = True
@@ -995,6 +1004,266 @@ def teacher_force_log_prob(
         decoder_input = embedded[torch.arange(batch_size, device=device), idxs, :]
 
     return log_probs_accum
+
+
+def _teacher_force_log_probs(
+    model: torch.nn.Module,
+    inputs: torch.Tensor,
+    target_seqs: list[list[int]],
+    padding_mask: torch.Tensor | None = None,
+    lengths: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Teacher-force *target_seqs* and return per-sample total log π_θ.
+
+    Unlike :func:`teacher_force_weighted_nll` (which returns a scalar
+    loss), this returns a **(B,)** tensor of **total** log-probabilities
+    with gradients — suitable for the BT preference loss in lexpo.
+
+    ``target_seqs[b]`` should contain the guard indices **in the order
+    the model would emit them**, followed by the EOS index
+    (``= lengths[b]``).
+    """
+    actor = model.actor if hasattr(model, "actor") else model
+    device = inputs.device
+    B = inputs.size(0)
+    seq_len = inputs.size(1)
+
+    # ── Encoder (EOS mode) ──────────────────────────────────────
+    eos_vec = torch.zeros(B, 1, 2, device=device)
+    inputs_ext = torch.cat([inputs, eos_vec], dim=1)           # (B, N+1, 2)
+    embedded = actor.embedding(inputs_ext.transpose(1, 2))     # (B, N+1, emb)
+
+    if lengths is not None:
+        enc_lengths = (
+            (lengths + 1).cpu()
+            if torch.is_tensor(lengths)
+            else torch.tensor([l + 1 for l in lengths], device="cpu")
+        )
+        packed = torch.nn.utils.rnn.pack_padded_sequence(
+            embedded, enc_lengths, batch_first=True, enforce_sorted=False,
+        )
+        packed_out, (hidden, context) = actor.encoder(packed)
+        encoder_outputs, _ = torch.nn.utils.rnn.pad_packed_sequence(
+            packed_out, batch_first=True, total_length=seq_len + 1,
+        )
+    else:
+        encoder_outputs, (hidden, context) = actor.encoder(embedded)
+
+    total_len = seq_len + 1
+
+    # Initial mask
+    if padding_mask is not None:
+        pad = ~padding_mask
+        pad_eos = torch.zeros(B, 1, dtype=torch.bool, device=device)
+        mask = torch.cat([pad, pad_eos], dim=1)
+    else:
+        mask = torch.zeros(B, total_len, dtype=torch.bool, device=device)
+    if lengths is not None:
+        for b in range(B):
+            n = int(lengths[b].item()) if torch.is_tensor(lengths[b]) else int(lengths[b])
+            if n + 1 < total_len:
+                mask[b, n + 1:] = True
+
+    # ── Decoder (teacher-forced) ─────────────────────────────────
+    decoder_input = actor.decoder_start_input.unsqueeze(0).repeat(B, 1)
+    idxs = None
+    log_probs_per_sample: list[list[torch.Tensor]] = [[] for _ in range(B)]
+
+    max_steps = max(len(s) for s in target_seqs)
+    for step in range(max_steps):
+        _, (hidden, context) = actor.decoder(
+            decoder_input.unsqueeze(1), (hidden, context),
+        )
+        query = hidden.squeeze(0)
+        for _ in range(actor.n_glimpses):
+            ref, logits = actor.glimpse(query, encoder_outputs)
+            logits, mask = actor.apply_mask_to_logits(
+                logits, mask, idxs, lengths,
+            )
+            logits = logits / actor.temperature
+            query = torch.bmm(
+                ref, F.softmax(logits, dim=1).unsqueeze(2),
+            ).squeeze(2)
+        _, logits = actor.pointer(query, encoder_outputs)
+        logits, mask = actor.apply_mask_to_logits(
+            logits, mask, idxs, lengths,
+        )
+
+        if actor.eos_logit_bias is not None and lengths is not None:
+            eos_bias_vec = torch.zeros_like(logits)
+            for b in range(B):
+                eos_pos = (
+                    int(lengths[b].item())
+                    if torch.is_tensor(lengths[b])
+                    else int(lengths[b])
+                )
+                if not mask[b, eos_pos]:
+                    eos_bias_vec[b, eos_pos] = 1.0
+            logits = logits + eos_bias_vec * actor.eos_logit_bias
+
+        probs = F.softmax(logits, dim=1)
+
+        # NaN safety
+        nan_rows = torch.isnan(probs).any(dim=1, keepdim=True)
+        if nan_rows.any():
+            fallback = torch.zeros_like(probs)
+            if lengths is not None:
+                for b in range(B):
+                    eos_pos = (
+                        int(lengths[b].item())
+                        if torch.is_tensor(lengths[b])
+                        else int(lengths[b])
+                    )
+                    fallback[b, eos_pos] = 1.0
+            else:
+                fallback[:, 0] = 1.0
+            probs = torch.where(nan_rows, fallback, probs)
+
+        # Force target action
+        forced = torch.zeros(B, dtype=torch.long, device=device)
+        for b in range(B):
+            if step < len(target_seqs[b]):
+                forced[b] = target_seqs[b][step]
+            else:
+                n = (
+                    int(lengths[b].item())
+                    if lengths is not None and torch.is_tensor(lengths[b])
+                    else (int(lengths[b]) if lengths is not None else seq_len)
+                )
+                forced[b] = n  # EOS
+
+        # Collect log-probs for active steps only
+        for b in range(B):
+            if step < len(target_seqs[b]):
+                p = probs[b, forced[b]].clamp(min=1e-20)
+                log_probs_per_sample[b].append(torch.log(p))
+
+        # Update mask & decoder input
+        idxs = forced
+        selected_mask = F.one_hot(idxs, total_len).bool()
+        mask = mask | selected_mask
+        decoder_input = embedded[torch.arange(B, device=device), idxs, :]
+
+    # Per-sample totals
+    result = []
+    for b in range(B):
+        if log_probs_per_sample[b]:
+            result.append(torch.stack(log_probs_per_sample[b]).sum())
+        else:
+            result.append(torch.tensor(0.0, device=device, requires_grad=True))
+    return torch.stack(result)
+
+
+def teacher_force_weighted_nll(
+    model: torch.nn.Module,
+    inputs: torch.Tensor,
+    target_seqs: list[list[int]],
+    step_weights: list[list[float]],
+    padding_mask: torch.Tensor | None = None,
+    lengths: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Weighted NLL for teacher-forced sequences.
+
+    Like ``teacher_force_log_prob`` but applies per-step weights and
+    returns the *loss* (positive) averaged over weighted steps.
+    ``step_weights[b][t]`` is the weight for step t of sample b
+    (e.g. higher for EOS steps).
+
+    Returns
+    -------
+    loss : scalar — weighted mean of per-step negative log-probs.
+    """
+    actor = model.actor if hasattr(model, "actor") else model
+    device = inputs.device
+    batch_size = inputs.size(0)
+    seq_len = inputs.size(1)
+
+    # ── Encoder ──────────────────────────────────────────────────
+    eos_vec = torch.zeros(batch_size, 1, 2, device=device)
+    inputs_ext = torch.cat([inputs, eos_vec], dim=1)
+    embedded = actor.embedding(inputs_ext.transpose(1, 2))
+
+    if lengths is not None:
+        enc_lengths = (lengths + 1).cpu() if torch.is_tensor(lengths) else torch.tensor(
+            [l + 1 for l in lengths], device="cpu"
+        )
+        packed = torch.nn.utils.rnn.pack_padded_sequence(
+            embedded, enc_lengths, batch_first=True, enforce_sorted=False,
+        )
+        packed_out, (hidden, context) = actor.encoder(packed)
+        encoder_outputs, _ = torch.nn.utils.rnn.pad_packed_sequence(
+            packed_out, batch_first=True, total_length=seq_len + 1,
+        )
+    else:
+        encoder_outputs, (hidden, context) = actor.encoder(embedded)
+
+    total_len = seq_len + 1
+    if padding_mask is not None:
+        pad = ~padding_mask
+        pad_eos = torch.zeros(batch_size, 1, dtype=torch.bool, device=device)
+        mask = torch.cat([pad, pad_eos], dim=1)
+    else:
+        mask = torch.zeros(batch_size, total_len, dtype=torch.bool, device=device)
+
+    if lengths is not None:
+        for b in range(batch_size):
+            n = int(lengths[b].item()) if torch.is_tensor(lengths[b]) else int(lengths[b])
+            if n + 1 < total_len:
+                mask[b, n + 1:] = True
+
+    # ── Decoder (teacher-forced) ─────────────────────────────────
+    decoder_input = actor.decoder_start_input.unsqueeze(0).repeat(batch_size, 1)
+    idxs = None
+    weighted_nll_sum = torch.zeros(1, device=device)
+    total_weight = 0.0
+
+    max_steps = max(len(s) for s in target_seqs)
+    for step in range(max_steps):
+        _, (hidden, context) = actor.decoder(
+            decoder_input.unsqueeze(1), (hidden, context),
+        )
+        query = hidden.squeeze(0)
+        for _ in range(actor.n_glimpses):
+            ref, logits = actor.glimpse(query, encoder_outputs)
+            logits, mask = actor.apply_mask_to_logits(logits, mask, idxs, lengths)
+            logits = logits / actor.temperature
+            query = torch.bmm(
+                ref, F.softmax(logits, dim=1).unsqueeze(2),
+            ).squeeze(2)
+        _, logits = actor.pointer(query, encoder_outputs)
+        logits, mask = actor.apply_mask_to_logits(logits, mask, idxs, lengths)
+
+        if actor.eos_logit_bias is not None and lengths is not None:
+            eos_bias_vec = torch.zeros_like(logits)
+            for b in range(batch_size):
+                eos_pos = int(lengths[b].item()) if torch.is_tensor(lengths[b]) else int(lengths[b])
+                if not mask[b, eos_pos]:
+                    eos_bias_vec[b, eos_pos] = 1.0
+            logits = logits + eos_bias_vec * actor.eos_logit_bias
+
+        probs = F.softmax(logits, dim=1)
+
+        forced = torch.zeros(batch_size, dtype=torch.long, device=device)
+        for b in range(batch_size):
+            if step < len(target_seqs[b]):
+                forced[b] = target_seqs[b][step]
+            else:
+                n = int(lengths[b].item()) if lengths is not None and torch.is_tensor(lengths[b]) else int(lengths[b]) if lengths is not None else seq_len
+                forced[b] = n
+
+        for b in range(batch_size):
+            if step < len(target_seqs[b]):
+                p = probs[b, forced[b]].clamp(min=1e-20)
+                w = step_weights[b][step] if step < len(step_weights[b]) else 1.0
+                weighted_nll_sum = weighted_nll_sum + w * (-torch.log(p))
+                total_weight += w
+
+        idxs = forced
+        selected_mask = F.one_hot(idxs, total_len).bool()
+        mask = mask | selected_mask
+        decoder_input = embedded[torch.arange(batch_size, device=device), idxs, :]
+
+    return weighted_nll_sum / max(total_weight, 1e-8)
 
 
 # ===================================================================
@@ -1538,11 +1807,16 @@ def po_finetune(
     # Swap-only LS: disable ADD/REMOVE (not needed with Pareto acceptance)
     ft_ls_swap_only: bool = False,
     # Loss type: "dpo" (contrastive) or "sft" (supervised on teacher seqs)
+    # or "ls_distill" (online LS-distillation with model-ordered targets)
     ft_loss_type: str = "dpo",
     # L2 weight penalty toward reference model (prevents catastrophic drift in SFT)
     ft_kl_coeff: float = 0.0,
     # LS iteration budget for REINFORCE+LS (low → placement signal; high → equalization)
     ft_rl_ls_budget: int = 3,
+    # EOS loss upweighting for ls_distill (prevents drowning out stopping signal)
+    ft_eos_weight: float = 5.0,
+    # Sampling temperature for lexpo (>1 → more diverse rollouts → more pref pairs)
+    ft_sample_temp: float = 1.0,
 ) -> None:
     """Fine-tune via preference pairs (paper §3.4, Eq. 9).
 
@@ -1564,13 +1838,17 @@ def po_finetune(
     loss_label = ft_loss_type.upper()
     kl_label = f"  kl_coeff={ft_kl_coeff}" if ft_kl_coeff > 0 else ""
     rl_ls_label = f"  rl_ls_budget={ft_rl_ls_budget}" if ft_loss_type == "reinforce_ls" else ""
+    distill_label = f"  eos_weight={ft_eos_weight}" if ft_loss_type == "ls_distill" else ""
+    lexpo_label = (f"  ls_eval_budget={ft_rl_ls_budget}" if ft_rl_ls_budget > 0 else "") + (f"  sample_T={ft_sample_temp}" if ft_sample_temp != 1.0 else "") if ft_loss_type == "lexpo" else ""
     print(
         f"\n{'='*60}\n"
         f"  {method_label} Fine-tune (§3.4)  |  {len(dataset)} inst  |  K={K}  |\n"
         f"  {epochs} epochs  |  bs={batch_size}  |  α={alpha}\n"
-        f"  LS moves: {ls_mode}  |  loss: {loss_label}{kl_label}{rl_ls_label}\n"
+        f"  LS moves: {ls_mode}  |  loss: {loss_label}{kl_label}{rl_ls_label}{distill_label}{lexpo_label}\n"
         f"{'='*60}"
     )
+    if ft_loss_type in ("lexrf", "lexpo"):
+        print("  Ranking: feasible(cov≥τ) >> infeasible; feasible: fewer guards; infeasible: higher cov")
 
     # -- Preload optimal solutions if needed --
     opt_solutions: dict[str, list[int]] = {}
@@ -1622,10 +1900,10 @@ def po_finetune(
     _eval_tau = tau if tau is not None else 0.99
     _eval_tp  = tau_penalty if tau_penalty is not None else 5.0
 
-    def _ft_quick_eval() -> tuple[float, float, float]:
-        """Greedy decode on ft_eval_k instances → (mean_cov, mean_guard_ratio, mean_reward)."""
+    def _ft_quick_eval() -> tuple[float, float, float, float]:
+        """Greedy decode on ft_eval_k instances → (mean_cov, mean_guard_ratio, mean_reward, mean_s_over_opt)."""
         model.eval()
-        covs, grs, rews = [], [], []
+        covs, grs, rews, s_over_opts = [], [], [], []
         for cnt, (bd, pm, lens_raw, names) in enumerate(ft_eval_loader):
             if cnt >= ft_eval_k:
                 break
@@ -1662,16 +1940,24 @@ def po_finetune(
             covs.append(cov)
             grs.append(gr)
             rews.append(rew)
+            # |S|/OPT
+            if sol_dir:
+                opt_sol = _read_opt_solution(sol_dir, names[0])
+                if opt_sol and len(opt_sol) > 0:
+                    s_over_opts.append(len(sol) / len(opt_sol))
         model.train()
+        mean_s_opt = float(np.mean(s_over_opts)) if s_over_opts else -1.0
         return (
             float(np.mean(covs)) if covs else 0.0,
             float(np.mean(grs)) if grs else 0.0,
             float(np.mean(rews)) if rews else -1e9,
+            mean_s_opt,
         )
 
     # Baseline before FT
-    pre_ft_cov, pre_ft_gr, pre_ft_rew = _ft_quick_eval()
-    print(f"  [FT baseline] greedy cov={pre_ft_cov:.3f} |S|/n={pre_ft_gr:.3f} r={pre_ft_rew:.4f}")
+    pre_ft_cov, pre_ft_gr, pre_ft_rew, pre_ft_sopt = _ft_quick_eval()
+    sopt_str = f" |S|/OPT={pre_ft_sopt:.3f}" if pre_ft_sopt > 0 else ""
+    print(f"  [FT baseline] greedy cov={pre_ft_cov:.3f} |S|/n={pre_ft_gr:.3f}{sopt_str} r={pre_ft_rew:.4f}")
     best_ft_rew = pre_ft_rew
     best_ft_state = copy.deepcopy(model.state_dict())
 
@@ -1685,7 +1971,7 @@ def po_finetune(
     # Pairs are cached to disk (checkpoint_dir/ft_pairs_K{K}.pkl) so
     # subsequent runs with the same model skip the costly precomputation.
     # ==================================================================
-    if finetune_method == "ls" and ft_loss_type != "reinforce_ls":
+    if finetune_method == "ls" and ft_loss_type not in ("reinforce_ls", "ls_distill", "lexrf", "lexpo"):
         import pickle as _pkl
         pairs_cache_path = os.path.join(
             checkpoint_dir, f"ft_pairs_K{K}.pkl",
@@ -1880,7 +2166,7 @@ def po_finetune(
         total_loss = 0.0
         n_pairs_epoch = 0
 
-        if finetune_method == "ls" and ft_loss_type != "reinforce_ls":
+        if finetune_method == "ls" and ft_loss_type not in ("reinforce_ls", "ls_distill", "lexrf", "lexpo"):
             # ── OFFLINE: iterate over precomputed fixed pairs ────
             import random as _rng
             indices = list(range(len(all_pairs)))
@@ -2125,6 +2411,511 @@ def po_finetune(
                 del exp_data, exp_mask, exp_lens, all_log_probs_raw
                 torch.cuda.empty_cache()
 
+        elif ft_loss_type == "lexrf":
+            # ── LEXICOGRAPHIC REINFORCE ──────────────────────────
+            # Rank K rollouts per instance lexicographically:
+            #   feasible (cov≥τ) >> infeasible
+            #   among feasible: fewer guards = better
+            #   among infeasible: higher coverage = better
+            # Normalised ranks as advantages → no 50:1 exploit.
+            _tau = tau if tau is not None else 0.99
+
+            batch_iter = (
+                tqdm(loader, desc=f"FT epoch {epoch} [LexRF]", leave=False)
+                if tqdm else loader
+            )
+
+            for batch_data_raw, pad_mask_raw, lens_raw, names_raw in batch_iter:
+                bd = batch_data_raw.to(device, non_blocking=True)
+                pm = pad_mask_raw.to(device, non_blocking=True)
+                lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
+                B = bd.size(0)
+
+                # Sample K rollouts per instance (on-policy)
+                exp_data = bd.repeat_interleave(K, dim=0)
+                exp_mask = pm.repeat_interleave(K, dim=0)
+                exp_lens = lt.repeat_interleave(K)
+
+                all_idxs, all_log_probs_raw = model(
+                    exp_data, padding_mask=exp_mask, lengths=exp_lens,
+                    deterministic=False,
+                )
+
+                # Length-normalise log-probs
+                step_counts = torch.tensor(
+                    [max(1, len(idxs)) for idxs in all_idxs],
+                    dtype=torch.float32, device=device,
+                )
+                all_log_probs = all_log_probs_raw / step_counts  # (B*K,)
+
+                # Evaluate each rollout: coverage and guard count
+                covs = []   # (B*K,)
+                sizes = []  # (B*K,)
+                for i in range(B * K):
+                    b = i // K
+                    nn = int(lt[b].item())
+                    sol = [g for g in all_idxs[i] if g < nn]
+                    if not sol:
+                        covs.append(0.0)
+                        sizes.append(0)
+                        continue
+                    pts = bd[b, :nn].detach().cpu().numpy()
+                    disc = get_or_build_disc_vis(pts, names_raw[b],
+                                                 n_samples=disc_vis_samples)
+                    if disc.get("valid"):
+                        vis = disc["vis_matrix"]
+                        M = disc["n_samples"]
+                        cov_mask = np.zeros(M, dtype=np.bool_)
+                        for g in sol:
+                            if 0 <= g < vis.shape[0]:
+                                np.bitwise_or(cov_mask, vis[g], out=cov_mask)
+                        covs.append(float(cov_mask.sum()) / M)
+                    else:
+                        covs.append(0.0)
+                    sizes.append(len(sol))
+
+                # Lexicographic ranking per instance
+                # Sort key: (-feasible, size if feasible else -cov)
+                # feasible first, then fewer guards; infeasible: higher cov
+                advantages_list = []
+                for b in range(B):
+                    nn = int(lt[b].item())
+                    items = []  # (sort_key, k_index)
+                    for k in range(K):
+                        idx = b * K + k
+                        feas = 1 if covs[idx] >= _tau else 0
+                        if feas:
+                            # Lower |S|/n = better → sort ascending
+                            sort_key = (0, sizes[idx] / max(1, nn))
+                        else:
+                            # Higher cov = better → sort ascending on -cov
+                            sort_key = (1, -covs[idx])
+                        items.append((sort_key, k))
+                    items.sort(key=lambda x: x[0])
+                    # Assign ranks: 0 = best, K-1 = worst
+                    ranks = [0.0] * K
+                    for rank_pos, (_, k) in enumerate(items):
+                        ranks[k] = float(rank_pos)
+                    # Normalise: zero-mean, unit-std (or zero if all same)
+                    r_t = torch.tensor(ranks, dtype=torch.float32, device=device)
+                    r_mean = r_t.mean()
+                    r_std = r_t.std()
+                    if r_std > 1e-8:
+                        normed = (r_mean - r_t) / r_std  # flip: lower rank = positive advantage
+                    else:
+                        normed = torch.zeros_like(r_t)
+                    advantages_list.append(normed)
+
+                advantages = torch.cat(advantages_list)  # (B*K,)
+
+                # Loss: -advantage * log_prob (REINFORCE)
+                rl_loss = -(advantages.detach() * all_log_probs).mean()
+
+                # L2 regularisation toward reference model
+                if ref_model is not None and ft_kl_coeff > 0:
+                    l2_reg = sum(
+                        (p - p_ref).pow(2).sum()
+                        for p, p_ref in zip(model.parameters(),
+                                            ref_model.parameters())
+                    )
+                    rl_loss = rl_loss + ft_kl_coeff * l2_reg
+
+                optimizer.zero_grad()
+                rl_loss.backward()
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                grad_finite = all(
+                    torch.isfinite(p.grad).all()
+                    for p in model.parameters()
+                    if p.grad is not None
+                )
+                if not grad_finite:
+                    optimizer.zero_grad()
+                    continue
+                optimizer.step()
+
+                total_loss += rl_loss.item() * B * K
+                n_pairs_epoch += B * K
+
+                del exp_data, exp_mask, exp_lens, all_log_probs_raw
+                torch.cuda.empty_cache()
+
+        elif ft_loss_type == "lexpo":
+            # ── LEXICOGRAPHIC PREFERENCE OPTIMISATION ────────────
+            # Faithful to Pan et al. 2025 §3.4 (ICML, arXiv:2505.08735).
+            #
+            # 1.  Sample K rollouts on-policy  →  τ₁…τ_K  (with ∇)
+            # 2.  Run partial LS on each       →  LS(τ₁)…LS(τ_K)
+            # 3.  Teacher-force LS solutions   →  log π(LS(τ_k))  (with ∇)
+            # 4.  Pool 2K solns; build lexicographic preference matrix
+            # 5.  BT loss through both on-policy and teacher-forced log-probs
+            #
+            # Paper's argument (§3.4): PO absorbs off-policy LS solns
+            # naturally (like BC / DAgger), no importance-sampling needed.
+            # The BT loss is *relative* (log π(LS(τ)) vs log π(τ)),
+            # not absolute NLL, so the hidden-state cascade from
+            # teacher-forcing is dampened by the σ-weighting.
+            _tau = tau if tau is not None else 0.99
+            _lam = lam if lam is not None else 0.2
+            _tp  = tau_penalty if tau_penalty is not None else 5.0
+            _ls_budget = ft_rl_ls_budget  # 0 → on-policy only; >0 → +LS pool
+            _sample_temp = ft_sample_temp  # >1 → diverse rollouts
+            # Feasibility floor = baseline coverage (monotone coverage):
+            # don't reward coverage gains beyond baseline; among solutions
+            # at baseline level, prefer fewer guards.
+            _cov_floor = pre_ft_cov - 0.005  # small margin for noise
+            if epoch == 1:
+                print(f"  LexPO cov_floor={_cov_floor:.3f} (baseline={pre_ft_cov:.3f} - 0.005)")
+
+            batch_iter = (
+                tqdm(loader, desc=f"FT epoch {epoch} [LexPO{'+LS' if _ls_budget > 0 else ''}]", leave=False)
+                if tqdm else loader
+            )
+
+            for batch_data_raw, pad_mask_raw, lens_raw, names_raw in batch_iter:
+                bd = batch_data_raw.to(device, non_blocking=True)
+                pm = pad_mask_raw.to(device, non_blocking=True)
+                lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
+                B = bd.size(0)
+
+                # Gradient accumulation over sub-batches to fit in GPU mem.
+                # Each sub-batch: micro_B instances × K rollouts × 2 (on-policy + LS).
+                micro_B = max(1, min(4, B))
+                optimizer.zero_grad()
+                batch_loss_accum = 0.0
+                batch_prefs_accum = 0
+                n_micro = (B + micro_B - 1) // micro_B
+
+                for mi in range(n_micro):
+                    mb_start = mi * micro_B
+                    mb_end = min(mb_start + micro_B, B)
+                    mB = mb_end - mb_start
+
+                    mb_data = bd[mb_start:mb_end]
+                    mb_mask = pm[mb_start:mb_end]
+                    mb_lens = lt[mb_start:mb_end]
+                    mb_names = names_raw[mb_start:mb_end]
+
+                    # ── 1. Sample K rollouts on-policy (with gradients) ──
+                    exp_data = mb_data.repeat_interleave(K, dim=0)
+                    exp_mask = mb_mask.repeat_interleave(K, dim=0)
+                    exp_lens = mb_lens.repeat_interleave(K)
+
+                    _actor = model.actor if hasattr(model, "actor") else model
+                    _orig_temp = _actor.temperature
+                    if _sample_temp != 1.0:
+                        _actor.temperature = _sample_temp
+                    all_idxs, all_log_probs_raw = model(
+                        exp_data, padding_mask=exp_mask, lengths=exp_lens,
+                        deterministic=False,
+                    )
+                    _actor.temperature = _orig_temp
+
+                    # Cache per-instance points
+                    pts_cache = []
+                    for b in range(mB):
+                        nn = int(mb_lens[b].item())
+                        pts_cache.append(mb_data[b, :nn].detach().cpu().numpy())
+
+                    # ── 2. Evaluate originals & run LS ───────────────────
+                    orig_covs  = []
+                    orig_sizes = []
+                    ls_covs    = []
+                    ls_sizes   = []
+                    ls_target_seqs: list[list[int]] = []
+
+                    for i in range(mB * K):
+                        b = i // K
+                        nn = int(mb_lens[b].item())
+                        sol = [g for g in all_idxs[i] if g < nn]
+                        rollout_order = list(sol)
+
+                        disc = get_or_build_disc_vis(
+                            pts_cache[b], mb_names[b], n_samples=disc_vis_samples,
+                        )
+                        if disc.get("valid") and sol:
+                            vis = disc["vis_matrix"]; M = disc["n_samples"]
+                            cm = np.zeros(M, dtype=np.bool_)
+                            for g in sol:
+                                if 0 <= g < vis.shape[0]:
+                                    np.bitwise_or(cm, vis[g], out=cm)
+                            orig_covs.append(float(cm.sum()) / M)
+                        else:
+                            orig_covs.append(0.0)
+                        orig_sizes.append(len(sol))
+
+                        if _ls_budget > 0 and sol:
+                            ls_sol, _, _ = local_search_improve_disc(
+                                pts_cache[b], sol, mb_names[b], nn,
+                                max_iter=_ls_budget,
+                                enable_swap=True,
+                                enable_remove=True,
+                                enable_add=False,
+                                lam=_lam, tau=_tau, tau_penalty=_tp,
+                                cap_at_tau=cap_at_tau,
+                                n_samples=disc_vis_samples,
+                                reward_fn_fallback=reward_fn,
+                                monotone_coverage=True,
+                            )
+                            ls_sol_set = set(ls_sol)
+                            ls_ordered = [g for g in rollout_order if g in ls_sol_set]
+                            if not ls_ordered:
+                                ls_ordered = list(ls_sol) if ls_sol else []
+
+                            if disc.get("valid") and ls_ordered:
+                                cm2 = np.zeros(M, dtype=np.bool_)
+                                for g in ls_ordered:
+                                    if 0 <= g < vis.shape[0]:
+                                        np.bitwise_or(cm2, vis[g], out=cm2)
+                                ls_covs.append(float(cm2.sum()) / M)
+                            else:
+                                ls_covs.append(0.0)
+                            ls_sizes.append(len(ls_ordered))
+                            ls_target_seqs.append(ls_ordered + [nn])
+                        else:
+                            ls_covs.append(orig_covs[-1])
+                            ls_sizes.append(orig_sizes[-1])
+                            ls_target_seqs.append(rollout_order + [nn])
+
+                    # ── 3. Teacher-force LS solutions → log π(LS(τ_k)) ──
+                    if _ls_budget > 0:
+                        ls_log_probs = _teacher_force_log_probs(
+                            model, exp_data, ls_target_seqs, exp_mask, exp_lens,
+                        )
+                    else:
+                        ls_log_probs = all_log_probs_raw
+
+                    # ── 4. Pool 2K solutions, build preference matrix ────
+                    pool_size = 2 * K
+                    pool_scores = torch.zeros(mB, pool_size, device=device)
+                    pool_lp = torch.zeros(mB, pool_size, device=device)
+
+                    # Per-instance adaptive floor:
+                    #   well-guarded (pool best ≥ baseline): floor = best - margin → guard reduction
+                    #   underguarded (pool best < baseline): floor = baseline → coverage push
+                    per_inst_floor = []
+                    for b in range(mB):
+                        all_covs_b = [orig_covs[b * K + k] for k in range(K)] + \
+                                     [ls_covs[b * K + k] for k in range(K)]
+                        best_cov_b = max(all_covs_b)
+                        per_inst_floor.append(max(best_cov_b - 0.01, _cov_floor))
+
+                    for i in range(mB * K):
+                        b, k = i // K, i % K
+                        nn = int(mb_lens[b].item())
+                        _floor_b = per_inst_floor[b]
+
+                        # Feasible: -1000 + |S|/n - 0.01*cov
+                        #   primary: fewer guards (lower |S|/n)
+                        #   tiebreak: higher coverage (lower -0.01*cov)
+                        if orig_covs[i] >= _floor_b:
+                            pool_scores[b, k] = -1000.0 + orig_sizes[i] / max(1, nn) - 0.01 * orig_covs[i]
+                        else:
+                            pool_scores[b, k] = 1.0 - orig_covs[i]
+                        pool_lp[b, k] = all_log_probs_raw[i]
+
+                        if ls_covs[i] >= _floor_b:
+                            pool_scores[b, K + k] = -1000.0 + ls_sizes[i] / max(1, nn) - 0.01 * ls_covs[i]
+                        else:
+                            pool_scores[b, K + k] = 1.0 - ls_covs[i]
+                        pool_lp[b, K + k] = ls_log_probs[i].detach()
+
+                    pref = (pool_scores[:, :, None] < pool_scores[:, None, :]).float()
+                    n_prefs = pref.sum()
+                    if n_prefs < 1:
+                        del exp_data, exp_mask, exp_lens, all_log_probs_raw
+                        torch.cuda.empty_cache()
+                        continue
+
+                    # ── 5. BT preference loss (scaled for accumulation) ──
+                    lp_diff = alpha * (pool_lp[:, :, None] - pool_lp[:, None, :])
+                    micro_loss = -(pref * F.logsigmoid(lp_diff)).sum() / n_prefs
+                    # Scale by 1/n_micro so accumulated gradient ≈ full-batch gradient
+                    (micro_loss / n_micro).backward()
+
+                    batch_loss_accum += micro_loss.item() * int(n_prefs.item())
+                    batch_prefs_accum += int(n_prefs.item())
+
+                    del exp_data, exp_mask, exp_lens, all_log_probs_raw, ls_log_probs
+                    torch.cuda.empty_cache()
+
+                # L2 regularisation (once per batch, not per micro-batch)
+                if ref_model is not None and ft_kl_coeff > 0:
+                    l2_reg = sum(
+                        (p - p_ref).pow(2).sum()
+                        for p, p_ref in zip(model.parameters(),
+                                            ref_model.parameters())
+                    )
+                    l2_reg_loss = ft_kl_coeff * l2_reg
+                    l2_reg_loss.backward()
+
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                grad_finite = all(
+                    torch.isfinite(p.grad).all()
+                    for p in model.parameters()
+                    if p.grad is not None
+                )
+                if not grad_finite:
+                    optimizer.zero_grad()
+                    continue
+                optimizer.step()
+
+                total_loss += batch_loss_accum
+                n_pairs_epoch += batch_prefs_accum
+
+        elif ft_loss_type == "ls_distill":
+            # ── ONLINE LS-DISTILLATION (truncated at first skip) ─
+            # For each batch: sample K rollouts, run disc-LS on EACH
+            # rollout.  Instead of teacher-forcing the full LS target
+            # (which cascades off-distribution hidden states), we
+            # truncate each target at the first guard LS removed.
+            #
+            # At the truncation point the decoder hidden state is
+            # on-distribution (identical prefix to the rollout), so
+            # the gradient that says "output guard Y instead of X" is
+            # meaningful.  Over epochs the model learns to skip one
+            # redundant guard at a time; as rollouts shorten, LS
+            # finds the next guard to skip.
+            _lam = lam if lam is not None else 0.2
+            _tau = tau if tau is not None else 0.99
+            _tp  = tau_penalty if tau_penalty is not None else 5.0
+
+            batch_iter = (
+                tqdm(loader, desc=f"FT epoch {epoch} [LS-distill]", leave=False)
+                if tqdm else loader
+            )
+
+            for batch_data_raw, pad_mask_raw, lens_raw, names_raw in batch_iter:
+                bd = batch_data_raw.to(device, non_blocking=True)
+                pm = pad_mask_raw.to(device, non_blocking=True)
+                lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
+                B = bd.size(0)
+
+                # Sample K rollouts per instance (on-policy, no grad)
+                with torch.no_grad():
+                    exp_data = bd.repeat_interleave(K, dim=0)
+                    exp_mask = pm.repeat_interleave(K, dim=0)
+                    exp_lens = lt.repeat_interleave(K)
+                    all_idxs, _ = model(
+                        exp_data, padding_mask=exp_mask, lengths=exp_lens,
+                        deterministic=False,
+                    )
+
+                # Pre-extract points
+                pts_per_b = []
+                for b in range(B):
+                    nn = int(lt[b].item())
+                    pts_per_b.append(bd[b, :nn].detach().cpu().numpy())
+
+                # For each rollout: run LS, build truncated target
+                target_seqs: list[list[int]] = []
+                target_weights: list[list[float]] = []
+                target_b_idx: list[int] = []  # which instance in batch
+
+                for i in range(B * K):
+                    b = i // K
+                    nn = int(lt[b].item())
+                    pts = pts_per_b[b]
+                    rollout = [g for g in all_idxs[i] if g < nn]
+
+                    if not rollout:
+                        continue
+
+                    # Run LS on THIS specific rollout (monotone coverage)
+                    ls_sol, _, ls_stats = local_search_improve_disc(
+                        pts, rollout, names_raw[b], nn,
+                        max_iter=ls_max_iter,
+                        enable_swap=ls_swap,
+                        enable_remove=True,
+                        enable_add=True,
+                        lam=_lam, tau=_tau, tau_penalty=_tp,
+                        cap_at_tau=cap_at_tau,
+                        n_samples=disc_vis_samples,
+                        reward_fn_fallback=reward_fn,
+                        monotone_coverage=True,
+                    )
+
+                    # Which guards did LS remove from this rollout?
+                    survived = set(ls_sol)
+                    removed = set(rollout) - survived
+                    if not removed:
+                        continue  # LS only added (or no-op) — skip
+
+                    # Find first removal position in rollout order
+                    first_div = None
+                    for t, g in enumerate(rollout):
+                        if g in removed:
+                            first_div = t
+                            break
+                    if first_div is None:
+                        continue
+
+                    # Truncated target: rollout prefix + next surviving
+                    # guard (or EOS if all remaining guards removed).
+                    # Hidden state at first_div is on-distribution.
+                    trunc = list(rollout[:first_div])
+                    next_surv = None
+                    for t2 in range(first_div + 1, len(rollout)):
+                        if rollout[t2] not in removed:
+                            next_surv = rollout[t2]
+                            break
+                    trunc.append(next_surv if next_surv is not None else nn)
+
+                    weights = [1.0] * len(trunc)
+
+                    target_seqs.append(trunc)
+                    target_weights.append(weights)
+                    target_b_idx.append(b)
+
+                if not target_seqs:
+                    continue
+
+                P = len(target_seqs)
+                tf_data = torch.stack([bd[target_b_idx[j]] for j in range(P)])
+                tf_mask = torch.stack([pm[target_b_idx[j]] for j in range(P)])
+                tf_lens = torch.tensor(
+                    [int(lt[target_b_idx[j]].item()) for j in range(P)],
+                    dtype=torch.long, device=device,
+                )
+
+                # Weighted NLL loss (EOS upweighted)
+                loss = teacher_force_weighted_nll(
+                    model, tf_data, target_seqs, target_weights,
+                    tf_mask, tf_lens,
+                )
+
+                # L2 regularisation toward reference weights
+                if ref_model is not None and ft_kl_coeff > 0:
+                    l2_reg = sum(
+                        (p - p_ref).pow(2).sum()
+                        for p, p_ref in zip(model.parameters(),
+                                            ref_model.parameters())
+                    )
+                    loss = loss + ft_kl_coeff * l2_reg
+
+                optimizer.zero_grad()
+                loss.backward()
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                grad_finite = all(
+                    torch.isfinite(p.grad).all()
+                    for p in model.parameters()
+                    if p.grad is not None
+                )
+                if not grad_finite:
+                    optimizer.zero_grad()
+                    del tf_data, tf_mask, tf_lens
+                    torch.cuda.empty_cache()
+                    continue
+                optimizer.step()
+
+                total_loss += loss.item() * P
+                n_pairs_epoch += P
+
+                del tf_data, tf_mask, tf_lens, exp_data, exp_mask, exp_lens
+                torch.cuda.empty_cache()
+
         else:
             # ── ONLINE: optimal teacher (no cascade risk) ────────
             batch_iter = (
@@ -2257,6 +3048,24 @@ def po_finetune(
                 f"loss={avg_loss:.6f}  "
                 f"rollouts={n_pairs_epoch} (RL+LS({ft_rl_ls_budget}))"
             )
+        elif ft_loss_type == "lexrf":
+            print(
+                f"FT epoch {epoch}/{epochs}  "
+                f"loss={avg_loss:.6f}  "
+                f"rollouts={n_pairs_epoch} (LexRF)"
+            )
+        elif ft_loss_type == "lexpo":
+            print(
+                f"FT epoch {epoch}/{epochs}  "
+                f"loss={avg_loss:.4f}  "
+                f"pairs={n_pairs_epoch} (LexPO{'+LS(' + str(ft_rl_ls_budget) + ')' if ft_rl_ls_budget > 0 else ''})"
+            )
+        elif ft_loss_type == "ls_distill":
+            print(
+                f"FT epoch {epoch}/{epochs}  "
+                f"loss={avg_loss:.4f}  "
+                f"targets={n_pairs_epoch} (LS-distill, eos_w={ft_eos_weight})"
+            )
         elif finetune_method == "ls":
             print(
                 f"FT epoch {epoch}/{epochs}  "
@@ -2286,7 +3095,7 @@ def po_finetune(
             print(f"  FT checkpoint -> {p}")
 
         # -- quick greedy eval --
-        ft_cov, ft_gr, ft_rew = _ft_quick_eval()
+        ft_cov, ft_gr, ft_rew, ft_sopt = _ft_quick_eval()
         cov_delta = ft_cov - pre_ft_cov
         rew_delta = ft_rew - pre_ft_rew
         tag = ""
@@ -2294,8 +3103,9 @@ def po_finetune(
             best_ft_rew = ft_rew
             best_ft_state = copy.deepcopy(model.state_dict())
             tag = " *best*"
+        sopt_str = f" |S|/OPT={ft_sopt:.3f}" if ft_sopt > 0 else ""
         print(f"  [FT eval] cov={ft_cov:.3f} (Δ={cov_delta:+.3f}) "
-              f"|S|/n={ft_gr:.3f} r={ft_rew:.4f} (Δ={rew_delta:+.4f}){tag}")
+              f"|S|/n={ft_gr:.3f}{sopt_str} r={ft_rew:.4f} (Δ={rew_delta:+.4f}){tag}")
 
         # Early stop: halt if reward dropped significantly from baseline
         # (reward accounts for both coverage AND guard efficiency).
@@ -2307,7 +3117,7 @@ def po_finetune(
         torch.cuda.empty_cache()
 
     # Restore best model if reward degraded
-    _, _, final_rew = _ft_quick_eval()
+    _, _, final_rew, _ = _ft_quick_eval()
     if final_rew < best_ft_rew - 1e-6:
         print(f"  [FT] Restoring best model (r={best_ft_rew:.4f} > final {final_rew:.4f})")
         model.load_state_dict(best_ft_state)
@@ -2453,7 +3263,17 @@ def evaluate_po(
     count = 0
     limit = eval_k if eval_k else len(dataset)
 
-    for batch_data, pad_mask, lens, names in loader:
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    _iter = loader
+    if _tqdm is not None:
+        _iter = _tqdm(loader, total=min(limit, len(dataset)),
+                      desc="eval", unit="inst")
+
+    for batch_data, pad_mask, lens, names in _iter:
         if count >= limit:
             break
         batch_data = batch_data.to(device)
@@ -2533,10 +3353,22 @@ def evaluate_po(
         if local_search and best_guards and reward_fn is not None:
             pre_ls_guards = n_guards
             pre_ls_cov    = best_cov
-            ls_guards, ls_r, ls_stats = local_search_improve(
-                pts, best_guards, name, n, reward_fn,
-                max_iter=ls_max_iter, enable_swap=ls_swap,
-            )
+            # Use fast disc-vis LS when disc_vis_samples>0, exact CGAL otherwise
+            if disc_vis_samples > 0:
+                ls_guards, ls_r, ls_stats = local_search_improve_disc(
+                    pts, best_guards, name, n,
+                    max_iter=ls_max_iter, enable_swap=ls_swap,
+                    enable_remove=True, enable_add=True,
+                    lam=1.0, tau=tau, tau_penalty=3.0, cap_at_tau=False,
+                    n_samples=disc_vis_samples,
+                    reward_fn_fallback=reward_fn,
+                    monotone_coverage=True,
+                )
+            else:
+                ls_guards, ls_r, ls_stats = local_search_improve(
+                    pts, best_guards, name, n, reward_fn,
+                    max_iter=ls_max_iter, enable_swap=ls_swap,
+                )
             # Recompute coverage for the refined solution
             ls_cov = 0.0
             if ls_guards:
@@ -2673,10 +3505,11 @@ def main() -> None:
     g.add_argument("--ft-cap-coverage",   type=str, default=None, choices=["true", "false"],
                    help="Override cap-coverage during FT (default: same as --cap-coverage).")
     g.add_argument("--ft-loss-type", type=str, default="dpo",
-                   choices=["dpo", "sft", "reinforce_ls"],
+                   choices=["dpo", "sft", "reinforce_ls", "ls_distill", "lexrf", "lexpo"],
                    help="Fine-tuning loss: 'dpo' (contrastive preference), "
-                        "'sft' (supervised on teacher sequences), or "
-                        "'reinforce_ls' (on-policy REINFORCE with LS rewards).")
+                        "'sft' (supervised on teacher sequences), "
+                        "'reinforce_ls' (on-policy REINFORCE with LS rewards), or "
+                        "'ls_distill' (online LS-distillation with model-ordered targets).")
     g.add_argument("--ft-kl-coeff", type=float, default=0.0,
                    help="L2 weight regularization toward reference model during SFT. "
                         "Prevents catastrophic drift. Recommended: 50-200 for SFT.")
@@ -2689,6 +3522,12 @@ def main() -> None:
     g.add_argument("--ft-rl-ls-budget", type=int, default=3,
                    help="LS iteration budget for REINFORCE+LS mode. Low (3-5) gives "
                         "placement signal; high (50) equalizes rollouts to zero signal.")
+    g.add_argument("--ft-eos-weight", type=float, default=5.0,
+                   help="EOS loss upweighting for ls_distill mode. Higher values "
+                        "emphasize learning when to stop. Recommended: 5-10.")
+    g.add_argument("--ft-sample-temp", type=float, default=1.0,
+                   help="Sampling temperature for lexpo. >1 gives more diverse "
+                        "rollouts → more informative preference pairs.")
     g.add_argument("--ft-ls-all-moves", dest="ft_ls_swap_only", action="store_false",
                    help="Allow all LS moves (ADD/REMOVE/SWAP) during fine-tuning.")
     g.add_argument("--disc-vis-cache-path", type=str, default=None,
@@ -2759,7 +3598,7 @@ def main() -> None:
             "finetune_only", "skip_finetune", "finetune_method",
             "ft_reward_lambda", "ft_tau_penalty", "ft_cap_coverage",
             "ft_loss_type", "ft_kl_coeff", "ft_no_ref_model", "ft_ls_swap_only",
-            "ft_rl_ls_budget",
+            "ft_rl_ls_budget", "ft_eos_weight", "ft_sample_temp",
             "fast_reward", "disc_vis_samples",
             "use_amp",
         ]
@@ -3029,6 +3868,8 @@ def main() -> None:
             ft_loss_type=args.ft_loss_type,
             ft_kl_coeff=args.ft_kl_coeff,
             ft_rl_ls_budget=args.ft_rl_ls_budget,
+            ft_eos_weight=args.ft_eos_weight,
+            ft_sample_temp=args.ft_sample_temp,
         )
 
     # -- save final --
