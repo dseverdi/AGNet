@@ -1959,7 +1959,16 @@ def po_finetune(
     sopt_str = f" |S|/OPT={pre_ft_sopt:.3f}" if pre_ft_sopt > 0 else ""
     print(f"  [FT baseline] greedy cov={pre_ft_cov:.3f} |S|/n={pre_ft_gr:.3f}{sopt_str} r={pre_ft_rew:.4f}")
     best_ft_rew = pre_ft_rew
+    best_ft_sopt_metric = pre_ft_sopt if pre_ft_sopt > 0 else 1e9  # lower=better
     best_ft_state = copy.deepcopy(model.state_dict())
+
+    # Cosine LR schedule for fine-tuning
+    ft_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=lr * 0.1
+    )
+
+    # Global coverage floor for best-model gating (used outside lexpo block)
+    _cov_floor_global = pre_ft_cov - 0.03
 
     # ==================================================================
     # OFFLINE PAIR PRECOMPUTATION
@@ -2563,9 +2572,9 @@ def po_finetune(
             # Feasibility floor = baseline coverage (monotone coverage):
             # don't reward coverage gains beyond baseline; among solutions
             # at baseline level, prefer fewer guards.
-            _cov_floor = pre_ft_cov - 0.005  # small margin for noise
+            _cov_floor = pre_ft_cov - 0.03  # generous margin so most rollouts are 'feasible'
             if epoch == 1:
-                print(f"  LexPO cov_floor={_cov_floor:.3f} (baseline={pre_ft_cov:.3f} - 0.005)")
+                print(f"  LexPO cov_floor={_cov_floor:.3f} (baseline={pre_ft_cov:.3f} - 0.03)")
 
             batch_iter = (
                 tqdm(loader, desc=f"FT epoch {epoch} [LexPO{'+LS' if _ls_budget > 0 else ''}]", leave=False)
@@ -2685,6 +2694,21 @@ def po_finetune(
                     else:
                         ls_log_probs = all_log_probs_raw
 
+                    # ── 3b. Length-normalise log-probs (paper §4.2) ──
+                    # Variable-length outputs → normalise so shorter seqs
+                    # aren't systematically favoured in preference comparison.
+                    onpol_steps = torch.tensor(
+                        [max(1, len(idxs)) for idxs in all_idxs],
+                        dtype=torch.float32, device=device,
+                    )  # (mB*K,)
+                    all_lp_norm = all_log_probs_raw / onpol_steps
+
+                    ls_steps = torch.tensor(
+                        [max(1, len(seq)) for seq in ls_target_seqs],
+                        dtype=torch.float32, device=device,
+                    )  # (mB*K,)
+                    ls_lp_norm = ls_log_probs / ls_steps
+
                     # ── 4. Pool 2K solutions, build preference matrix ────
                     pool_size = 2 * K
                     pool_scores = torch.zeros(mB, pool_size, device=device)
@@ -2695,10 +2719,11 @@ def po_finetune(
                     #   underguarded (pool best < baseline): floor = baseline → coverage push
                     per_inst_floor = []
                     for b in range(mB):
-                        all_covs_b = [orig_covs[b * K + k] for k in range(K)] + \
-                                     [ls_covs[b * K + k] for k in range(K)]
-                        best_cov_b = max(all_covs_b)
-                        per_inst_floor.append(max(best_cov_b - 0.01, _cov_floor))
+                        # Use on-policy coverages ONLY — LS inflates best_cov
+                        # and would set floor too high for on-policy rollouts
+                        onpol_covs_b = [orig_covs[b * K + k] for k in range(K)]
+                        best_cov_b = max(onpol_covs_b)
+                        per_inst_floor.append(max(best_cov_b - 0.03, _cov_floor))
 
                     for i in range(mB * K):
                         b, k = i // K, i % K
@@ -2712,13 +2737,13 @@ def po_finetune(
                             pool_scores[b, k] = -1000.0 + orig_sizes[i] / max(1, nn) - 0.01 * orig_covs[i]
                         else:
                             pool_scores[b, k] = 1.0 - orig_covs[i]
-                        pool_lp[b, k] = all_log_probs_raw[i]
+                        pool_lp[b, k] = all_lp_norm[i]
 
                         if ls_covs[i] >= _floor_b:
                             pool_scores[b, K + k] = -1000.0 + ls_sizes[i] / max(1, nn) - 0.01 * ls_covs[i]
                         else:
                             pool_scores[b, K + k] = 1.0 - ls_covs[i]
-                        pool_lp[b, K + k] = ls_log_probs[i].detach()
+                        pool_lp[b, K + k] = ls_lp_norm[i]  # WITH gradient (paper Eq.9)
 
                     pref = (pool_scores[:, :, None] < pool_scores[:, None, :]).float()
                     n_prefs = pref.sum()
@@ -2727,9 +2752,11 @@ def po_finetune(
                         torch.cuda.empty_cache()
                         continue
 
-                    # ── 5. BT preference loss (scaled for accumulation) ──
+                    # ── 5. Exponential preference loss (paper App F.4) ──
+                    # Exp model: f(x) = x — stronger gradient than BT,
+                    # doesn't saturate on already-separated pairs.
                     lp_diff = alpha * (pool_lp[:, :, None] - pool_lp[:, None, :])
-                    micro_loss = -(pref * F.logsigmoid(lp_diff)).sum() / n_prefs
+                    micro_loss = -(pref * lp_diff).sum() / n_prefs
                     # Scale by 1/n_micro so accumulated gradient ≈ full-batch gradient
                     (micro_loss / n_micro).backward()
 
@@ -2739,15 +2766,8 @@ def po_finetune(
                     del exp_data, exp_mask, exp_lens, all_log_probs_raw, ls_log_probs
                     torch.cuda.empty_cache()
 
-                # L2 regularisation (once per batch, not per micro-batch)
-                if ref_model is not None and ft_kl_coeff > 0:
-                    l2_reg = sum(
-                        (p - p_ref).pow(2).sum()
-                        for p, p_ref in zip(model.parameters(),
-                                            ref_model.parameters())
-                    )
-                    l2_reg_loss = ft_kl_coeff * l2_reg
-                    l2_reg_loss.backward()
+                # No L2/KL regularisation for lexpo — paper §3.4 uses
+                # no reference model.  Grad clip is the stability mechanism.
 
                 if max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -3099,27 +3119,33 @@ def po_finetune(
         cov_delta = ft_cov - pre_ft_cov
         rew_delta = ft_rew - pre_ft_rew
         tag = ""
-        if ft_rew > best_ft_rew + 1e-6:
+        # Track best by |S|/OPT (lower=better), with coverage floor
+        if ft_sopt > 0 and ft_cov >= _cov_floor_global and ft_sopt < best_ft_sopt_metric - 1e-4:
+            best_ft_sopt_metric = ft_sopt
             best_ft_rew = ft_rew
             best_ft_state = copy.deepcopy(model.state_dict())
             tag = " *best*"
         sopt_str = f" |S|/OPT={ft_sopt:.3f}" if ft_sopt > 0 else ""
+        cur_lr = optimizer.param_groups[0]['lr']
         print(f"  [FT eval] cov={ft_cov:.3f} (Δ={cov_delta:+.3f}) "
-              f"|S|/n={ft_gr:.3f}{sopt_str} r={ft_rew:.4f} (Δ={rew_delta:+.4f}){tag}")
+              f"|S|/n={ft_gr:.3f}{sopt_str} r={ft_rew:.4f} (Δ={rew_delta:+.4f})"
+              f" lr={cur_lr:.1e}{tag}")
 
-        # Early stop: halt if reward dropped significantly from baseline
-        # (reward accounts for both coverage AND guard efficiency).
-        if rew_delta < -0.10:
-            print(f"  [FT] Early stop: reward dropped {rew_delta:.4f} from baseline")
+        # Early stop: halt if |S|/OPT is rising steeply (guards exploding)
+        if ft_sopt > 0 and ft_sopt > pre_ft_sopt * 1.25:
+            print(f"  [FT] Early stop: |S|/OPT={ft_sopt:.3f} > 1.25×baseline={pre_ft_sopt*1.25:.3f}")
             break
+
+        ft_scheduler.step()
 
         gc.collect()
         torch.cuda.empty_cache()
 
-    # Restore best model if reward degraded
-    _, _, final_rew, _ = _ft_quick_eval()
-    if final_rew < best_ft_rew - 1e-6:
-        print(f"  [FT] Restoring best model (r={best_ft_rew:.4f} > final {final_rew:.4f})")
+    # Restore best model (by |S|/OPT) if current is worse
+    _, _, final_rew, final_sopt = _ft_quick_eval()
+    final_sopt_val = final_sopt if final_sopt > 0 else 1e9
+    if final_sopt_val > best_ft_sopt_metric + 1e-4:
+        print(f"  [FT] Restoring best model (|S|/OPT={best_ft_sopt_metric:.3f} < final {final_sopt_val:.3f})")
         model.load_state_dict(best_ft_state)
 
     print(f"{method_label} fine-tuning complete.\n")
