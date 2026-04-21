@@ -1968,7 +1968,8 @@ def po_finetune(
     )
 
     # Global coverage floor for best-model gating (used outside lexpo block)
-    _cov_floor_global = pre_ft_cov - 0.03
+    # Tight: only save models that maintain coverage near baseline
+    _cov_floor_global = pre_ft_cov - 0.02
 
     # ==================================================================
     # OFFLINE PAIR PRECOMPUTATION
@@ -2572,9 +2573,9 @@ def po_finetune(
             # Feasibility floor = baseline coverage (monotone coverage):
             # don't reward coverage gains beyond baseline; among solutions
             # at baseline level, prefer fewer guards.
-            _cov_floor = pre_ft_cov - 0.03  # generous margin so most rollouts are 'feasible'
+            _cov_floor = pre_ft_cov - 0.01  # tight: force guard reduction via better placement
             if epoch == 1:
-                print(f"  LexPO cov_floor={_cov_floor:.3f} (baseline={pre_ft_cov:.3f} - 0.03)")
+                print(f"  LexPO cov_floor={_cov_floor:.3f} (baseline={pre_ft_cov:.3f} - 0.01)")
 
             batch_iter = (
                 tqdm(loader, desc=f"FT epoch {epoch} [LexPO{'+LS' if _ls_budget > 0 else ''}]", leave=False)
@@ -2723,7 +2724,7 @@ def po_finetune(
                         # and would set floor too high for on-policy rollouts
                         onpol_covs_b = [orig_covs[b * K + k] for k in range(K)]
                         best_cov_b = max(onpol_covs_b)
-                        per_inst_floor.append(max(best_cov_b - 0.03, _cov_floor))
+                        per_inst_floor.append(max(best_cov_b - 0.01, _cov_floor))
 
                     for i in range(mB * K):
                         b, k = i // K, i % K
