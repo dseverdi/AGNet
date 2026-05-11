@@ -11,6 +11,7 @@ A comprehensive implementation of multiple algorithms for the Art Gallery Proble
 3. [Methods Implemented](#methods-implemented)
    - [3b. RL v2 — Weighted-Sum Reward](#3b-reinforcement-learning-v2--weighted-sum-reward-rl_agp_v2py--new)
    - [9. Preference Optimisation NCO](#9-preference-optimisation-nco-po_agppy-)
+     - [Fine-Tuning Approaches — Full History & Diagnostics](#fine-tuning-approaches--full-history--diagnostics)
 4. [Installation](#installation)
 5. [Quick Start](#quick-start)
 6. [Evaluation (Recommended)](#evaluation-recommended)
@@ -783,6 +784,290 @@ python po_agp.py \
 python po_agp.py --epochs 0 \
     --resume-from checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt
 ```
+
+#### Fine-Tuning Approaches — Full History & Diagnostics
+
+The §3.4 recipe above was the *starting point* of a longer investigation. Fine-tuning an LSTM PointerNet on AGP under Preference Optimisation exposed problems the paper never encountered (Pan et al. experiment on Transformers — AM, POMO, Sym-NCO, Pointerformer — with unlimited synthetic TSP/CVRP data). This subsection documents every approach that was tried, why each failed, and what remains open.
+
+##### Goal
+
+Fine-tune the pre-trained policy so the end-to-end model matches the quality of LS post-processing at inference — **without any geometric processing at inference time**. Inputs are the polygon's $(x, y)$ coordinates; outputs are guard indices.
+
+##### Baseline to Beat
+
+| Metric | Pre-FT model (greedy) | LS post-processing (K=30) |
+|--------|----------------------|--------------------------|
+| Coverage | 0.974 | 0.989 |
+| $\|S\|/n$ | 0.187 | 0.148 |
+| $\|S\|/\text{OPT}$ | 1.182 | 0.928 |
+| Inference | ~0.2s, no geometry | Several seconds, needs visibility matrix |
+
+The LS post-processing target (cov=0.989, $\|S\|/\text{OPT}=0.928$) is what we want the model to internalise.
+
+##### Reference Paper Summary
+
+Pan et al., "Preference Optimization for Combinatorial Optimization Problems," ICML 2025 (arXiv:2505.08735). Key points we relied on:
+
+- **§3.4 Eq. 9:** $f(\alpha \cdot [\log \pi_\theta(\text{LS}(\tau)|x) - \log \pi_\theta(\tau|x)])$ — gradients through BOTH the on-policy and the LS log-probs.
+- **No reference model** in fine-tuning (unlike standard DPO/RLHF).
+- **Exponential preference** (App F.4): $f(x) = x$ recommended for hard problems — no saturation, unlike Bradley-Terry's sigmoid.
+- **Length normalisation** (§4.2): $\log \pi(\tau) / |\tau|$ for variable-length outputs.
+- **All paper experiments use Transformer encoder-decoder models.** No LSTM tested.
+- Fine-tuning epochs ≈ 5% of total training epochs.
+- PO absorbs off-policy LS solutions naturally without importance sampling.
+
+##### Local Search During Fine-Tuning
+
+The LS operator (`local_search_improve_disc`) works on the precomputed discrete visibility matrix (500 sample points):
+- **REMOVE** — drop each guard, keep the removal that improves reward most.
+- **SWAP** — replace each guard with each non-guard vertex; keep best improvement.
+- **ADD** — add each non-guard vertex.
+- Greedy first-improvement, iterates up to `max_iter` rounds, `monotone_coverage=True` during FT (coverage can only stay the same or increase).
+
+PO fine-tuning loop with LS:
+1. Sample $K$ rollouts on-policy → $\tau_1, \ldots, \tau_K$
+2. Run LS on each rollout → $\text{LS}(\tau_1), \ldots, \text{LS}(\tau_K)$
+3. Teacher-force LS solutions through the model → $\log \pi(\text{LS}(\tau_k))$
+4. Pool $2K$ solutions, build preference matrix
+5. Compute PO loss through both on-policy and LS log-probs
+
+**Teacher-forcing detail:** LS solutions are re-ordered to match the original rollout ordering: `ls_ordered = [g for g in rollout_order if g in ls_sol_set]`. If LS only removes guards, the teacher sequence is a strict subsequence of the rollout; swaps introduce new vertices the rollout never produced.
+
+##### Core Structural Limitation: LSTM Hidden-State Cascade
+
+The LSTM decoder has hidden state $h_t = f(h_{t-1}, x_{a_{t-1}})$ — each step depends on the previous step's action embedding. When teacher-forcing a sequence that differs from what the model would naturally produce:
+
+- Step $k$ forces action $a_k^{\text{LS}}$ instead of $a_k^{\text{model}}$
+- This changes $h_{k+1}$, which cascades to all subsequent steps
+- By step $k+3$, the hidden state is in a region never seen during training
+- Log-probs computed from these corrupted states are unreliable
+
+**Transformers don't have this problem** because self-attention computes each position independently from the full context. This is the fundamental reason the paper's approach works on Transformers but struggles on our LSTM.
+
+##### Approaches Tried
+
+**Approach 1 — SFT (supervised fine-tuning on LS solutions).** Directly train the model to reproduce LS solutions via cross-entropy (standard teacher forcing). *Result:* loss=7.23, coverage dropped, early stop triggered immediately. *Why:* teacher-forcing cascade — every step's error compounds through the recurrent state. NLL is absolute, so the model receives large gradients from corrupted hidden states.
+
+**Approach 2 — LS distillation v1/v2/v3.** Per-rollout LS targets, different KL formulations, weighted losses. *Result:* all collapsed. *Why:* same hidden-state cascade as SFT. Absolute NLL on LS sequences = pure teacher-forcing regardless of wrapping.
+
+**Approach 3 — Offline DPO on cached pairs.** Pre-compute $(\tau, \text{LS}(\tau))$ pairs offline, train with DPO on cached pairs. *Result:* did not reduce guards. *Why:* pair acceptance required $\text{cov}_{\text{teacher}} \geq 0.99$ → rejected ~50% of pairs; guard-reducing pairs were de-weighted to 0.176 in the loss; best model tracked by reward (not $|S|/\text{OPT}$) → saved wrong checkpoint; stale pairs (model changes, pairs don't update) → off-policy drift.
+
+**Approach 4 — LEXRF (REINFORCE with lexicographic rank advantages).** Lexicographic ranking of $K$ rollouts: feasible (cov≥τ) by fewer guards; infeasible by higher coverage. *Result:* minimal signal. *Why:* converged policy → $K=8$ rollouts are near-identical → near-zero advantages.
+
+**Approach 5 — LexPO v1 (on-policy PO, LS as evaluator only).** PO with $K$ on-policy rollouts; LS evaluates quality but doesn't provide teacher sequences. *Result:* minimal signal. *Why:* same problem — without LS solutions in the pool, all $K$ rollouts are near-identical.
+
+**Approach 6 — LexPO v2 (paper §3.4 faithful).** Pool of $2K$ solutions ($K$ on-policy + $K$ LS-improved), Bradley-Terry loss, teacher-force LS *with* gradients, reference-model KL, LS budget=3. *Result:* Epoch 1: $|S|/\text{OPT}\ 1.182 \to 1.087\ (-8\%!)$. Epoch 2: COLLAPSED (loss $1.4 \to 8.0$). *Why:* gradients through teacher-forced LS log-probs → hidden-state cascade caused gradient explosion. **But Epoch 1 showed the signal IS there.**
+
+**Approach 7 — LexPO v2 + detached LS log-probs.** `ls_log_probs.detach()` — gradients only flow through on-policy rollouts. *Result:* Epochs 1–3: $1.182 \to 1.096\ (-7.3\%)$. Epoch 5: collapsed. *Why:* coverage floor too tight (0.97, computed from LS-inflated per-instance best). Most on-policy rollouts (cov~0.95) classified as "infeasible" → model pushed coverage UP instead of reducing guards.
+
+**Approach 8 — LexPO v2 + detached + relaxed floor (0.943).** Per-instance floor from on-policy coverages only; global floor = baseline − 0.03 = 0.943. *Result:* Epochs 1–3: $1.182 \to 1.096$. Epoch 5: 1.210. Epoch 7: 2.637 (collapse). *Why:* (1) best model tracked by REWARD → saved wrong checkpoint; (2) no LR decay → overshooting after 3 good epochs; (3) detaching LS log-probs removed "learn to produce LS" signal — only pushes bad rollouts down, never pulls policy toward LS.
+
+**Approach 9 — Paper-faithful with LSTM workarounds (BEST RUN).**
+
+Changes (all applied simultaneously):
+1. Un-detached LS log-probs — gradients through both terms per paper Eq. 9
+2. Exponential preference — $f(x) = x$ instead of BT $f(x) = \log\sigma(x)$
+3. Removed reference model — no KL, per paper §3.4
+4. Length normalisation — $\log\pi(\tau)/|\tau|$ per paper §4.2
+5. Aggressive `grad_norm=0.1` — key LSTM stability measure against teacher-forcing cascade
+6. Cosine LR schedule — LR=1e-5 → 1e-6
+7. Best model tracked by $|S|/\text{OPT}$ (lower=better) with coverage floor gate
+8. Early stop on $|S|/\text{OPT} > 1.25\times$ baseline
+9. LS budget=5, `sample_temp=1.5`, 50 epochs
+
+Config:
+```json
+{
+    "max_grad_norm": 0.1,
+    "alpha": 0.1,
+    "finetune_epochs": 50,
+    "finetune_lr": 1e-5,
+    "finetune_k": 8,
+    "ft_loss_type": "lexpo",
+    "ft_no_ref_model": true,
+    "ft_rl_ls_budget": 5,
+    "ft_sample_temp": 1.5,
+    "ft_cap_coverage": "false"
+}
+```
+
+*Result — Run A* (`cov_floor_global = baseline − 0.03`):
+```
+Baseline: cov=0.974, |S|/OPT=1.182
+Epoch  1: cov=0.950, |S|/OPT=1.017   *best saved*
+Epoch  3: cov=0.939, |S|/OPT=0.972
+Epoch  9: cov=0.935, |S|/OPT=0.972
+Epoch 11: cov=0.934, |S|/OPT=0.950
+Epoch 12: cov=0.928, |S|/OPT=0.920   ← true best, NOT saved (cov < floor 0.944)
+Epoch 13: cov=0.904, |S|/OPT=0.879   ← absolute best, NOT saved
+Epoch 14: cov=0.978, |S|/OPT=2.798   ← collapse, early stop
+Restored epoch 1 (|S|/OPT=1.017)
+Final eval: greedy cov=0.948, |S|/OPT=1.017
+            eval best (K=8): |S|/OPT=1.07, cov=0.966
+```
+
+First run to sustain improvement past epoch 3. Steady progress for 13 epochs. Collapse at epoch 14 (same pattern, delayed). Best-model gate (0.944) was too tight — didn't save epochs 12–13.
+
+*Result — Run B* (`cov_floor_global = baseline − 0.07`):
+```
+Baseline: cov=0.975, |S|/OPT=1.182
+Epoch  1: cov=0.954, |S|/OPT=1.015   *best*
+Epoch  2: cov=0.948, |S|/OPT=0.988   *best*
+Epoch  4: cov=0.942, |S|/OPT=0.970   *best*
+Epoch  9: cov=0.935, |S|/OPT=0.947   *best*
+Epoch 10: cov=0.920, |S|/OPT=0.893   *best*  ← SAVED
+Epoch 11: cov=0.954, |S|/OPT=1.651   ← collapse, early stop
+Restored epoch 10 (|S|/OPT=0.893)
+Final eval: greedy cov=0.916, |S|/OPT=0.893
+            eval best (K=8): |S|/OPT=1.01, cov=0.943
+```
+
+Best result so far. $|S|/\text{OPT}=0.893$ *beats* the LS target (0.928) — but coverage dropped to 0.916 (greedy). The model learned to emit fewer guards but NOT to place them better — it just stops earlier. Coverage drops ~2.5% per 10% guard reduction, consistent with "same placement quality, fewer guards."
+
+**Approach 10 — Minimal LS edits (budget=1).** *Hypothesis:* budget=5 allows LS to drift far from the rollout → model can't isolate which change helps. Budget=1 = at most one REMOVE or SWAP → cleaner signal. Paired with tighter coverage floor (baseline − 0.01). *Result:* epoch 1: $|S|/\text{OPT}=0.987$, epoch 2: 0.972, then plateau/oscillation through epoch 50 (cov 0.94–0.97, $|S|/\text{OPT}$ 1.06–1.19). *Why:* (1) budget=1 produces almost no signal (loss magnitudes ~0.01 vs ~0.15 with budget=5); (2) tight floor (0.963) killed guard reduction — most on-policy rollouts infeasible → model chased coverage.
+
+**Approach 11 — Budget=5 + tight floor.** Combine strong LS signal (budget=5) with tight feasibility (baseline − 0.01). The model must maintain coverage while learning from LS which guards to swap. *Status:* config ready, not yet run as the root cause shifted focus to DAgger.
+
+**Approach 12 — Marginal-coverage injection into pointer attention.** *Diagnosis:* the model picks vertex $v$ at step $t$ from `(query, encoder_output_v)` only — pure $(x,y)$-derived features. It cannot infer "how much new area would $v$ cover given the partial set $S_t$", which is exactly what LS uses to find load-bearing guards. Run B learns to reduce guard count by emitting EOS earlier, but placement quality is unchanged — coverage drops ~2.5% per 10% guard reduction. *Change:* at each decode step, compute per-vertex marginal coverage $\text{marg}(v) = (\text{vis}[v]\ \&\ \mathord{\sim}\text{covered}).sum() / M$ from the precomputed discrete visibility matrix (`disc_vis`), project via `marg_cov_inject_proj: Linear(1→H)`, and add to encoder outputs before the pointer attention call. Glimpse/query path is unchanged; encoder weights are not touched. The `covered` bitset is updated with each non-EOS pick via bitwise-OR. Wired into all three decode paths: EOS-mode forward (`models.py`), DAgger step log-probs, and LexPO teacher-force / rollout sampling. *Result:* with original `±0.01` init, the projection contribution was ~1% of encoder-output magnitude — invisible to BT loss, gradient on the projection stayed tiny (chicken-and-egg). Re-init at $1/\sqrt{H}\!\approx\!0.088$ and added a learnable scalar `marg_cov_inject_gain` (init 1.0) so feature magnitude is comparable to encoder outputs from epoch 1. Combined with LexPO + cov_floor=baseline-0.01: best $|S|/\text{OPT}\!=\!1.137$ at cov=0.966. Same trade-off slope as Run B — the gain learned to be small ($\sim$0), confirming the BT gradient says "EOS-position is the loss-reducing lever, not vertex-rerank."
+
+**Approach 13 — DAgger (per-step expert correction).** *Hypothesis:* SFT/distillation failed because teacher-forcing LS sequences corrupts the LSTM hidden state. DAgger advances the decoder via the *student's own* rollout actions (states stay on-distribution) and relabels each step with `KEEP`/`REDIRECT`/`EOS` against the LS solution. *Variants tried in this thread:* (a) baseline DAgger with `remove_only=true, ls_budget=5`, (b) per-label-type weights to address EOS-concentration collapse, (c) coverage-aware KEEP weighting (`cov_beta`) so load-bearing guards get stronger gradient than redundant ones, (d) `remove_only=false, ls_budget=15` to give LS room to swap/add and produce richer redirects, (e) auxiliary marginal-coverage regression head (`marg_cov_head` predicting per-vertex marginal cov, MSE loss against disc-vis). *Result family:* with `remove_only=true` + bug-fixed weights, best epoch was cov=0.960, $|S|/\text{OPT}\!=\!1.090$ — modest improvement on the same trade-off line. With `remove_only=false`, LS produced *larger* targets and the student inflated to match: $|S|/\text{OPT}\!=\!1.28$ at higher coverage. With aux loss at weight 0.5: regression dominated CE, run collapsed; at 0.1: invisible (epoch-1 numbers identical to no-aux). *Why none of these bent the curve:* every variant still routes the gradient through the same single softmax head. The aux loss trained a separate head that the policy never read.
+
+**Approach 14 — LexPO + marg-inject + strict cov-floor (cov_floor = baseline).** *Diagnosis carried over from 12/13:* the loose feasibility floor ($\text{baseline}\!-\!0.01$) explicitly *budgets* a 1pp coverage drop, which the model spends to reduce $|S|$. To enforce "cov stays at baseline AND minimize $|S|$" we exposed `ft_lexpo_cov_floor_delta` (default 0.01 for legacy) and set it to 0.0. *Result:* coverage now holds at baseline (0.974 ± 0.004 across 15 epochs) — but $|S|/\text{OPT}$ *grew* from 1.182 to 1.21. Best model = the unmodified baseline. The model's response to "you must reach cov ≥ baseline" was **add a guard** ($|S|/n: 0.187\!\to\!0.193$), not place better ones. *This is the second failure mode of the same single-lever architecture:* loose floor → moves EOS earlier (smaller, less coverage); strict floor → moves EOS later (larger, full coverage). Both are EOS-position adjustments; placement of the chosen vertices is fixed by the pretrained pointer.
+
+**Approach 15 — EOS-gate diagnostic probe (no training).** *Question raised by Approach 14's bistability:* does the model have *any* selection capability beyond its first ~K picks, or does it cheat by emitting EOS to avoid bad downstream choices? *Probe:* at inference, mask the EOS logit until partial coverage ≥ τ. Forces the model to keep picking until feasibility. *Result on pretrained checkpoint:* cov=0.992 (gate worked), but $|S|/n=0.323$ — *near the Chvátal worst-case bound* of $\lfloor n/3\rfloor$. $|S|/\text{OPT}=2.18$ vs baseline 1.182 — adding 14pp guards gained 1.8pp coverage. *Conclusion:* the model has competent ranking only over the first ~20% of vertices. The tail of the ranking is essentially uniform over remaining candidates — it's adding redundant guards because it has no usable selection signal past its top picks. Early-EOS in baseline was *correct refusal*: model stopping when it ran out of confident predictions. This is the sharpest empirical evidence of what the trade-off curve actually represents — not a slope between cov and size, but a *competence cliff* at the boundary of the model's confident ranking.
+
+##### Summary of Runs
+
+| Run | LS Budget | Cov Floor | Preference | Grad Norm | Best Greedy $\|S\|/\text{OPT}$ | Best Greedy Cov | Collapse? |
+|-----|-----------|-----------|------------|-----------|------------|--------|--------|
+| 1. SFT | — | — | CE | default | FAILED | — | Immediate |
+| 2. Distill v1-3 | — | — | KL variants | default | FAILED | — | Immediate |
+| 3. Offline DPO | — | — | DPO | default | ~baseline | ~baseline | No improvement |
+| 4. LEXRF | 0 | — | REINFORCE | default | ~baseline | ~baseline | No signal |
+| 5. LexPO v1 | 0 | — | BT | default | ~baseline | ~baseline | No signal |
+| 6. LexPO v2 | 3 | 0.97 | BT | 0.5 | 1.087 (e1) | ~0.96 | e2 explosion |
+| 7. LexPO v2 + detach | 3 | 0.97 | BT | 0.5 | 1.096 (e3) | ~0.95 | e5 collapse |
+| 8. v7 + relaxed floor | 3 | 0.943 | BT | 0.5 | 1.096 (e3) | ~0.95 | e7 collapse |
+| **9A. Paper-faithful** | **5** | **0.944** | **Exp** | **0.1** | **1.017 (e1)** | **0.950** | e14 collapse |
+| **9B. 9A + relaxed gate** | **5** | **0.905** | **Exp** | **0.1** | **0.893 (e10)** | **0.920** | e11 collapse |
+| 10. Minimal LS | 1 | 0.963 | Exp | 0.1 | 1.059 (e5) | 0.955 | No collapse, no learning |
+| 12. Marg-cov inject (init=0.01) | 5 | 0.962 | BT | 0.1 | 1.137 (e4) | 0.966 | No, on curve |
+| 12b. Marg-cov inject (init=$1/\sqrt{H}$, learnable gain) | 5 | 0.962 | BT | 0.1 | 1.128 (e3) | 0.965 | No, gain → 0 |
+| 13a. DAgger remove_only + cov_beta | 5 | n/a | DAgger CE | 0.1 | 1.090 (e4) | 0.960 | No, on curve |
+| 13b. DAgger full-moves, ls_budget=15 | 15 | n/a | DAgger CE | 0.1 | 1.385 (e3) | 0.982 | Inflation, early stop e6 |
+| 13c. DAgger + aux marg-cov head (w=0.5) | 5 | n/a | CE+MSE | 0.1 | >baseline | — | Aux dominates, collapse |
+| 13d. DAgger + aux marg-cov head (w=0.1) | 5 | n/a | CE+MSE | 0.1 | 1.090 (e4) | 0.960 | Identical to 13a (aux invisible) |
+| 14. LexPO + marg-inject + strict floor | 5 | **0.974 (baseline)** | BT | 0.1 | none beats baseline | 0.972 | Inflation: $|S|/n\!\to\!0.193$ |
+| 15. EOS-gate probe (no training) | n/a | n/a | n/a | n/a | **2.18** | **0.992** | Chvátal-bound saturation |
+
+##### Core Diagnosis
+
+**What works**
+- PO + LS with Exponential preference, length normalisation, no ref model
+- Aggressive `grad_norm=0.1` delays collapse from epoch 3 to epoch 10–14
+- Cosine LR schedule prevents late-epoch overshooting
+- Best-model tracking by $|S|/\text{OPT}$ (not reward)
+- Budget=5 LS gives strong signal; budget=1 is too weak
+
+**What doesn't work**
+- The model cannot simultaneously reduce guards *and* maintain coverage
+- Every run shows the same pattern: coverage drops ~2.5% per 10% guard reduction
+- Because the model learns "emit fewer guards" (easy — trigger EOS earlier) instead of "place guards more efficiently" (hard — requires visibility geometry)
+- The LSTM with 128-d hidden state and $(x, y)$ inputs cannot learn visibility relationships from coordinates alone
+- LS has the explicit visibility matrix to decide swaps; the model has no access to this information
+
+**The fundamental limitation.** The autoregressive LSTM decoder places guards sequentially. Once placed, a guard cannot be reconsidered. The hidden state at step $k$ encodes "what I've done so far" in 128 floats — insufficient to represent which areas of a ~128-vertex polygon are covered.
+
+LS achieves cov=0.989 + $|S|/\text{OPT}=0.928$ because it has the visibility matrix and makes targeted remove/swap decisions. Teacher-forcing LS sequences through the LSTM provides a training signal, but the hidden-state cascade corrupts the gradient for anything beyond simple guard removal.
+
+##### Postmortem (after Approaches 12–15)
+
+The combination of Approaches 12 (feature injection), 14 (strict floor), and 15 (EOS-gate probe) lets us state the failure precisely:
+
+**1. The architecture has one effective lever: where to place EOS.** EOS is one of N+1 logits in the same softmax as vertex picks. Pushing EOS probability up directly suppresses vertex probabilities (and vice versa). Every "knob" we tune ends up moving EOS earlier or later in the sequence:
+
+| floor regime | what the model does | result |
+|---|---|---|
+| loose (baseline − 0.01 to − 0.07) | moves EOS earlier → fewer guards | cov drops, $|S|$ drops (slides down the trade-off line) |
+| strict (baseline − 0.0) | moves EOS later → more guards | cov holds, $|S|$ grows (slides up the same line) |
+
+These are the two endpoints of *the same* lever. Reweighting losses, adding feature inputs, changing initialisation — all end up routed through this lever.
+
+**2. The model has no usable selection rule beyond its top ~20% of picks.** The EOS-gate probe (Approach 15) confirms this directly: forced past its preferred stopping point, the model adds vertices that contribute almost no marginal coverage. $|S|/n$ saturates near the Chvátal bound $\lfloor n/3\rfloor$ — i.e., the policy's tail-of-ranking is effectively uniform. The pretrained pointer learned a competent ordering for early picks (high-marginal-coverage vertices that the PO reward rewarded heavily during pretraining) but never learned to discriminate among the long tail of "could-be-a-guard" vertices.
+
+**3. Marginal-coverage features didn't fix selection because the loss didn't ask for them.** Feature injection (Approach 12b) gave the pointer the LS-style signal — and the learnable gain learned to be ~0. The reason is gradient diffusion: rollout-level losses (BT, REINFORCE, LexPO) flow back through *many* per-step decisions; the optimizer can't isolate which step's choice mattered. With EOS-position dominating the loss reduction, vertex-rerank features get no useful gradient and atrophy.
+
+**4. Architecture vs. signal: both were tried, both fall on the same curve.** Transformer was tried earlier (more parameters, no improvement). Auxiliary visibility regression was tried (Approach 13c/d — head trained but policy ignored it). The evidence is consistent: this isn't an LSTM-vs-Transformer question, and it isn't a feature-availability question. It's a *training signal* question — the per-step decision needs a *direct, local* gradient, not one filtered through a sampled rollout.
+
+The placement-quality gap between $|S|/\text{OPT}\!=\!0.893$ @ cov=0.916 (our best) and $|S|/\text{OPT}\!=\!0.928$ @ cov=0.989 (LS) is *not* about the model's representational capacity. The capacity is there. It's about *what gradient we provide on the per-step ranking decision*.
+
+##### Open Questions / Untried Ideas
+
+1. **Budget=5 + tight floor (pending).** Will forcing cov≥0.96 feasibility with strong LS signal produce better-placed guards? Or just reduce the learning signal?
+2. **Richer input features (→ Approach 12).** Precompute per-vertex dynamic marginal coverage and feed as an input feature to pointer attention at each decode step. Implemented: `marg_cov_inject_proj` augments encoder refs with `Linear(1→H)` applied to the per-vertex marginal. Requires disc_vis at inference, but the injection silently no-ops when `vis_matrices_list=None` or `marg_cov_inject_enabled=False`.
+3. **Bidirectional encoder.** Current encoder is unidirectional — vertex $i$ only sees $v_1 \ldots v_i$. Polygon vertices are cyclic; bidirectional gives full context at each position.
+4. **Transformer encoder-decoder (Tier 5).** Eliminates hidden-state cascade (no teacher-forcing corruption). Global attention over all candidates at each decode step. 1.8M params with 8,867 training instances → overfitting risk. Paper problems (TSP, CVRP) have unlimited synthetic data.
+5. **Curriculum from LS.** Start with remove-only LS (strict subsequences, no cascade), then gradually introduce swaps as the model stabilises.
+6. **Coverage-aware reward shaping during FT.** Instead of binary feasible/infeasible, continuous coverage bonus that strongly penalises cov<0.96 in the preference scoring.
+7. **LS as post-processing (pragmatic path).** Accept the LSTM ceiling. Use the FT model as a better starting point for LS at inference. Evaluate FT + LS vs. baseline + LS.
+
+##### Current Approach In Progress: Fixed-Teacher StepSup (Approach C)
+
+The active experiment is `ft_loss_type="step_sup"` in `configs/po_agp_lstm_ft_stepsup.json`. The goal is still the same: imitate the LS-improved guard set during fine-tuning, while keeping inference as a plain policy decode with no visibility processing.
+
+The current implementation differs from the first StepSup attempt in one critical way: teachers are **fixed before fine-tuning starts**. The failed online variant decoded the current student each epoch, ran LS on that shrinking seed, then trained CE on the result. Once the student started emitting fewer guards, the teacher shrank too, and the run became a self-reinforcing early-EOS loop.
+
+Current StepSup pipeline:
+- Freeze the pre-FT model at fine-tune start and generate up to `finetune_k` seeds per polygon.
+- Run `local_search_improve_disc` on each seed with `ft_rl_ls_budget=5`.
+- Keep only LS teachers with discrete coverage at least `ft_step_sup_min_cov` (currently `0.98`).
+- Canonicalise each LS set by greedy marginal coverage order over the cached visibility matrix.
+- Teacher-force that trajectory with `marg_cov_inject` active, using weighted CE on each next-guard target.
+- Down-weight EOS via `ft_step_sup_eos_weight` so the shared EOS token does not dominate vertex-specific gradients.
+- For polygons without a high-coverage teacher, optionally train the frozen baseline guard prefix at low weight and **without EOS** using `ft_step_sup_retain_skipped_weight`. This anchors hard instances without teaching low-coverage stopping.
+
+Current config:
+```json
+{
+  "checkpoint_dir": "checkpoints/v3/po_agp/lstm_step_sup_fixed_retain",
+  "ft_loss_type": "step_sup",
+  "finetune_lr": 2e-6,
+  "finetune_k": 8,
+  "ft_rl_ls_budget": 5,
+  "ft_step_sup_min_cov": 0.98,
+  "ft_step_sup_eos_weight": 0.02,
+  "ft_step_sup_retain_skipped_weight": 0.25
+}
+```
+
+Run command:
+```bash
+python po_agp.py --config configs/po_agp_lstm_ft_stepsup.json
+```
+
+Latest diagnostic run before retention was added:
+```text
+[FT baseline] greedy cov=0.974 |S|/n=0.187 |S|/OPT=1.182 r=0.7371
+StepSup fixed teachers: kept=5760/8000 seed_evals=60277 targets=117278 cov_mean=0.992 |S|_mean=19.36
+...
+FT epoch 20/20: cov=0.957 |S|/n=0.164 |S|/OPT=1.035 r=0.6933
+PO eval greedy: cov=0.953 |S|/n=0.172
+PO eval stoch:  cov=0.978 |S|/n=0.207 |S|/OPT=1.30
+```
+
+Interpretation: the fixed cache solved the online self-shrinking label bug (`targets=117278` stayed stable every epoch), but the policy still slid along the old size/coverage trade-off: fewer guards, lower coverage, worse reward. That means Approach C has not yet shown off-curve placement improvement. The next run tests whether retention on the 2240 skipped polygons plus weaker EOS supervision prevents drift while preserving the per-step placement signal.
+
+The fine-tune best-model gate was also changed after this run: it now tracks best reward under a tight coverage floor (`pre_ft_cov - 0.005`), using $|S|/\text{OPT}$ only as a tie-breaker. The previous gate marked lower-coverage, lower-size checkpoints as `*best*` even when reward degraded.
+
+Validation gates for the current run:
+- Teacher precompute should report approximately `cached=8000/8000`, with `high=5760` and `retain=2240` if the same cache statistics hold.
+- Epoch logs should show `skipped=0`; skipped instances are now covered by retention targets.
+- A useful result must maintain coverage near baseline while reducing $|S|/\text{OPT}$. If coverage drops in proportion to guard count again, the approach is still on the old EOS/size curve.
+- If fixed-teacher StepSup with retention still cannot bend the curve, the next likely direction is a non-autoregressive or set-scoring head rather than another rollout-level loss variant.
+
+##### Prior Direction: DAgger (Approach 13, archived)
+
+DAgger (Ross, Gordon, Bagnell 2011) was tried as an intermediate approach: advance the decoder via the student's own rollout actions (states on-distribution) and relabel each step with `KEEP`/`REDIRECT`/`EOS` against the LS solution. Per-label-type weights (`--ft-dagger-eos-weight`, `--ft-dagger-redir-weight`) compensate for EOS-concentration collapse. An optional `remove_only` curriculum (`--ft-dagger-remove-only`) restricts to rollouts where LS improves via pure REMOVE (LS set ⊆ rollout set) for cleanest signal. Enabled via `--ft-loss-type dagger`. *Result:* same trade-off curve as LexPO — see Approach 13a–d above. Useful as a debugging tool (`--ft-dagger-cov-weight-beta`, `--ft-dagger-aux-marg-cov-weight` knobs surfaced multiple architectural insights) but doesn't bend the curve. Approach C subsumes the per-step relabeling idea but with direct supervision rather than student-state correction.
 
 ---
 

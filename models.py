@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from torch.autograd import Variable
 
 from utils import USE_CUDA
@@ -92,8 +93,10 @@ class PointerNet(nn.Module):
             use_cuda=USE_CUDA,
             temperature=1.0,
             eos_logit_bias_init=None,
-            eos_logit_bias_learnable=False):
+            eos_logit_bias_learnable=False,
+            marg_cov_inject_enabled=True):
         super(PointerNet, self).__init__()
+        self.marg_cov_inject_enabled = marg_cov_inject_enabled
         
         self.embedding_size = embedding_size
         self.hidden_size    = hidden_size
@@ -119,6 +122,45 @@ class PointerNet(nn.Module):
                 param.data.uniform_(-0.08, 0.08)
         
         self.eos_token = -1  # EOS index (will be appended to input)
+
+        # Auxiliary head for conditional marginal-coverage prediction.
+        # Given (decoder query, encoder per-vertex output), predicts a
+        # scalar — the marginal coverage v would add to the current
+        # partial guard set. Trained with a regression loss against
+        # disc-vis ground truth at each decode step. Inference unchanged;
+        # this only contributes to the gradient during fine-tuning.
+        self.marg_cov_head = nn.Sequential(
+            nn.Linear(2 * hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, 1),
+        )
+        for m in self.marg_cov_head:
+            if isinstance(m, nn.Linear):
+                m.weight.data.uniform_(-0.08, 0.08)
+                m.bias.data.uniform_(-0.08, 0.08)
+
+        # Marginal-coverage feature injection. Projects the scalar
+        # "marginal coverage of v given the partial guard set so far"
+        # into the encoder's feature dim, so the pointer attention
+        # scores vertices as a learned function of
+        # (query, encoder_output_v, dynamic marginal coverage of v).
+        # This is the LS-style placement signal made available to the
+        # pointer at each decode step.
+        #
+        # Init scale: the feature added to encoder_outputs needs to be
+        # comparable in magnitude to those outputs (~O(1)) so the BT
+        # gradient sees the signal and shapes it. With marg_cov ∈ [0, 1]
+        # and a `1 / sqrt(H)` weight scale, output magnitude ~
+        # |marg_cov| · 1 / sqrt(H) · sqrt(H) = O(marg_cov) ≈ O(0.1).
+        # Bias=0 so a vertex with zero marginal coverage adds no signal.
+        # A learnable scalar gain is multiplied on top so the model can
+        # learn to amplify or attenuate the contribution; init=1.0 so
+        # the feature is visible from epoch 1.
+        self.marg_cov_inject_proj = nn.Linear(1, hidden_size)
+        proj_scale = 1.0 / (hidden_size ** 0.5)
+        self.marg_cov_inject_proj.weight.data.uniform_(-proj_scale, proj_scale)
+        self.marg_cov_inject_proj.bias.data.zero_()
+        self.marg_cov_inject_gain = nn.Parameter(torch.tensor(1.0))
 
         # Optional EOS logit bias — positive init encourages stopping
         # By default registered as a buffer (non-learnable, but saved in state_dict)
@@ -172,9 +214,9 @@ class PointerNet(nn.Module):
         
         return masked_logits, clone_mask
             
-    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None, no_eos: bool = False):
+    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None, no_eos: bool = False, eos_cov_threshold: float = 0.0, vis_matrices_list=None):
         """
-        Args: 
+        Args:
             inputs: [batch_size x num_points x 2]
             padding_mask: [batch_size x num_points] (True for real, False for pad)
             lengths: list or tensor of ints, true number of vertices per sample
@@ -188,6 +230,15 @@ class PointerNet(nn.Module):
                 the n real vertices (no EOS appended/available).  Each sample
                 decodes for exactly lengths[b] steps.  Used for the
                 ranking-based AGP formulation.
+            eos_cov_threshold: float.  When > 0 and vis_matrices_list is
+                provided, the EOS logit is masked (-inf) at any step where
+                the partial coverage of already-selected guards is below
+                this threshold.  Forces the model to keep picking until
+                feasibility — closes the "early-EOS escape" gradient.
+            vis_matrices_list: optional list of length batch_size, one
+                np.ndarray per sample of shape (n_b, M) with bool dtype,
+                from disc_vis cache.  Used only with eos_cov_threshold > 0.
+                Entries may be None for samples without a vis cache.
         Returns:
             output_idxs: list of [num_selected_guards] tensors, one per instance, with EOS as end
         """
@@ -348,6 +399,36 @@ class PointerNet(nn.Module):
             per_sample_budget = None
         non_eos_counts = torch.zeros(batch_size, dtype=torch.long, device=device)
 
+        # Coverage-based EOS gating: track per-sample running coverage so we
+        # can mask the EOS logit until partial coverage ≥ eos_cov_threshold.
+        cov_gate_active = (
+            eos_cov_threshold > 0.0
+            and vis_matrices_list is not None
+            and lengths is not None
+        )
+        # Marginal-coverage injection into the pointer attention. Active
+        # whenever disc_vis is supplied; covered bitsets are shared with
+        # the EOS-gate path above when both are on.
+        cov_inject_active = (
+            self.marg_cov_inject_enabled
+            and vis_matrices_list is not None
+            and lengths is not None
+        )
+        cov_track_active = cov_gate_active or cov_inject_active
+        covered_per_sample = None
+        cov_M_per_sample = None
+        if cov_track_active:
+            covered_per_sample = []
+            cov_M_per_sample = []
+            for b in range(batch_size):
+                vm = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                if vm is None:
+                    covered_per_sample.append(None)
+                    cov_M_per_sample.append(0)
+                else:
+                    covered_per_sample.append(np.zeros(vm.shape[1], dtype=bool))
+                    cov_M_per_sample.append(int(vm.shape[1]))
+
         log_probs_list = [[] for _ in range(batch_size)]
         for step in range(max_steps):
             _, (hidden, context) = self.decoder(decoder_input.unsqueeze(1), (hidden, context))
@@ -357,7 +438,30 @@ class PointerNet(nn.Module):
                 logits, mask = self.apply_mask_to_logits(logits, mask, idxs, lengths)
                 logits = logits / self.temperature
                 query = torch.bmm(ref, F.softmax(logits, dim=1).unsqueeze(2)).squeeze(2)
-            _, logits = self.pointer(query, encoder_outputs)
+            # Optionally augment encoder refs with per-vertex marginal
+            # coverage of the current partial guard set.  This injects the
+            # LS-style placement signal directly into the pointer score
+            # (glimpse/query path is unchanged).
+            if cov_inject_active:
+                marg_full = np.zeros((batch_size, total_len), dtype=np.float32)
+                for b in range(batch_size):
+                    vm_b = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                    if vm_b is None or covered_per_sample[b] is None:
+                        continue
+                    M_b = cov_M_per_sample[b]
+                    if M_b <= 0:
+                        continue
+                    not_covered = ~covered_per_sample[b]
+                    n_b = vm_b.shape[0]
+                    marg_full[b, :n_b] = (vm_b & not_covered).sum(axis=1) / float(M_b)
+                marg_t = torch.from_numpy(marg_full).to(
+                    device=encoder_outputs.device, dtype=encoder_outputs.dtype,
+                )
+                feat = self.marg_cov_inject_proj(marg_t.unsqueeze(-1))
+                pointer_refs = encoder_outputs + self.marg_cov_inject_gain * feat
+            else:
+                pointer_refs = encoder_outputs
+            _, logits = self.pointer(query, pointer_refs)
             logits, mask = self.apply_mask_to_logits(logits, mask, idxs, lengths)
             # Apply learnable EOS logit bias (makes stopping more likely)
             if self.eos_logit_bias is not None and lengths is not None:
@@ -377,6 +481,32 @@ class PointerNet(nn.Module):
                         eos_pos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
                         logits[b, :] = float('-inf')
                         logits[b, eos_pos] = 0.0  # only EOS allowed
+
+            # Coverage-based EOS gating: mask EOS while partial coverage <
+            # threshold, but only if at least one non-EOS vertex still has
+            # finite logit (so we don't strand the sample with all -inf).
+            if cov_gate_active:
+                for b in range(batch_size):
+                    if finished[b] or covered_per_sample[b] is None:
+                        continue
+                    M_b = cov_M_per_sample[b]
+                    if M_b <= 0:
+                        continue
+                    cov_b = float(covered_per_sample[b].sum()) / M_b
+                    if cov_b >= eos_cov_threshold:
+                        continue
+                    eos_pos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
+                    # Only block EOS if some non-EOS vertex remains valid.
+                    row = logits[b]
+                    has_alt = False
+                    for v in range(row.shape[0]):
+                        if v == eos_pos:
+                            continue
+                        if torch.isfinite(row[v]):
+                            has_alt = True
+                            break
+                    if has_alt:
+                        logits[b, eos_pos] = float('-inf')
             # Safety: if all logits are -inf for a sample, unmask EOS
             for b in range(batch_size):
                 actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
@@ -401,15 +531,26 @@ class PointerNet(nn.Module):
             
             for b in range(batch_size):
                 if not finished[b]:
-                    output_idxs[b].append(idxs[b].item())
+                    picked = idxs[b].item()
+                    output_idxs[b].append(picked)
                     log_prob = torch.log(probs[b, idxs[b]])
                     log_probs_list[b].append(log_prob)
                     # Check if this sample reached its EOS
                     actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
-                    if idxs[b].item() == actual_eos:
+                    if picked == actual_eos:
                         finished[b] = True
                     else:
                         non_eos_counts[b] += 1
+                        # Update running coverage with the picked vertex.
+                        if (cov_track_active
+                                and covered_per_sample[b] is not None
+                                and vis_matrices_list[b] is not None):
+                            vm_b = vis_matrices_list[b]
+                            if 0 <= picked < vm_b.shape[0]:
+                                np.bitwise_or(
+                                    covered_per_sample[b], vm_b[picked],
+                                    out=covered_per_sample[b],
+                                )
             selected_mask = F.one_hot(idxs, total_len).bool()
             mask = mask | selected_mask
             decoder_input = embedded[torch.arange(batch_size), idxs, :]
@@ -451,11 +592,11 @@ class CombinatorialRL(nn.Module):
                 eos_logit_bias_learnable=eos_logit_bias_learnable)
 
 
-    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None, no_eos: bool = False):
+    def forward(self, inputs, padding_mask=None, lengths=None, deterministic: bool = False, max_decode_steps=None, no_eos: bool = False, eos_cov_threshold: float = 0.0, vis_matrices_list=None):
         """
         Run the PointerNet actor with padding_mask and lengths to ignore padded vertices and return selected guard indices and log-probabilities for REINFORCE.
         """
-        action_idxs, log_probs = self.actor(inputs, padding_mask=padding_mask, lengths=lengths, deterministic=deterministic, max_decode_steps=max_decode_steps, no_eos=no_eos)
+        action_idxs, log_probs = self.actor(inputs, padding_mask=padding_mask, lengths=lengths, deterministic=deterministic, max_decode_steps=max_decode_steps, no_eos=no_eos, eos_cov_threshold=eos_cov_threshold, vis_matrices_list=vis_matrices_list)
         return action_idxs, log_probs
 
 

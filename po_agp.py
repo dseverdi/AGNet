@@ -1012,6 +1012,7 @@ def _teacher_force_log_probs(
     target_seqs: list[list[int]],
     padding_mask: torch.Tensor | None = None,
     lengths: torch.Tensor | None = None,
+    vis_matrices_list: list | None = None,
 ) -> torch.Tensor:
     """Teacher-force *target_seqs* and return per-sample total log π_θ.
 
@@ -1069,6 +1070,23 @@ def _teacher_force_log_probs(
     idxs = None
     log_probs_per_sample: list[list[torch.Tensor]] = [[] for _ in range(B)]
 
+    inject_active = (
+        getattr(actor, "marg_cov_inject_enabled", False)
+        and vis_matrices_list is not None
+        and lengths is not None
+    )
+    inj_covered: list = []
+    inj_M: list[int] = []
+    if inject_active:
+        for b in range(B):
+            vm = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+            if vm is None:
+                inj_covered.append(None)
+                inj_M.append(0)
+            else:
+                inj_covered.append(np.zeros(vm.shape[1], dtype=bool))
+                inj_M.append(int(vm.shape[1]))
+
     max_steps = max(len(s) for s in target_seqs)
     for step in range(max_steps):
         _, (hidden, context) = actor.decoder(
@@ -1084,7 +1102,26 @@ def _teacher_force_log_probs(
             query = torch.bmm(
                 ref, F.softmax(logits, dim=1).unsqueeze(2),
             ).squeeze(2)
-        _, logits = actor.pointer(query, encoder_outputs)
+        if inject_active:
+            marg_full = np.zeros((B, total_len), dtype=np.float32)
+            for b in range(B):
+                vm_b = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                if vm_b is None or inj_covered[b] is None:
+                    continue
+                M_b = inj_M[b]
+                if M_b <= 0:
+                    continue
+                not_covered = ~inj_covered[b]
+                n_b = vm_b.shape[0]
+                marg_full[b, :n_b] = (vm_b & not_covered).sum(axis=1) / float(M_b)
+            marg_t = torch.from_numpy(marg_full).to(
+                device=encoder_outputs.device, dtype=encoder_outputs.dtype,
+            )
+            feat = actor.marg_cov_inject_proj(marg_t.unsqueeze(-1))
+            pointer_refs = encoder_outputs + actor.marg_cov_inject_gain * feat
+        else:
+            pointer_refs = encoder_outputs
+        _, logits = actor.pointer(query, pointer_refs)
         logits, mask = actor.apply_mask_to_logits(
             logits, mask, idxs, lengths,
         )
@@ -1144,6 +1181,21 @@ def _teacher_force_log_probs(
         mask = mask | selected_mask
         decoder_input = embedded[torch.arange(B, device=device), idxs, :]
 
+        # Update injection bitset with the forced target action so the next
+        # step's marginal-coverage feature reflects the partial set.
+        if inject_active:
+            for b in range(B):
+                if step >= len(target_seqs[b]):
+                    continue
+                vm_b = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                if vm_b is None or inj_covered[b] is None:
+                    continue
+                picked = int(target_seqs[b][step])
+                if 0 <= picked < vm_b.shape[0]:
+                    np.bitwise_or(
+                        inj_covered[b], vm_b[picked], out=inj_covered[b],
+                    )
+
     # Per-sample totals
     result = []
     for b in range(B):
@@ -1154,6 +1206,366 @@ def _teacher_force_log_probs(
     return torch.stack(result)
 
 
+def _dagger_relabel(
+    rollout_full: list[int],
+    ls_set: set[int],
+    n_verts: int,
+) -> tuple[list[int], int, list[str]]:
+    """Per-step expert relabeling of a rollout against an LS solution.
+
+    ``rollout_full`` is the student's emitted sequence including the
+    trailing EOS index (= ``n_verts``).  ``ls_set`` is the (orderless)
+    set of guard indices LS chose.  Returns ``(targets, scored_len)``:
+
+    * ``targets[t]`` — the expert action at step t, chosen under the
+      student's own picking history so gradients can be computed on
+      uncorrupted hidden states.
+    * ``scored_len`` — the prefix length that should contribute to the
+      loss.  The EOS label is issued **at most once** per rollout, at
+      the step where the expert would have stopped; any surplus steps
+      after that point are unscored.  Without this truncation a long
+      rollout against a small LS set produces many EOS labels and the
+      policy collapses toward early-EOS.
+
+    Canonical redirect order: LS guards present in the rollout keep
+    their rollout appearance order; LS-only guards are appended by
+    polygon index.  At step t the target is:
+
+      * the next LS guard not yet in the student's history, if the
+        student either (a) picked a wasted vertex, or (b) emitted EOS
+        while LS still had guards to place;
+      * the student's own pick ``v_t`` if it's a valid LS guard (KEEP);
+      * EOS once the student has placed every LS guard (issued once).
+    """
+    ls_in_ro: list[int] = []
+    seen: set[int] = set()
+    for g in rollout_full:
+        if g in ls_set and g not in seen:
+            ls_in_ro.append(g)
+            seen.add(g)
+    ls_rest = sorted(g for g in ls_set if g not in seen)
+    ls_queue = ls_in_ro + ls_rest
+
+    targets: list[int] = []
+    label_types: list[str] = []
+    picked_before_t: set[int] = set()
+    eos_issued = False
+    scored_len = len(rollout_full)  # default: score full length
+
+    for t, v_t in enumerate(rollout_full):
+        remaining = [g for g in ls_queue if g not in picked_before_t]
+        if not remaining:
+            target = n_verts  # student should have stopped here
+            ltype = "eos"
+            if eos_issued:
+                # Tail-EOS: expert already stopped; don't re-label
+                scored_len = min(scored_len, t)
+                targets.append(int(target))
+                label_types.append(ltype)
+                picked_before_t.add(v_t)
+                continue
+            eos_issued = True
+        elif v_t in ls_set and v_t not in picked_before_t:
+            target = v_t  # KEEP — student's pick matches LS
+            ltype = "keep"
+        else:
+            target = remaining[0]  # REDIRECT (wasted pick or premature EOS)
+            ltype = "redir"
+        targets.append(int(target))
+        label_types.append(ltype)
+        picked_before_t.add(v_t)
+
+    return targets, scored_len, label_types
+
+
+def _dagger_step_log_probs(
+    model: torch.nn.Module,
+    inputs: torch.Tensor,
+    rollout_seqs: list[list[int]],
+    target_seqs: list[list[int]],
+    padding_mask: torch.Tensor | None = None,
+    lengths: torch.Tensor | None = None,
+    target_weights: list[list[float]] | None = None,
+    vis_matrices_list: list | None = None,
+    aux_marg_cov_weight: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Teacher-force ``rollout_seqs`` and collect target log-probs.
+
+    Advances the decoder state using the student's own rollout actions
+    (so hidden states stay on-distribution — no cascade) while reading
+    ``log π_θ(target_seqs[b][t] | h_t)`` at each step.  This is the core
+    DAgger signal: expert-derived labels scored against uncorrupted
+    student states.
+
+    ``rollout_seqs[b]`` and ``target_seqs[b]`` must have equal length
+    (both include the trailing EOS step).
+
+    ``target_weights[b][t]`` optionally scales the per-step log-prob by
+    a scalar (e.g. down-weighting EOS labels so their gradient signal
+    doesn't dominate the batch).  Defaults to 1.0 everywhere.
+
+    Returns
+    -------
+    lp_weighted_sum : (B,) float — sum of weighted per-step log π(target_t).
+    w_sum           : (B,) float — sum of per-step weights (for loss normalisation).
+    n_steps         : (B,) long  — number of scored steps per sample.
+    """
+    actor = model.actor if hasattr(model, "actor") else model
+    device = inputs.device
+    B = inputs.size(0)
+    seq_len = inputs.size(1)
+
+    assert len(rollout_seqs) == B and len(target_seqs) == B
+    for b in range(B):
+        assert len(rollout_seqs[b]) == len(target_seqs[b]), (
+            f"DAgger length mismatch at b={b}: "
+            f"{len(rollout_seqs[b])} vs {len(target_seqs[b])}"
+        )
+    if target_weights is not None:
+        assert len(target_weights) == B
+        for b in range(B):
+            assert len(target_weights[b]) == len(target_seqs[b]), (
+                f"DAgger weight length mismatch at b={b}: "
+                f"{len(target_weights[b])} vs {len(target_seqs[b])}"
+            )
+
+    # ── Encoder (EOS mode) ──────────────────────────────────────
+    eos_vec = torch.zeros(B, 1, 2, device=device)
+    inputs_ext = torch.cat([inputs, eos_vec], dim=1)           # (B, N+1, 2)
+    embedded = actor.embedding(inputs_ext.transpose(1, 2))     # (B, N+1, emb)
+
+    if lengths is not None:
+        enc_lengths = (
+            (lengths + 1).cpu()
+            if torch.is_tensor(lengths)
+            else torch.tensor([l + 1 for l in lengths], device="cpu")
+        )
+        packed = torch.nn.utils.rnn.pack_padded_sequence(
+            embedded, enc_lengths, batch_first=True, enforce_sorted=False,
+        )
+        packed_out, (hidden, context) = actor.encoder(packed)
+        encoder_outputs, _ = torch.nn.utils.rnn.pad_packed_sequence(
+            packed_out, batch_first=True, total_length=seq_len + 1,
+        )
+    else:
+        encoder_outputs, (hidden, context) = actor.encoder(embedded)
+
+    total_len = seq_len + 1
+
+    if padding_mask is not None:
+        pad = ~padding_mask
+        pad_eos = torch.zeros(B, 1, dtype=torch.bool, device=device)
+        mask = torch.cat([pad, pad_eos], dim=1)
+    else:
+        mask = torch.zeros(B, total_len, dtype=torch.bool, device=device)
+    if lengths is not None:
+        for b in range(B):
+            n = int(lengths[b].item()) if torch.is_tensor(lengths[b]) else int(lengths[b])
+            if n + 1 < total_len:
+                mask[b, n + 1:] = True
+
+    decoder_input = actor.decoder_start_input.unsqueeze(0).repeat(B, 1)
+    idxs = None
+    lp_per_sample: list[list[torch.Tensor]] = [[] for _ in range(B)]
+    w_per_sample: list[list[float]] = [[] for _ in range(B)]
+    n_steps = torch.zeros(B, dtype=torch.long, device=device)
+
+    # Aux setup: per-sample running covered bitset for marginal-cov targets
+    # AND for the pointer-attention injection. The bitset is shared so the
+    # two paths see consistent state.
+    aux_active = (
+        aux_marg_cov_weight > 0.0
+        and vis_matrices_list is not None
+        and lengths is not None
+    )
+    inject_active = (
+        getattr(actor, "marg_cov_inject_enabled", False)
+        and vis_matrices_list is not None
+        and lengths is not None
+    )
+    track_active = aux_active or inject_active
+    aux_loss_terms: list[torch.Tensor] = []
+    aux_count = 0
+    aux_covered_per_sample: list = []
+    aux_M_per_sample: list[int] = []
+    if track_active:
+        for b in range(B):
+            vm = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+            if vm is None:
+                aux_covered_per_sample.append(None)
+                aux_M_per_sample.append(0)
+            else:
+                aux_covered_per_sample.append(np.zeros(vm.shape[1], dtype=bool))
+                aux_M_per_sample.append(int(vm.shape[1]))
+
+    max_steps = max(len(s) for s in rollout_seqs)
+    for step in range(max_steps):
+        _, (hidden, context) = actor.decoder(
+            decoder_input.unsqueeze(1), (hidden, context),
+        )
+        query = hidden.squeeze(0)
+        for _ in range(actor.n_glimpses):
+            ref, logits = actor.glimpse(query, encoder_outputs)
+            logits, mask = actor.apply_mask_to_logits(
+                logits, mask, idxs, lengths,
+            )
+            logits = logits / actor.temperature
+            query = torch.bmm(
+                ref, F.softmax(logits, dim=1).unsqueeze(2),
+            ).squeeze(2)
+        if inject_active:
+            marg_full = np.zeros((B, total_len), dtype=np.float32)
+            for b in range(B):
+                vm_b = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                if vm_b is None or aux_covered_per_sample[b] is None:
+                    continue
+                M_b = aux_M_per_sample[b]
+                if M_b <= 0:
+                    continue
+                not_covered = ~aux_covered_per_sample[b]
+                n_b = vm_b.shape[0]
+                marg_full[b, :n_b] = (vm_b & not_covered).sum(axis=1) / float(M_b)
+            marg_t = torch.from_numpy(marg_full).to(
+                device=encoder_outputs.device, dtype=encoder_outputs.dtype,
+            )
+            feat = actor.marg_cov_inject_proj(marg_t.unsqueeze(-1))
+            pointer_refs = encoder_outputs + actor.marg_cov_inject_gain * feat
+        else:
+            pointer_refs = encoder_outputs
+        _, logits = actor.pointer(query, pointer_refs)
+        logits, mask = actor.apply_mask_to_logits(
+            logits, mask, idxs, lengths,
+        )
+
+        if actor.eos_logit_bias is not None and lengths is not None:
+            eos_bias_vec = torch.zeros_like(logits)
+            for b in range(B):
+                eos_pos = (
+                    int(lengths[b].item())
+                    if torch.is_tensor(lengths[b])
+                    else int(lengths[b])
+                )
+                if not mask[b, eos_pos]:
+                    eos_bias_vec[b, eos_pos] = 1.0
+            logits = logits + eos_bias_vec * actor.eos_logit_bias
+
+        # Auxiliary head: predict marginal coverage of each vertex given
+        # the current partial guard set encoded in `query`. Compared
+        # against ground-truth marginals from disc-vis bitsets per sample.
+        if aux_active:
+            q_exp = query.unsqueeze(1).expand(-1, total_len, -1)
+            combined = torch.cat([q_exp, encoder_outputs], dim=-1)
+            pred_marg = actor.marg_cov_head(combined).squeeze(-1)  # (B, T)
+            for b in range(B):
+                vm_b = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                if vm_b is None or step >= len(rollout_seqs[b]):
+                    continue
+                M_b = aux_M_per_sample[b]
+                if M_b <= 0:
+                    continue
+                covered_b = aux_covered_per_sample[b]
+                n_b = vm_b.shape[0]
+                inv_M = 1.0 / float(M_b)
+                # Per-vertex marginal: bits in vis[v] not yet covered.
+                tgt = np.zeros(total_len, dtype=np.float32)
+                aux_keep = np.zeros(total_len, dtype=bool)
+                not_covered = ~covered_b
+                for v in range(n_b):
+                    add = np.logical_and(vm_b[v], not_covered).sum()
+                    tgt[v] = float(add) * inv_M
+                    aux_keep[v] = True
+                # EOS and beyond: skip from aux loss.
+                tgt_t = torch.from_numpy(tgt).to(device=device, dtype=pred_marg.dtype)
+                keep_t = torch.from_numpy(aux_keep).to(device=device)
+                if keep_t.any():
+                    diff = pred_marg[b] - tgt_t
+                    diff = diff[keep_t]
+                    aux_loss_terms.append((diff * diff).sum())
+                    aux_count += int(keep_t.sum().item())
+
+        probs = F.softmax(logits, dim=1)
+
+        # NaN safety: fall back to EOS one-hot for corrupted rows
+        nan_rows = torch.isnan(probs).any(dim=1, keepdim=True)
+        if nan_rows.any():
+            fallback = torch.zeros_like(probs)
+            if lengths is not None:
+                for b in range(B):
+                    eos_pos = (
+                        int(lengths[b].item())
+                        if torch.is_tensor(lengths[b])
+                        else int(lengths[b])
+                    )
+                    fallback[b, eos_pos] = 1.0
+            else:
+                fallback[:, 0] = 1.0
+            probs = torch.where(nan_rows, fallback, probs)
+
+        # Pick rollout action for state advancement + target for loss
+        forced_rollout = torch.zeros(B, dtype=torch.long, device=device)
+        for b in range(B):
+            if step < len(rollout_seqs[b]):
+                fr = int(rollout_seqs[b][step])
+                ft = int(target_seqs[b][step])
+                forced_rollout[b] = fr
+                w_t = (
+                    float(target_weights[b][step])
+                    if target_weights is not None
+                    else 1.0
+                )
+                # Skip zero-weighted steps (e.g. EOS ablation).
+                if w_t != 0.0:
+                    p_t = probs[b, ft].clamp(min=1e-20)
+                    lp_per_sample[b].append(torch.log(p_t) * w_t)
+                    w_per_sample[b].append(w_t)
+                    n_steps[b] += 1
+            else:
+                n = (
+                    int(lengths[b].item())
+                    if lengths is not None and torch.is_tensor(lengths[b])
+                    else (int(lengths[b]) if lengths is not None else seq_len)
+                )
+                forced_rollout[b] = n  # dummy EOS for finished samples
+
+        idxs = forced_rollout
+        selected_mask = F.one_hot(idxs, total_len).bool()
+        mask = mask | selected_mask
+        decoder_input = embedded[torch.arange(B, device=device), idxs, :]
+
+        # After the rollout-action commit, fold the picked vertex into
+        # the running covered bitset so the next step's aux targets / pointer
+        # injection see the updated partial set.
+        if track_active:
+            for b in range(B):
+                if step >= len(rollout_seqs[b]):
+                    continue
+                vm_b = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                if vm_b is None or aux_covered_per_sample[b] is None:
+                    continue
+                picked = int(rollout_seqs[b][step])
+                if 0 <= picked < vm_b.shape[0]:
+                    np.bitwise_or(
+                        aux_covered_per_sample[b], vm_b[picked],
+                        out=aux_covered_per_sample[b],
+                    )
+
+    lp_sum = torch.stack([
+        torch.stack(lp_per_sample[b]).sum()
+        if lp_per_sample[b]
+        else torch.tensor(0.0, device=device, requires_grad=True)
+        for b in range(B)
+    ])
+    w_sum = torch.tensor(
+        [sum(w_per_sample[b]) for b in range(B)],
+        dtype=torch.float32, device=device,
+    )
+    if aux_loss_terms and aux_count > 0:
+        aux_loss = torch.stack(aux_loss_terms).sum() / float(aux_count)
+    else:
+        aux_loss = torch.tensor(0.0, device=device)
+    return lp_sum, w_sum, n_steps, aux_loss
+
+
 def teacher_force_weighted_nll(
     model: torch.nn.Module,
     inputs: torch.Tensor,
@@ -1161,6 +1573,7 @@ def teacher_force_weighted_nll(
     step_weights: list[list[float]],
     padding_mask: torch.Tensor | None = None,
     lengths: torch.Tensor | None = None,
+    vis_matrices_list: list | None = None,
 ) -> torch.Tensor:
     """Weighted NLL for teacher-forced sequences.
 
@@ -1217,6 +1630,23 @@ def teacher_force_weighted_nll(
     weighted_nll_sum = torch.zeros(1, device=device)
     total_weight = 0.0
 
+    inject_active = (
+        getattr(actor, "marg_cov_inject_enabled", False)
+        and vis_matrices_list is not None
+        and lengths is not None
+    )
+    inj_covered: list = []
+    inj_M: list[int] = []
+    if inject_active:
+        for b in range(batch_size):
+            vm = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+            if vm is None:
+                inj_covered.append(None)
+                inj_M.append(0)
+            else:
+                inj_covered.append(np.zeros(vm.shape[1], dtype=bool))
+                inj_M.append(int(vm.shape[1]))
+
     max_steps = max(len(s) for s in target_seqs)
     for step in range(max_steps):
         _, (hidden, context) = actor.decoder(
@@ -1230,7 +1660,26 @@ def teacher_force_weighted_nll(
             query = torch.bmm(
                 ref, F.softmax(logits, dim=1).unsqueeze(2),
             ).squeeze(2)
-        _, logits = actor.pointer(query, encoder_outputs)
+        if inject_active:
+            marg_full = np.zeros((batch_size, total_len), dtype=np.float32)
+            for b in range(batch_size):
+                vm_b = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                if vm_b is None or inj_covered[b] is None:
+                    continue
+                M_b = inj_M[b]
+                if M_b <= 0:
+                    continue
+                not_covered = ~inj_covered[b]
+                n_b = vm_b.shape[0]
+                marg_full[b, :n_b] = (vm_b & not_covered).sum(axis=1) / float(M_b)
+            marg_t = torch.from_numpy(marg_full).to(
+                device=encoder_outputs.device, dtype=encoder_outputs.dtype,
+            )
+            feat = actor.marg_cov_inject_proj(marg_t.unsqueeze(-1))
+            pointer_refs = encoder_outputs + actor.marg_cov_inject_gain * feat
+        else:
+            pointer_refs = encoder_outputs
+        _, logits = actor.pointer(query, pointer_refs)
         logits, mask = actor.apply_mask_to_logits(logits, mask, idxs, lengths)
 
         if actor.eos_logit_bias is not None and lengths is not None:
@@ -1262,6 +1711,19 @@ def teacher_force_weighted_nll(
         selected_mask = F.one_hot(idxs, total_len).bool()
         mask = mask | selected_mask
         decoder_input = embedded[torch.arange(batch_size, device=device), idxs, :]
+
+        if inject_active:
+            for b in range(batch_size):
+                if step >= len(target_seqs[b]):
+                    continue
+                vm_b = vis_matrices_list[b] if b < len(vis_matrices_list) else None
+                if vm_b is None or inj_covered[b] is None:
+                    continue
+                picked = int(target_seqs[b][step])
+                if 0 <= picked < vm_b.shape[0]:
+                    np.bitwise_or(
+                        inj_covered[b], vm_b[picked], out=inj_covered[b],
+                    )
 
     return weighted_nll_sum / max(total_weight, 1e-8)
 
@@ -1817,6 +2279,38 @@ def po_finetune(
     ft_eos_weight: float = 5.0,
     # Sampling temperature for lexpo (>1 → more diverse rollouts → more pref pairs)
     ft_sample_temp: float = 1.0,
+    # DAgger: if True, only train on rollouts where LS improved via pure REMOVE
+    # (curriculum phase — strict subsequence, cleanest imitation signal).
+    ft_dagger_remove_only: bool = False,
+    # DAgger per-label-type weights. EOS labels point at the same token
+    # across the batch, so their gradient aggregates and can dominate the
+    # vertex-specific REDIR/KEEP signal. Down-weight to keep balance;
+    # set to 0 to drop those labels entirely.
+    ft_dagger_eos_weight: float = 0.1,
+    ft_dagger_redir_weight: float = 1.0,
+    # DAgger coverage-aware KEEP weighting. When > 0, each KEEP label gets
+    # weight 1.0 + beta * (marginal_cov(v) / max_marginal), where
+    # marginal_cov(v) = cov(ls_set) - cov(ls_set - {v}). Teaches the model
+    # that load-bearing guards matter more than redundant ones.
+    ft_dagger_cov_weight_beta: float = 0.0,
+    # Auxiliary marginal-coverage regression loss weight. When > 0, the
+    # model's marg_cov_head is trained to predict per-vertex marginal
+    # coverage given the partial guard set at each decode step. Targets
+    # come from disc-vis bitsets. Closes the "tail-of-ranking is noise"
+    # gap revealed by the EOS-gated probe.
+    ft_dagger_aux_marg_cov_weight: float = 0.0,
+    # LexPO feasibility floor slack: floor = pre_ft_cov - delta.
+    #   0.0  → strict ("cov same or up; minimize |S|")
+    #   0.01 → 1pp slack (legacy behaviour, allows curve-sliding)
+    ft_lexpo_cov_floor_delta: float = 0.01,
+    # StepSup fixed-teacher controls. Teacher sets below this coverage are
+    # skipped so CE never learns EOS after an under-covering target.
+    ft_step_sup_min_cov: float = 0.98,
+    ft_step_sup_eos_weight: float = 0.1,
+    # When a polygon has no high-coverage LS teacher, optionally train a
+    # low-weight guard-only retention prefix from the frozen baseline decode.
+    # This anchors hard instances without teaching EOS after low coverage.
+    ft_step_sup_retain_skipped_weight: float = 0.0,
 ) -> None:
     """Fine-tune via preference pairs (paper §3.4, Eq. 9).
 
@@ -1840,11 +2334,25 @@ def po_finetune(
     rl_ls_label = f"  rl_ls_budget={ft_rl_ls_budget}" if ft_loss_type == "reinforce_ls" else ""
     distill_label = f"  eos_weight={ft_eos_weight}" if ft_loss_type == "ls_distill" else ""
     lexpo_label = (f"  ls_eval_budget={ft_rl_ls_budget}" if ft_rl_ls_budget > 0 else "") + (f"  sample_T={ft_sample_temp}" if ft_sample_temp != 1.0 else "") if ft_loss_type == "lexpo" else ""
+    dagger_label = (
+        f"  ls_budget={ft_rl_ls_budget if ft_rl_ls_budget > 0 else 5}"
+        + ("  remove_only" if ft_dagger_remove_only else "")
+        + f"  w_eos={ft_dagger_eos_weight}"
+        + (f"  w_redir={ft_dagger_redir_weight}" if ft_dagger_redir_weight != 1.0 else "")
+        + (f"  cov_beta={ft_dagger_cov_weight_beta}" if ft_dagger_cov_weight_beta > 0 else "")
+        + (f"  aux_marg={ft_dagger_aux_marg_cov_weight}" if ft_dagger_aux_marg_cov_weight > 0 else "")
+    ) if ft_loss_type == "dagger" else ""
+    step_sup_label = (
+        f"  ls_budget={ft_rl_ls_budget if ft_rl_ls_budget > 0 else 5}"
+        + f"  min_cov={ft_step_sup_min_cov}"
+        + f"  w_eos={ft_step_sup_eos_weight}"
+        + f"  retain_w={ft_step_sup_retain_skipped_weight}"
+    ) if ft_loss_type == "step_sup" else ""
     print(
         f"\n{'='*60}\n"
         f"  {method_label} Fine-tune (§3.4)  |  {len(dataset)} inst  |  K={K}  |\n"
         f"  {epochs} epochs  |  bs={batch_size}  |  α={alpha}\n"
-        f"  LS moves: {ls_mode}  |  loss: {loss_label}{kl_label}{rl_ls_label}{distill_label}{lexpo_label}\n"
+        f"  LS moves: {ls_mode}  |  loss: {loss_label}{kl_label}{rl_ls_label}{distill_label}{lexpo_label}{dagger_label}{step_sup_label}\n"
         f"{'='*60}"
     )
     if ft_loss_type in ("lexrf", "lexpo"):
@@ -1961,15 +2469,207 @@ def po_finetune(
     best_ft_rew = pre_ft_rew
     best_ft_sopt_metric = pre_ft_sopt if pre_ft_sopt > 0 else 1e9  # lower=better
     best_ft_state = copy.deepcopy(model.state_dict())
+    best_ft_epoch = 0
+    best_ft_ever_saved = False  # set True the first time an epoch beats baseline
 
     # Cosine LR schedule for fine-tuning
     ft_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=lr * 0.1
     )
 
-    # Global coverage floor for best-model gating (used outside lexpo block)
-    # Tight: only save models that maintain coverage near baseline
-    _cov_floor_global = pre_ft_cov - 0.02
+    # Global coverage floor for best-model gating (used outside lexpo block).
+    # Strict: no coverage regression below pre-FT baseline is accepted.
+    # If no epoch ever meets this floor the pre-FT state is restored at the end.
+    _cov_floor_global = pre_ft_cov
+
+    def _disc_cov_from_vm(sol: list[int], vm: np.ndarray) -> float:
+        """Coverage of a guard set under an existing disc_vis matrix."""
+        if not sol or vm is None or vm.shape[1] <= 0:
+            return 0.0
+        covered = np.zeros(vm.shape[1], dtype=np.bool_)
+        for v in sol:
+            if 0 <= int(v) < vm.shape[0]:
+                np.bitwise_or(covered, vm[int(v)], out=covered)
+        return float(covered.sum()) / float(vm.shape[1])
+
+    def _greedy_marginal_order(gstar: list[int], vm: np.ndarray) -> list[int]:
+        """Canonical order: repeatedly pick max new sample coverage."""
+        valid = [int(v) for v in gstar if 0 <= int(v) < vm.shape[0]]
+        if not valid:
+            return []
+        covered = np.zeros(vm.shape[1], dtype=np.bool_)
+        ordered: list[int] = []
+        remaining = set(valid)
+        while remaining:
+            best_v = -1
+            best_gain = -1
+            for v in remaining:
+                gain = int(np.logical_and(vm[v], ~covered).sum())
+                if gain > best_gain:
+                    best_gain = gain
+                    best_v = v
+            if best_v < 0:
+                break
+            ordered.append(best_v)
+            np.bitwise_or(covered, vm[best_v], out=covered)
+            remaining.discard(best_v)
+        return ordered
+
+    # Fixed high-quality teachers for StepSup. The previous online variant
+    # decoded the current student each epoch, so targets shrank with the
+    # student and CE explicitly learned early EOS on under-covering sets.
+    _step_sup_teacher_cache: dict[str, dict] = {}
+    if ft_loss_type == "step_sup":
+        _ls_budget = ft_rl_ls_budget if ft_rl_ls_budget > 0 else 5
+        _teacher_min_cov = max(0.0, min(1.0, float(ft_step_sup_min_cov)))
+        _retain_skipped_weight = max(0.0, float(ft_step_sup_retain_skipped_weight))
+        _seed_k = max(1, int(K))
+        model.eval()
+        teacher_loader = DataLoader(
+            dataset, batch_size=1, shuffle=False,
+            collate_fn=collate_fn, num_workers=0,
+        )
+        teacher_iter = (
+            tqdm(teacher_loader, desc="Precompute StepSup teachers", leave=False)
+            if tqdm else teacher_loader
+        )
+        n_teacher_seen = 0
+        n_teacher_kept = 0
+        n_teacher_retained = 0
+        n_teacher_seeds = 0
+        n_teacher_targets = 0
+        teacher_covs: list[float] = []
+        teacher_sizes: list[int] = []
+        retain_covs: list[float] = []
+        with torch.no_grad():
+            for bd_raw, pm_raw, lens_raw, names_raw in teacher_iter:
+                bd = bd_raw.to(device, non_blocking=True)
+                pm = pm_raw.to(device, non_blocking=True)
+                lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
+                nn = int(lt[0].item())
+                name = str(names_raw[0])
+                pts = bd[0, :nn].detach().cpu().numpy()
+                n_teacher_seen += 1
+
+                try:
+                    disc = get_or_build_disc_vis(
+                        pts, name, n_samples=disc_vis_samples,
+                    )
+                    if not disc.get("valid"):
+                        continue
+                    vm = disc["vis_matrix"]
+                except Exception:
+                    continue
+
+                best_entry = None
+                best_score = -1e18
+                fallback_entry = None
+                seen_seeds: set[tuple[int, ...]] = set()
+                for seed_i in range(_seed_k):
+                    det = (seed_i == 0)
+                    try:
+                        seed_idxs, _ = model(
+                            bd, padding_mask=pm, lengths=lt,
+                            deterministic=det,
+                        )
+                    except Exception:
+                        continue
+                    seed_list: list[int] = []
+                    seed_seen: set[int] = set()
+                    for g in seed_idxs[0]:
+                        gi = int(g)
+                        if 0 <= gi < nn and gi not in seed_seen:
+                            seed_list.append(gi)
+                            seed_seen.add(gi)
+                    seed = tuple(seed_list)
+                    if not seed:
+                        continue
+                    if seed_i == 0 and _retain_skipped_weight > 0.0:
+                        seed_cov = _disc_cov_from_vm(seed_list, vm)
+                        fallback_entry = {
+                            "target": seed_list,
+                            "weights": [_retain_skipped_weight] * len(seed_list),
+                            "cov": seed_cov,
+                            "size": len(seed_list),
+                            "retain_only": True,
+                        }
+                    if seed in seen_seeds:
+                        continue
+                    seen_seeds.add(seed)
+                    n_teacher_seeds += 1
+
+                    try:
+                        ls_sol, _, _ = local_search_improve_disc(
+                            pts, list(seed), name, nn,
+                            max_iter=_ls_budget,
+                            enable_swap=ls_swap,
+                            enable_remove=True,
+                            enable_add=True,
+                            lam=_eval_lam, tau=_eval_tau,
+                            tau_penalty=_eval_tp,
+                            cap_at_tau=cap_at_tau,
+                            n_samples=disc_vis_samples,
+                            reward_fn_fallback=reward_fn,
+                            monotone_coverage=True,
+                        )
+                    except Exception:
+                        continue
+                    gstar = [int(g) for g in ls_sol if 0 <= int(g) < nn]
+                    if not gstar:
+                        continue
+
+                    cov = _disc_cov_from_vm(gstar, vm)
+                    if cov < _teacher_min_cov:
+                        continue
+
+                    eff = min(cov, _eval_tau) if cap_at_tau else cov
+                    reward = eff - _eval_lam * (len(gstar) / max(1, nn))
+                    reward -= _eval_tp * max(0.0, _eval_tau - cov)
+                    score = reward + 1e-3 * cov - 1e-4 * len(gstar)
+                    if score > best_score:
+                        ordered = _greedy_marginal_order(gstar, vm)
+                        if ordered:
+                            best_score = score
+                            best_entry = {
+                                "target": ordered + [nn],
+                                "weights": [1.0] * len(ordered) + [float(ft_step_sup_eos_weight)],
+                                "cov": cov,
+                                "size": len(ordered),
+                            }
+
+                if best_entry is None and fallback_entry is not None:
+                    best_entry = fallback_entry
+
+                if best_entry is not None:
+                    _step_sup_teacher_cache[name] = best_entry
+                    n_teacher_targets += len(best_entry["target"])
+                    if best_entry.get("retain_only"):
+                        n_teacher_retained += 1
+                        retain_covs.append(float(best_entry["cov"]))
+                    else:
+                        n_teacher_kept += 1
+                        teacher_covs.append(float(best_entry["cov"]))
+                        teacher_sizes.append(int(best_entry["size"]))
+
+        model.train()
+        if n_teacher_kept == 0:
+            raise RuntimeError(
+                "StepSup fixed-teacher cache is empty. Lower "
+                "ft_step_sup_min_cov or increase finetune_k/LS budget."
+            )
+        print(
+            "  StepSup fixed teachers: "
+            f"cached={n_teacher_kept + n_teacher_retained}/{n_teacher_seen} "
+            f"high={n_teacher_kept} retain={n_teacher_retained} "
+            f"seed_evals={n_teacher_seeds} "
+            f"targets={n_teacher_targets} "
+            f"cov_mean={(np.mean(teacher_covs) if teacher_covs else 0.0):.3f} "
+            f"|S|_mean={(np.mean(teacher_sizes) if teacher_sizes else 0.0):.2f}"
+            + (
+                f" retain_cov_mean={np.mean(retain_covs):.3f}"
+                if retain_covs else ""
+            )
+        )
 
     # ==================================================================
     # OFFLINE PAIR PRECOMPUTATION
@@ -1981,7 +2681,7 @@ def po_finetune(
     # Pairs are cached to disk (checkpoint_dir/ft_pairs_K{K}.pkl) so
     # subsequent runs with the same model skip the costly precomputation.
     # ==================================================================
-    if finetune_method == "ls" and ft_loss_type not in ("reinforce_ls", "ls_distill", "lexrf", "lexpo"):
+    if finetune_method == "ls" and ft_loss_type not in ("reinforce_ls", "ls_distill", "lexrf", "lexpo", "dagger", "step_sup"):
         import pickle as _pkl
         pairs_cache_path = os.path.join(
             checkpoint_dir, f"ft_pairs_K{K}.pkl",
@@ -2176,7 +2876,7 @@ def po_finetune(
         total_loss = 0.0
         n_pairs_epoch = 0
 
-        if finetune_method == "ls" and ft_loss_type not in ("reinforce_ls", "ls_distill", "lexrf", "lexpo"):
+        if finetune_method == "ls" and ft_loss_type not in ("reinforce_ls", "ls_distill", "lexrf", "lexpo", "dagger", "step_sup"):
             # ── OFFLINE: iterate over precomputed fixed pairs ────
             import random as _rng
             indices = list(range(len(all_pairs)))
@@ -2573,9 +3273,17 @@ def po_finetune(
             # Feasibility floor = baseline coverage (monotone coverage):
             # don't reward coverage gains beyond baseline; among solutions
             # at baseline level, prefer fewer guards.
-            _cov_floor = pre_ft_cov - 0.01  # tight: force guard reduction via better placement
+            #
+            # `ft_lexpo_cov_floor_delta` controls slack:
+            #   delta=0.0   → strict (floor=baseline, "cov same or up")
+            #   delta=0.01  → 1pp slack (legacy default)
+            #   delta>0.01  → more slack, allows curve-sliding
+            _cov_floor = pre_ft_cov - ft_lexpo_cov_floor_delta
             if epoch == 1:
-                print(f"  LexPO cov_floor={_cov_floor:.3f} (baseline={pre_ft_cov:.3f} - 0.01)")
+                print(
+                    f"  LexPO cov_floor={_cov_floor:.3f} "
+                    f"(baseline={pre_ft_cov:.3f} - {ft_lexpo_cov_floor_delta})"
+                )
 
             batch_iter = (
                 tqdm(loader, desc=f"FT epoch {epoch} [LexPO{'+LS' if _ls_budget > 0 else ''}]", leave=False)
@@ -2611,6 +3319,22 @@ def po_finetune(
                     exp_mask = mb_mask.repeat_interleave(K, dim=0)
                     exp_lens = mb_lens.repeat_interleave(K)
 
+                    # Cache per-instance points (before rollout for vm_list)
+                    pts_cache = []
+                    for b in range(mB):
+                        nn = int(mb_lens[b].item())
+                        pts_cache.append(mb_data[b, :nn].detach().cpu().numpy())
+
+                    # Build per-instance disc-vis matrices for marginal-coverage
+                    # injection; K-replicate to match expanded batch layout.
+                    mb_vm_list = []
+                    for b in range(mB):
+                        disc_b = get_or_build_disc_vis(
+                            pts_cache[b], mb_names[b], n_samples=disc_vis_samples,
+                        )
+                        mb_vm_list.append(disc_b["vis_matrix"] if disc_b.get("valid") else None)
+                    exp_vm_list = [mb_vm_list[i // K] for i in range(mB * K)]
+
                     _actor = model.actor if hasattr(model, "actor") else model
                     _orig_temp = _actor.temperature
                     if _sample_temp != 1.0:
@@ -2618,14 +3342,9 @@ def po_finetune(
                     all_idxs, all_log_probs_raw = model(
                         exp_data, padding_mask=exp_mask, lengths=exp_lens,
                         deterministic=False,
+                        vis_matrices_list=exp_vm_list,
                     )
                     _actor.temperature = _orig_temp
-
-                    # Cache per-instance points
-                    pts_cache = []
-                    for b in range(mB):
-                        nn = int(mb_lens[b].item())
-                        pts_cache.append(mb_data[b, :nn].detach().cpu().numpy())
 
                     # ── 2. Evaluate originals & run LS ───────────────────
                     orig_covs  = []
@@ -2691,6 +3410,7 @@ def po_finetune(
                     if _ls_budget > 0:
                         ls_log_probs = _teacher_force_log_probs(
                             model, exp_data, ls_target_seqs, exp_mask, exp_lens,
+                            vis_matrices_list=exp_vm_list,
                         )
                     else:
                         ls_log_probs = all_log_probs_raw
@@ -2784,6 +3504,431 @@ def po_finetune(
 
                 total_loss += batch_loss_accum
                 n_pairs_epoch += batch_prefs_accum
+
+        elif ft_loss_type == "dagger":
+            # Initialize stats up-front so the logging block is safe
+            # even if every batch is skipped.
+            _dagger_stats = (0, 0, 0, 0)
+            # ── DAGGER (per-step expert correction via LS) ───────
+            # For each on-policy rollout τ = (v_1, …, v_k, EOS),
+            # run LS on the full polygon to obtain τ_LS (a set).
+            # Relabel each step under the student's own history so
+            # hidden states stay in-distribution, then minimise
+            # cross-entropy against the expert label.
+            #
+            # Target rule (see _dagger_relabel):
+            #   • v_t ∈ τ_LS and unpicked  → target = v_t  (KEEP)
+            #   • v_t wasted / premature EOS → target = next unplaced
+            #                                  LS guard  (REDIRECT)
+            #   • all LS guards placed → target = EOS
+            #
+            # This avoids teacher-forcing LS sequences (no cascade):
+            # we force the rollout through the decoder so the state
+            # evolves exactly as during sampling, and only read the
+            # target log-prob at each step.
+            _lam = lam if lam is not None else 0.2
+            _tau = tau if tau is not None else 0.99
+            _tp  = tau_penalty if tau_penalty is not None else 5.0
+            _ls_budget = ft_rl_ls_budget if ft_rl_ls_budget > 0 else 5
+
+            batch_iter = (
+                tqdm(loader, desc=f"FT epoch {epoch} [DAgger+LS({_ls_budget})]",
+                     leave=False)
+                if tqdm else loader
+            )
+
+            n_keep_epoch = 0
+            n_redir_epoch = 0
+            n_eos_epoch = 0
+            n_skipped_epoch = 0
+
+            for batch_data_raw, pad_mask_raw, lens_raw, names_raw in batch_iter:
+                bd = batch_data_raw.to(device, non_blocking=True)
+                pm = pad_mask_raw.to(device, non_blocking=True)
+                lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
+                B = bd.size(0)
+
+                # Micro-batch gradient accumulation to bound peak memory.
+                micro_B = max(1, min(4, B))
+                optimizer.zero_grad()
+                batch_loss_accum = 0.0
+                batch_steps_accum = 0
+                n_micro = (B + micro_B - 1) // micro_B
+
+                for mi in range(n_micro):
+                    mb_start = mi * micro_B
+                    mb_end = min(mb_start + micro_B, B)
+                    mB = mb_end - mb_start
+
+                    mb_data = bd[mb_start:mb_end]
+                    mb_mask = pm[mb_start:mb_end]
+                    mb_lens = lt[mb_start:mb_end]
+                    mb_names = names_raw[mb_start:mb_end]
+
+                    # ── 1. Sample K rollouts (no grad; labels built offline) ──
+                    exp_data = mb_data.repeat_interleave(K, dim=0)
+                    exp_mask = mb_mask.repeat_interleave(K, dim=0)
+                    exp_lens = mb_lens.repeat_interleave(K)
+
+                    with torch.no_grad():
+                        all_idxs, _ = model(
+                            exp_data, padding_mask=exp_mask, lengths=exp_lens,
+                            deterministic=False,
+                        )
+
+                    # Cache per-instance points
+                    pts_cache = []
+                    for b in range(mB):
+                        nn = int(mb_lens[b].item())
+                        pts_cache.append(mb_data[b, :nn].detach().cpu().numpy())
+
+                    # ── 2. Build rollout + target sequences via LS relabeling ──
+                    rollout_seqs: list[list[int]] = []
+                    target_seqs: list[list[int]] = []
+                    weight_seqs: list[list[float]] = []
+                    keep_idx: list[int] = []  # which of the B*K to use
+
+                    for i in range(mB * K):
+                        b = i // K
+                        nn = int(mb_lens[b].item())
+                        sol = [int(g) for g in all_idxs[i] if g < nn]
+
+                        if not sol:
+                            n_skipped_epoch += 1
+                            continue
+
+                        # Run LS on the rollout (full moves; DAgger can
+                        # absorb ADD/SWAP because it relabels at the
+                        # student's hidden state — no LS teacher-force).
+                        enable_add_ls = not ft_dagger_remove_only
+                        enable_swap_ls = (not ft_dagger_remove_only) and ls_swap
+                        ls_sol, _, _ = local_search_improve_disc(
+                            pts_cache[b], sol, mb_names[b], nn,
+                            max_iter=_ls_budget,
+                            enable_swap=enable_swap_ls,
+                            enable_remove=True,
+                            enable_add=enable_add_ls,
+                            lam=_lam, tau=_tau, tau_penalty=_tp,
+                            cap_at_tau=cap_at_tau,
+                            n_samples=disc_vis_samples,
+                            reward_fn_fallback=reward_fn,
+                            monotone_coverage=True,
+                        )
+                        ls_set = {int(g) for g in ls_sol if 0 <= g < nn}
+                        if not ls_set:
+                            n_skipped_epoch += 1
+                            continue
+
+                        # Curriculum: remove-only → skip rollouts where LS
+                        # introduces a new guard (pure REMOVE otherwise).
+                        if ft_dagger_remove_only and not ls_set.issubset(set(sol)):
+                            n_skipped_epoch += 1
+                            continue
+
+                        rollout_full = sol + [nn]  # append EOS
+                        targets, scored_len, label_types = _dagger_relabel(
+                            rollout_full, ls_set, nn,
+                        )
+                        if scored_len < 1:
+                            n_skipped_epoch += 1
+                            continue
+
+                        # Truncate to the scored prefix (at most one EOS
+                        # label per rollout) to prevent EOS amplification.
+                        rollout_trunc = rollout_full[:scored_len]
+                        targets_trunc = targets[:scored_len]
+                        ltypes_trunc = label_types[:scored_len]
+
+                        # Per-step weights: EOS labels point at the same
+                        # token across the whole batch, so their gradient
+                        # aggregates and can dominate REDIR/KEEP labels.
+                        # Down-weight EOS (and optionally REDIR) to keep
+                        # the signal balanced.
+                        #
+                        # Optional coverage-aware KEEP boost: weight each
+                        # KEEP by marginal coverage contribution within
+                        # ls_set, so load-bearing guards get stronger
+                        # gradient than redundant ones.
+                        # Fast path: use discrete visibility bitsets. A
+                        # sample is "exclusively covered" by v within
+                        # ls_set when v is the only guard in ls_set that
+                        # sees it — exactly what marginal coverage means.
+                        marginal_cov: dict[int, float] = {}
+                        max_marg = 0.0
+                        if ft_dagger_cov_weight_beta > 0.0 and ls_set:
+                            try:
+                                disc = get_or_build_disc_vis(
+                                    pts_cache[b], mb_names[b],
+                                    n_samples=disc_vis_samples,
+                                )
+                                if disc.get("valid"):
+                                    vis_matrix = disc["vis_matrix"]
+                                    M = disc["n_samples"]
+                                    ls_list = [
+                                        int(vg) for vg in ls_set
+                                        if 0 <= int(vg) < vis_matrix.shape[0]
+                                    ]
+                                    if ls_list:
+                                        cover_count = np.zeros(M, dtype=np.int32)
+                                        for vg in ls_list:
+                                            cover_count += vis_matrix[vg].astype(np.int32)
+                                        exclusive_mask = (cover_count == 1)
+                                        inv_M = 1.0 / float(M)
+                                        for vg in ls_list:
+                                            excl = np.logical_and(exclusive_mask, vis_matrix[vg])
+                                            m = float(excl.sum()) * inv_M
+                                            marginal_cov[vg] = m
+                                            if m > max_marg:
+                                                max_marg = m
+                            except Exception:
+                                marginal_cov = {}
+                                max_marg = 0.0
+
+                        def _keep_weight(v_t: int) -> float:
+                            if max_marg > 0 and v_t in marginal_cov:
+                                return 1.0 + ft_dagger_cov_weight_beta * (
+                                    marginal_cov[v_t] / max_marg
+                                )
+                            return 1.0
+
+                        weights_trunc = [
+                            ft_dagger_eos_weight if ltp == "eos"
+                            else ft_dagger_redir_weight if ltp == "redir"
+                            else _keep_weight(int(vt))
+                            for vt, ltp in zip(rollout_trunc, ltypes_trunc)
+                        ]
+
+                        # Track label-type stats (cheap; used for logging)
+                        for ltp in ltypes_trunc:
+                            if ltp == "eos":
+                                n_eos_epoch += 1
+                            elif ltp == "keep":
+                                n_keep_epoch += 1
+                            else:
+                                n_redir_epoch += 1
+
+                        rollout_seqs.append(rollout_trunc)
+                        target_seqs.append(targets_trunc)
+                        weight_seqs.append(weights_trunc)
+                        keep_idx.append(i)
+
+                    if not rollout_seqs:
+                        del exp_data, exp_mask, exp_lens
+                        torch.cuda.empty_cache()
+                        continue
+
+                    # ── 3. Gather matching inputs for teacher-forced pass ──
+                    tf_data = exp_data[keep_idx]
+                    tf_mask = exp_mask[keep_idx]
+                    tf_lens = exp_lens[keep_idx]
+
+                    # Build per-kept-rollout vis matrices for the aux head.
+                    vm_keep = None
+                    if ft_dagger_aux_marg_cov_weight > 0.0:
+                        vm_keep = []
+                        for i in keep_idx:
+                            b_i = i // K
+                            try:
+                                disc_i = get_or_build_disc_vis(
+                                    pts_cache[b_i], mb_names[b_i],
+                                    n_samples=disc_vis_samples,
+                                )
+                                vm_keep.append(
+                                    disc_i["vis_matrix"]
+                                    if disc_i.get("valid") else None
+                                )
+                            except Exception:
+                                vm_keep.append(None)
+
+                    # ── 4. Teacher-force rollout → read target log-probs ──
+                    lp_sum, w_sum, n_steps_per, aux_loss = _dagger_step_log_probs(
+                        model, tf_data, rollout_seqs, target_seqs,
+                        tf_mask, tf_lens, target_weights=weight_seqs,
+                        vis_matrices_list=vm_keep,
+                        aux_marg_cov_weight=ft_dagger_aux_marg_cov_weight,
+                    )
+                    total_steps = int(n_steps_per.sum().item())
+                    total_weight = float(w_sum.sum().item())
+                    if total_steps < 1 or total_weight <= 0.0:
+                        del exp_data, exp_mask, exp_lens, tf_data, tf_mask, tf_lens
+                        torch.cuda.empty_cache()
+                        continue
+
+                    # Weighted cross-entropy + aux MSE on marginal coverage.
+                    micro_loss = -lp_sum.sum() / total_weight
+                    if ft_dagger_aux_marg_cov_weight > 0.0:
+                        micro_loss = micro_loss + ft_dagger_aux_marg_cov_weight * aux_loss
+                    (micro_loss / n_micro).backward()
+
+                    batch_loss_accum += micro_loss.item() * total_steps
+                    batch_steps_accum += total_steps
+
+                    del exp_data, exp_mask, exp_lens, tf_data, tf_mask, tf_lens
+                    torch.cuda.empty_cache()
+
+                if batch_steps_accum < 1:
+                    continue
+
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                grad_finite = all(
+                    torch.isfinite(p.grad).all()
+                    for p in model.parameters()
+                    if p.grad is not None
+                )
+                if not grad_finite:
+                    optimizer.zero_grad()
+                    continue
+                optimizer.step()
+
+                total_loss += batch_loss_accum
+                n_pairs_epoch += batch_steps_accum
+
+            # Stash per-epoch label stats for logging
+            _dagger_stats = (n_keep_epoch, n_redir_epoch, n_eos_epoch, n_skipped_epoch)
+
+        elif ft_loss_type == "step_sup":
+            # ── PER-STEP SUPERVISED RANKING (Approach C) ─────────
+            # For each polygon:
+            #   1. Greedy-decode a seed solution.
+            #   2. Run LS on the seed → set G* of guard indices.
+            #   3. Canonicalise G* into a sequence by greedy-max-
+            #      marginal-coverage ordering: starting from {},
+            #      pick v* = argmax_{v ∈ G*\\S} (vis[v] & ~covered).sum()
+            #      until G* is exhausted, then append EOS.
+            #   4. Teacher-force the model through this trajectory
+            #      with marg_cov_inject active so the model sees the
+            #      same per-vertex marginal-coverage signal it would
+            #      see at inference.
+            #   5. CE loss against the next-pick at each step (uniform
+            #      weights). One dense, local gradient per step on the
+            #      conditional ranking decision — exactly the gap the
+            #      EOS-gate probe (Approach 15) revealed.
+            _lam = lam if lam is not None else 0.2
+            _tau = tau if tau is not None else 0.99
+            _tp  = tau_penalty if tau_penalty is not None else 5.0
+            _ls_budget = ft_rl_ls_budget if ft_rl_ls_budget > 0 else 5
+
+            batch_iter = (
+                tqdm(loader, desc=f"FT epoch {epoch} [StepSup+LS({_ls_budget})]",
+                     leave=False)
+                if tqdm else loader
+            )
+
+            n_skipped_epoch = 0
+            n_targets_epoch = 0
+
+            for batch_data_raw, pad_mask_raw, lens_raw, names_raw in batch_iter:
+                bd = batch_data_raw.to(device, non_blocking=True)
+                pm = pad_mask_raw.to(device, non_blocking=True)
+                lt = torch.tensor(lens_raw, dtype=torch.long, device=device)
+                B = bd.size(0)
+
+                micro_B = max(1, min(4, B))
+                optimizer.zero_grad()
+                batch_loss_accum = 0.0
+                batch_steps_accum = 0
+                n_micro = (B + micro_B - 1) // micro_B
+
+                for mi in range(n_micro):
+                    mb_start = mi * micro_B
+                    mb_end = min(mb_start + micro_B, B)
+                    mB = mb_end - mb_start
+
+                    mb_data = bd[mb_start:mb_end]
+                    mb_mask = pm[mb_start:mb_end]
+                    mb_lens = lt[mb_start:mb_end]
+                    mb_names = names_raw[mb_start:mb_end]
+
+                    pts_cache = []
+                    for b in range(mB):
+                        nn = int(mb_lens[b].item())
+                        pts_cache.append(mb_data[b, :nn].detach().cpu().numpy())
+
+                    target_seqs: list[list[int]] = []
+                    weight_seqs: list[list[float]] = []
+                    vm_seqs: list = []
+                    keep_idx: list[int] = []
+
+                    for b in range(mB):
+                        nn = int(mb_lens[b].item())
+                        name = str(mb_names[b])
+                        teacher_entry = _step_sup_teacher_cache.get(name)
+                        if teacher_entry is None:
+                            n_skipped_epoch += 1
+                            continue
+
+                        target = list(teacher_entry["target"])
+                        weights = list(teacher_entry["weights"])
+                        retain_only = bool(teacher_entry.get("retain_only"))
+                        if not target:
+                            n_skipped_epoch += 1
+                            continue
+                        if not retain_only and target[-1] != nn:
+                            n_skipped_epoch += 1
+                            continue
+
+                        try:
+                            disc_b = get_or_build_disc_vis(
+                                pts_cache[b], name,
+                                n_samples=disc_vis_samples,
+                            )
+                            if not disc_b.get("valid"):
+                                n_skipped_epoch += 1
+                                continue
+                            vm_b = disc_b["vis_matrix"]
+                        except Exception:
+                            n_skipped_epoch += 1
+                            continue
+
+                        target_seqs.append(target)
+                        weight_seqs.append(weights)
+                        vm_seqs.append(vm_b)
+                        keep_idx.append(b)
+                        n_targets_epoch += len(target)
+
+                    if not target_seqs:
+                        torch.cuda.empty_cache()
+                        continue
+
+                    # 4. Teacher-force with CE; marg_cov_inject active
+                    # via vis_matrices_list (same feature signal as
+                    # inference, no train/test gap).
+                    tf_data = mb_data[keep_idx]
+                    tf_mask = mb_mask[keep_idx]
+                    tf_lens = mb_lens[keep_idx]
+
+                    micro_loss = teacher_force_weighted_nll(
+                        model, tf_data, target_seqs, weight_seqs,
+                        padding_mask=tf_mask, lengths=tf_lens,
+                        vis_matrices_list=vm_seqs,
+                    )
+                    (micro_loss / n_micro).backward()
+
+                    batch_loss_accum += float(micro_loss.item())
+                    batch_steps_accum += sum(len(s) for s in target_seqs)
+
+                    torch.cuda.empty_cache()
+
+                if batch_steps_accum < 1:
+                    continue
+
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                grad_finite = all(
+                    torch.isfinite(p.grad).all()
+                    for p in model.parameters()
+                    if p.grad is not None
+                )
+                if not grad_finite:
+                    optimizer.zero_grad()
+                    continue
+                optimizer.step()
+
+                total_loss += batch_loss_accum
+                n_pairs_epoch += batch_steps_accum
+
+            _step_sup_stats = (n_targets_epoch, n_skipped_epoch)
 
         elif ft_loss_type == "ls_distill":
             # ── ONLINE LS-DISTILLATION (truncated at first skip) ─
@@ -3081,6 +4226,24 @@ def po_finetune(
                 f"loss={avg_loss:.4f}  "
                 f"pairs={n_pairs_epoch} (LexPO{'+LS(' + str(ft_rl_ls_budget) + ')' if ft_rl_ls_budget > 0 else ''})"
             )
+        elif ft_loss_type == "dagger":
+            _k, _r, _e, _sk = _dagger_stats
+            _tot_lbl = max(1, _k + _r + _e)
+            print(
+                f"FT epoch {epoch}/{epochs}  "
+                f"loss={avg_loss:.4f}  "
+                f"steps={n_pairs_epoch} (DAgger  "
+                f"keep={_k/_tot_lbl:.2f} redir={_r/_tot_lbl:.2f} "
+                f"eos={_e/_tot_lbl:.2f}  skipped={_sk})"
+            )
+        elif ft_loss_type == "step_sup":
+            _nt, _sk = _step_sup_stats if "_step_sup_stats" in dir() else (0, 0)
+            print(
+                f"FT epoch {epoch}/{epochs}  "
+                f"loss={avg_loss:.4f}  "
+                f"steps={n_pairs_epoch} (StepSup  "
+                f"targets={_nt} skipped={_sk})"
+            )
         elif ft_loss_type == "ls_distill":
             print(
                 f"FT epoch {epoch}/{epochs}  "
@@ -3120,11 +4283,18 @@ def po_finetune(
         cov_delta = ft_cov - pre_ft_cov
         rew_delta = ft_rew - pre_ft_rew
         tag = ""
-        # Track best by |S|/OPT (lower=better), with coverage floor
-        if ft_sopt > 0 and ft_cov >= _cov_floor_global and ft_sopt < best_ft_sopt_metric - 1e-4:
-            best_ft_sopt_metric = ft_sopt
+        # Track best by reward under a tight coverage floor; use |S|/OPT only
+        # as a tie-breaker. The previous gate selected smaller under-covering
+        # models because |S|/OPT improved while reward degraded.
+        sopt_better = ft_sopt > 0 and ft_sopt < best_ft_sopt_metric - 1e-4
+        reward_better = ft_rew > best_ft_rew + 1e-4
+        reward_tied = abs(ft_rew - best_ft_rew) <= 1e-4
+        if ft_cov >= _cov_floor_global and (reward_better or (reward_tied and sopt_better)):
+            best_ft_sopt_metric = ft_sopt if ft_sopt > 0 else best_ft_sopt_metric
             best_ft_rew = ft_rew
             best_ft_state = copy.deepcopy(model.state_dict())
+            best_ft_epoch = epoch
+            best_ft_ever_saved = True
             tag = " *best*"
         sopt_str = f" |S|/OPT={ft_sopt:.3f}" if ft_sopt > 0 else ""
         cur_lr = optimizer.param_groups[0]['lr']
@@ -3142,11 +4312,26 @@ def po_finetune(
         gc.collect()
         torch.cuda.empty_cache()
 
-    # Restore best model (by |S|/OPT) if current is worse
+    # Restore best model (reward primary, |S|/OPT tie-breaker) if current is worse.
+    # Also restore if no epoch ever met the strict coverage floor — in that case
+    # best_ft_state holds the pre-FT snapshot, which is the safest fallback.
     _, _, final_rew, final_sopt = _ft_quick_eval()
     final_sopt_val = final_sopt if final_sopt > 0 else 1e9
-    if final_sopt_val > best_ft_sopt_metric + 1e-4:
-        print(f"  [FT] Restoring best model (|S|/OPT={best_ft_sopt_metric:.3f} < final {final_sopt_val:.3f})")
+    final_worse = final_rew < best_ft_rew - 1e-4
+    final_tied_worse_sopt = abs(final_rew - best_ft_rew) <= 1e-4 and final_sopt_val > best_ft_sopt_metric + 1e-4
+    should_restore = (not best_ft_ever_saved) or final_worse or final_tied_worse_sopt
+    if should_restore:
+        if not best_ft_ever_saved:
+            reason = "no epoch met coverage floor"
+        elif final_worse:
+            reason = "reward degraded"
+        else:
+            reason = "|S|/OPT degraded"
+        print(
+            f"  [FT] Restoring best model from epoch {best_ft_epoch} "
+            f"({reason}; r={best_ft_rew:.4f}, |S|/OPT={best_ft_sopt_metric:.3f}; "
+            f"final r={final_rew:.4f}, |S|/OPT={final_sopt_val:.3f})"
+        )
         model.load_state_dict(best_ft_state)
 
     print(f"{method_label} fine-tuning complete.\n")
@@ -3171,6 +4356,7 @@ def evaluate_po(
     no_eos: bool = False,
     tau: float = 0.99,
     disc_vis_samples: int = 0,
+    eos_cov_threshold: float = 0.0,
 ) -> list[dict]:
     """Evaluate with greedy decode + stochastic best-of-(aug*K).
 
@@ -3313,11 +4499,33 @@ def evaluate_po(
 
         t0 = time.perf_counter()
 
+        # Build per-sample vis matrices for EOS-coverage gating, if enabled.
+        # We read the vis-matrix from the disc cache that LS already uses.
+        # If the eval is set to exact-CGAL (disc_vis_samples=0), we still
+        # build a discrete cache at default density purely for the gate.
+        det_vm_list = None
+        stoch_vm_list = None
+        if eos_cov_threshold > 0.0 and not no_eos:
+            n_gate_samples = disc_vis_samples if disc_vis_samples > 0 else 500
+            try:
+                disc = get_or_build_disc_vis(
+                    pts, name, n_samples=n_gate_samples,
+                )
+                if disc.get("valid"):
+                    vm = disc["vis_matrix"]
+                    det_vm_list = [vm]
+                    stoch_vm_list = [vm] * K
+            except Exception:
+                det_vm_list = None
+                stoch_vm_list = None
+
         # -- greedy decode --
         det_idxs, _ = model(
             batch_data, padding_mask=pad_mask,
             lengths=lens_t, deterministic=True,
             no_eos=no_eos,
+            eos_cov_threshold=eos_cov_threshold,
+            vis_matrices_list=det_vm_list,
         )
         if no_eos:
             det_sol, det_cov = _perm_to_guards(det_idxs[0], pts, name, n)
@@ -3344,6 +4552,8 @@ def evaluate_po(
                 exp_data, padding_mask=exp_mask,
                 lengths=exp_lengths, deterministic=False,
                 no_eos=no_eos,
+                eos_cov_threshold=eos_cov_threshold,
+                vis_matrices_list=stoch_vm_list,
             )
 
             for k_idx in range(K):
@@ -3507,6 +4717,12 @@ def main() -> None:
                    help="Maximum LS iterations per instance.")
     g.add_argument("--ls-no-swap",      action="store_true", default=False,
                    help="Disable swap moves in LS (faster, less thorough).")
+    g.add_argument("--eval-eos-cov-threshold", type=float, default=0.0,
+                   help="At eval-time, mask the EOS logit until partial "
+                        "coverage ≥ this threshold (using disc_vis cache). "
+                        "0.0 = disabled. Try 0.99 = same as feasibility τ. "
+                        "Tests whether the model has selection capability "
+                        "beyond 'stop early'.")
 
     # -- Expert Fine-tuning (§3.4) --
     g = p.add_argument_group("Expert Fine-tuning")
@@ -3532,11 +4748,58 @@ def main() -> None:
     g.add_argument("--ft-cap-coverage",   type=str, default=None, choices=["true", "false"],
                    help="Override cap-coverage during FT (default: same as --cap-coverage).")
     g.add_argument("--ft-loss-type", type=str, default="dpo",
-                   choices=["dpo", "sft", "reinforce_ls", "ls_distill", "lexrf", "lexpo"],
+                   choices=["dpo", "sft", "reinforce_ls", "ls_distill", "lexrf", "lexpo", "dagger", "step_sup"],
                    help="Fine-tuning loss: 'dpo' (contrastive preference), "
                         "'sft' (supervised on teacher sequences), "
-                        "'reinforce_ls' (on-policy REINFORCE with LS rewards), or "
-                        "'ls_distill' (online LS-distillation with model-ordered targets).")
+                        "'reinforce_ls' (on-policy REINFORCE with LS rewards), "
+                        "'ls_distill' (online LS-distillation with model-ordered targets), "
+                        "'lexpo' (lexicographic PO per paper §3.4), "
+                        "'dagger' (per-step expert correction on student states), or "
+                        "'step_sup' (Approach C: per-step CE on greedy-LS-ordered "
+                        "trajectory with marg_cov_inject active).")
+    g.add_argument("--ft-dagger-remove-only", action="store_true", default=False,
+                   help="DAgger curriculum: only train on rollouts where LS "
+                        "improved via pure REMOVE (LS solution ⊆ rollout). "
+                        "Cleanest imitation signal — use for early epochs then disable.")
+    g.add_argument("--ft-dagger-eos-weight", type=float, default=0.1,
+                   help="DAgger: per-step weight for EOS-target labels. EOS labels "
+                        "point at the same token across the batch, so their gradient "
+                        "aggregates and can dominate vertex-specific labels. "
+                        "0.1 typically balances the signal; 0.0 drops them entirely.")
+    g.add_argument("--ft-dagger-redir-weight", type=float, default=1.0,
+                   help="DAgger: per-step weight for REDIRECT-target labels "
+                        "(default 1.0 — no scaling).")
+    g.add_argument("--ft-dagger-cov-weight-beta", type=float, default=0.0,
+                   help="DAgger: coverage-aware KEEP weighting. When > 0, "
+                        "each KEEP label gets weight 1 + beta * "
+                        "(marginal_cov(v)/max_marg) — load-bearing guards "
+                        "get stronger gradient than redundant ones. "
+                        "Default 0.0 (disabled). Try 1.0 first.")
+    g.add_argument("--ft-dagger-aux-marg-cov-weight", type=float, default=0.0,
+                   help="DAgger auxiliary loss weight: trains the model's "
+                        "marg_cov_head to predict per-vertex marginal "
+                        "coverage given the partial set at each decode "
+                        "step. Targets from disc-vis. Default 0.0 (off). "
+                        "Try 0.1 — 1.0 to teach conditional ranking.")
+    g.add_argument("--ft-lexpo-cov-floor-delta", type=float, default=0.01,
+                   help="LexPO feasibility floor slack: cov_floor = "
+                        "pre_ft_cov - delta. 0.0 = strict ('cov same or "
+                        "up; minimize |S|'). 0.01 = 1pp slack (legacy).")
+    g.add_argument("--ft-step-sup-min-cov", type=float, default=0.98,
+                   help="StepSup fixed-teacher filter: only LS teacher sets "
+                        "with disc coverage >= this value are used. This "
+                        "prevents CE from learning EOS after under-covering "
+                        "targets. Default 0.98.")
+    g.add_argument("--ft-step-sup-eos-weight", type=float, default=0.1,
+                   help="StepSup per-sequence EOS target weight. Down-weight "
+                        "because EOS is one shared token while vertex targets "
+                        "are distributed across vertices. Default 0.1.")
+    g.add_argument("--ft-step-sup-retain-skipped-weight", type=float, default=0.0,
+                   help="StepSup fallback for polygons without a high-coverage "
+                        "teacher: train the frozen baseline guard prefix with "
+                        "this low per-step weight and no EOS target. Anchors "
+                        "hard instances without teaching low-coverage stopping. "
+                        "Default 0.0 (disabled).")
     g.add_argument("--ft-kl-coeff", type=float, default=0.0,
                    help="L2 weight regularization toward reference model during SFT. "
                         "Prevents catastrophic drift. Recommended: 50-200 for SFT.")
@@ -3626,6 +4889,14 @@ def main() -> None:
             "ft_reward_lambda", "ft_tau_penalty", "ft_cap_coverage",
             "ft_loss_type", "ft_kl_coeff", "ft_no_ref_model", "ft_ls_swap_only",
             "ft_rl_ls_budget", "ft_eos_weight", "ft_sample_temp",
+            "ft_dagger_remove_only",
+            "ft_dagger_eos_weight", "ft_dagger_redir_weight",
+            "ft_dagger_cov_weight_beta",
+            "ft_dagger_aux_marg_cov_weight",
+            "ft_lexpo_cov_floor_delta",
+            "ft_step_sup_min_cov", "ft_step_sup_eos_weight",
+            "ft_step_sup_retain_skipped_weight",
+            "eval_eos_cov_threshold",
             "fast_reward", "disc_vis_samples",
             "use_amp",
         ]
@@ -3696,7 +4967,16 @@ def main() -> None:
         ckpt = torch.load(args.resume_from, map_location=device, weights_only=False)
         if isinstance(ckpt, dict):
             if "model_state_dict" in ckpt:
-                model.load_state_dict(ckpt["model_state_dict"])
+                # strict=False so new heads (e.g., marg_cov_head) added in
+                # a later code revision can be initialised fresh while the
+                # rest of the checkpoint loads cleanly.
+                missing, unexpected = model.load_state_dict(
+                    ckpt["model_state_dict"], strict=False,
+                )
+                if missing:
+                    vprint(f"  [resume] missing keys: {len(missing)} (using fresh init)")
+                if unexpected:
+                    vprint(f"  [resume] unexpected keys: {len(unexpected)} (ignored)")
             start_epoch = int(ckpt.get("epoch", 0))
             resume_optimizer_state = ckpt.get("optimizer_state_dict", None)
         vprint(f"  -> resumed at epoch {start_epoch}")
@@ -3750,6 +5030,7 @@ def main() -> None:
             reward_fn=reward_fn, eval_k=ek,
             no_eos=args.ranking_mode, tau=tau,
             disc_vis_samples=args.disc_vis_samples if args.fast_reward else 0,
+            eos_cov_threshold=args.eval_eos_cov_threshold,
         )
         covs_g = [x["coverage_greedy"] for x in per if x.get("coverage_greedy") is not None]
         gr_g   = [x["guard_ratio_greedy"] for x in per]
@@ -3897,6 +5178,15 @@ def main() -> None:
             ft_rl_ls_budget=args.ft_rl_ls_budget,
             ft_eos_weight=args.ft_eos_weight,
             ft_sample_temp=args.ft_sample_temp,
+            ft_dagger_remove_only=args.ft_dagger_remove_only,
+            ft_dagger_eos_weight=args.ft_dagger_eos_weight,
+            ft_dagger_redir_weight=args.ft_dagger_redir_weight,
+            ft_dagger_cov_weight_beta=args.ft_dagger_cov_weight_beta,
+            ft_dagger_aux_marg_cov_weight=args.ft_dagger_aux_marg_cov_weight,
+            ft_lexpo_cov_floor_delta=args.ft_lexpo_cov_floor_delta,
+            ft_step_sup_min_cov=args.ft_step_sup_min_cov,
+            ft_step_sup_eos_weight=args.ft_step_sup_eos_weight,
+            ft_step_sup_retain_skipped_weight=args.ft_step_sup_retain_skipped_weight,
         )
 
     # -- save final --
@@ -3926,6 +5216,7 @@ def main() -> None:
         ls_swap=not args.ls_no_swap,
         no_eos=args.ranking_mode,
         tau=tau,
+        eos_cov_threshold=args.eval_eos_cov_threshold,
     )
     report = make_report(
         method="po_agp",
