@@ -35,7 +35,7 @@ except ImportError:
     pass
 
 from dataset import collate_fn
-from edit_head import EditHead, compute_vertex_features
+from edit_head import EditHead, compute_vertex_features, compute_vertex_features_geo_free
 from po_agp import (
     create_agp_model,
     prepare_datasets,
@@ -80,15 +80,27 @@ def parse_args() -> argparse.Namespace:
                    default=True)
     p.add_argument("--no-ls-reference", dest="include_ls_reference",
                    action="store_false")
-    p.add_argument("--out", type=str, default="results/eval_editor.json")
+    p.add_argument("--out", "--output-json", dest="out",
+                   type=str, default="results/eval_editor.json")
     p.add_argument("--disc-vis-cache-path", type=str,
                    default="data/disc_vis_cache.pkl")
     p.add_argument("--cov-gate", type=float, default=None,
-                   help="If set, refuse any edit that would drop disc_vis "
-                        "coverage below this threshold. E.g. --cov-gate 0.97 "
-                        "guards against the editor's tail-risk damaging the "
-                        "seed. Computed from the cached vis_matrix per step "
-                        "(~1ms overhead).")
+                   help="Absolute coverage floor. Refuse any edit that would "
+                        "drop disc_vis coverage below this value.")
+    p.add_argument("--cov-gate-relative", type=float, default=None,
+                   metavar="EPS",
+                   help="Adaptive (per-polygon) coverage floor. Refuse any "
+                        "edit that would drop disc_vis coverage below "
+                        "(seed_cov - EPS). E.g. --cov-gate-relative 0.005 "
+                        "means each polygon's floor is its own seed coverage "
+                        "minus 0.5 pp. Takes priority over --cov-gate.")
+    p.add_argument("--geo-free-features", action="store_true", default=False,
+                   help="Use only (x, y, in_S) as editor input — no disc_vis oracle "
+                        "at inference time. Auto-detected from checkpoint saved args. "
+                        "Disables coverage gate.")
+    p.add_argument("--topology-features", action="store_true", default=False,
+                   help="Geo-free + polygon topology (D_in=8). Auto-detected from "
+                        "checkpoint.")
     defaults = {a.dest: a.default for a in p._actions if a.dest != "help"}
     explicit = _get_explicit_args(p, sys.argv[1:])
     args = p.parse_args()
@@ -144,7 +156,23 @@ def load_editor(args, device):
     H = saved_args.get("editor_hidden", 64)
     L = saved_args.get("editor_attn_layers", 1)
     HD = saved_args.get("editor_heads", 4)
-    editor = EditHead(hidden=H, n_attn_layers=L, heads=HD).to(device)
+    # Auto-detect geo-free / topology / aux mode from checkpoint unless
+    # already set by CLI.
+    if not args.geo_free_features and saved_args.get("geo_free_features", False):
+        print("  [editor] auto-detected geo_free_features=True from checkpoint")
+        args.geo_free_features = True
+    saved_topology = saved_args.get("topology_features", False)
+    if saved_topology and not getattr(args, "topology_features", False):
+        print("  [editor] auto-detected topology_features=True from checkpoint")
+        args.topology_features = True
+    saved_aux = saved_args.get("aux_visibility", False)
+    # Determine d_in from saved flags.
+    if args.geo_free_features:
+        d_in = 8 if getattr(args, "topology_features", False) else 3
+    else:
+        d_in = None
+    editor = EditHead(hidden=H, n_attn_layers=L, heads=HD, d_in=d_in,
+                      aux_visibility=saved_aux).to(device)
     editor.load_state_dict(ckpt["model_state_dict"])
     editor.eval()
     return editor
@@ -163,17 +191,24 @@ def _disc_cov(vis: np.ndarray, S: list[int]) -> float:
 
 
 def editor_rollout(editor, pts, vis, seed, n, *, max_steps, stop_threshold,
-                   device, cov_gate: float | None = None):
-    """Apply editor greedily until STOP or step cap. Returns final S.
+                   device, cov_gate: float | None = None,
+                   geo_free: bool = False, topology: bool = False):
+    """Apply editor greedily until STOP or step cap.
 
-    If cov_gate is set, any candidate edit that would drop disc_vis
-    coverage below the gate is rejected and the rollout terminates."""
+    geo_free=True: uses only (x,y,in_S) features; cov_gate is ignored.
+    topology=True: only meaningful with geo_free; adds polygon-topology
+    features (D_in=8 instead of 3)."""
     S = list(seed)
     n_steps = 0
     stopped = False
     n_rejected = 0
     for _ in range(max_steps):
-        vf = compute_vertex_features(pts, S, vis, device=device)
+        if geo_free:
+            vf = compute_vertex_features_geo_free(
+                pts, S, device=device, topology=topology,
+            )
+        else:
+            vf = compute_vertex_features(pts, S, vis, device=device)
         pred = editor.predict(vf.feats, vf.in_S, stop_threshold=stop_threshold)
         kind = pred["kind"][0]
         if kind == "stop":
@@ -194,7 +229,7 @@ def editor_rollout(editor, pts, vis, seed, n, *, max_steps, stop_threshold,
                 cand.append(ad)
         else:
             break
-        if cov_gate is not None:
+        if cov_gate is not None and not geo_free:
             cand_cov = _disc_cov(vis, cand)
             if cand_cov < cov_gate:
                 n_rejected += 1
@@ -223,15 +258,29 @@ def main() -> None:
         val_ds.samples = val_ds.samples[: args.n_samples]
     print(f"[eval] {len(val_ds)} polygons, include_ls={args.include_ls_reference}")
 
-    cache_path = args.disc_vis_cache_path
-    if cache_path and not os.path.isabs(cache_path):
-        cache_path = os.path.join(REPO_ROOT, cache_path)
-    if cache_path and os.path.exists(cache_path):
-        load_disc_vis_cache(cache_path)
-
     pointer = load_pointer(args, device)
+    # load_editor may set args.geo_free_features=True via auto-detect.
     editor = load_editor(args, device)
-    print(f"[eval] editor params = {editor.num_params():,}")
+    geo_free = args.geo_free_features
+
+    if geo_free:
+        print("[eval] geo-free inference: features=(x,y,in_S) — no disc_vis oracle")
+        if args.cov_gate is not None or args.cov_gate_relative is not None:
+            print("[eval] WARNING: coverage gate ignored in geo-free mode")
+    else:
+        print(f"[eval] stop_threshold={args.stop_threshold}  "
+              f"cov_gate={'relative(' + str(args.cov_gate_relative) + ')' if args.cov_gate_relative is not None else (str(args.cov_gate) if args.cov_gate is not None else 'none')}")
+
+    # Load disc_vis cache only when needed (LS reference or oracle-mode features/gate).
+    if not geo_free or args.include_ls_reference:
+        cache_path = args.disc_vis_cache_path
+        if cache_path and not os.path.isabs(cache_path):
+            cache_path = os.path.join(REPO_ROOT, cache_path)
+        if cache_path and os.path.exists(cache_path):
+            load_disc_vis_cache(cache_path)
+
+    print(f"[eval] editor params = {editor.num_params():,}  "
+          f"features={'geo_free+topology(8)' if (geo_free and getattr(args, 'topology_features', False)) else ('geo_free(3)' if geo_free else 'oracle(6)')}")
 
     loader = DataLoader(val_ds, batch_size=1, shuffle=False,
                         collate_fn=collate_fn, num_workers=0)
@@ -247,10 +296,12 @@ def main() -> None:
             n = int(lengths[0])
             name = names[0]
             pts = batch_data[0, :n].detach().cpu().numpy()
-            disc = get_or_build_disc_vis(pts, name, n_samples=args.disc_vis_samples)
-            if not disc.get("valid"):
-                continue
-            vis = disc["vis_matrix"]
+            vis = None
+            if not geo_free or args.include_ls_reference:
+                disc = get_or_build_disc_vis(pts, name, n_samples=args.disc_vis_samples)
+                if not disc.get("valid"):
+                    continue
+                vis = disc["vis_matrix"]
 
             # Pointer (seed).
             t0 = time.perf_counter()
@@ -265,14 +316,22 @@ def main() -> None:
                                    lam=args.lam, tau=args.tau,
                                    tau_penalty=args.tau_penalty)
 
-            # Editor.
+            # Coverage gate only applies in oracle mode (uses disc_vis).
+            eff_cov_gate = None
+            if not geo_free:
+                if args.cov_gate_relative is not None:
+                    eff_cov_gate = max(0.0, seed_cov - args.cov_gate_relative)
+                else:
+                    eff_cov_gate = args.cov_gate
             t0 = time.perf_counter()
             ed_S, ed_steps, ed_stopped, ed_rejected = editor_rollout(
                 editor, pts, vis, seed, n,
                 max_steps=args.rollout_max_steps,
                 stop_threshold=args.stop_threshold,
                 device=device,
-                cov_gate=args.cov_gate,
+                cov_gate=eff_cov_gate,
+                geo_free=geo_free,
+                topology=getattr(args, "topology_features", False),
             )
             t_editor = time.perf_counter() - t0
             ed_cov = coverage_exact(pts, ed_S, name)
@@ -363,6 +422,12 @@ def main() -> None:
         "n_polygons": len(records),
         "pointer_checkpoint": args.pointer_checkpoint,
         "editor_checkpoint": args.editor_checkpoint,
+        "stop_threshold": args.stop_threshold,
+        "cov_gate_mode": (
+            f"relative({args.cov_gate_relative})" if args.cov_gate_relative is not None
+            else (f"absolute({args.cov_gate})" if args.cov_gate is not None else "none")
+        ),
+        "ed_rejected_total": int(sum(r["ed_rejected"] for r in records)),
         "seed_cov_mean": float(seed_cov.mean()),
         "seed_size_mean": float(seed_size.mean()),
         "seed_chv_mean": seed_chv,
@@ -457,6 +522,8 @@ def main() -> None:
               f"LS steps mean={summary['ls_steps_mean']:.1f}")
         print(f"    speedup editor vs LS = {summary['speedup_editor_vs_ls']:.2f}x "
               f"(>1 = editor faster; at batch=1 NN overhead dominates)")
+    print(f"  cov_gate  {summary['cov_gate_mode']}")
+    print(f"  rejected  {summary['ed_rejected_total']} edits blocked by coverage gate")
     print(f"  wall  {summary['wall_s']:.1f}s")
 
     out_path = args.out

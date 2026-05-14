@@ -50,7 +50,9 @@ Promote a configuration only if all are true:
 If criteria are not met:
 - run an A/B test with `ranking_mode = false` to verify whether ranking reward is the limiting factor.
 
-## Tier 5 — Architecture Upgrade (Transformer Encoder)
+## Tier 5 — Architecture Upgrade (Transformer Encoder)  *— tried and reverted (Mar 2026)*
+
+> **Status:** Implemented in commit `62002b2` (5 Mar 2026), removed in commit `99dc2bd` (12 Mar 2026). The `configs/po_agp_transformer.json` referenced below was never checked in. The pivot away from this direction toward the learned-editor approach is documented in "Current Direction: Learned Editor" at the end of this file.
 
 Motivation: The paper tests PO exclusively on Transformer-based architectures (AM, POMO,
 Sym-NCO, Pointerformer). Our current LSTM Pointer Network (330K params, 1 layer, 1 glimpse)
@@ -147,3 +149,112 @@ POMO+PO+FT: 0.07% → **0.03% gap** on TSP-100.
   - `python tools/run_po_tier1_sweep.py`
 - Generate and run Tier 1 sweep sequentially:
   - `python tools/run_po_tier1_sweep.py --run`
+
+---
+
+## Current Direction: Learned Editor (active)
+
+The PO fine-tuning approaches in Tiers 2–4 consistently failed to absorb LS into the policy
+(every variant slid along the same size/coverage trade-off curve). Quantitative scoping
+attributed the failure to a structural set-vs-sequence mismatch: the autoregressive
+LSTM hidden state cannot represent set-symmetric pruning decisions cleanly. Tier 5's
+Transformer-encoder pivot (5 Mar 2026) was tried and reverted (12 Mar 2026).
+
+Pivot: rather than re-architecting the policy, **add a small set-equivariant editor module
+on top of the frozen `lstm_bt` pointer**. Pointer produces a seed; editor refines it via
+short sequences of REMOVE / SWAP / STOP decisions imitating LS.
+
+### Phase 1 — Oracle editor (DONE)
+
+Editor reads 6-dim per-vertex features at inference: `(x, y, in_S, vis_frac, marg_cov,
+redundancy)`. The last three come from the `disc_vis` matrix per state — i.e. a geometric
+oracle is queried each edit step.
+
+Files: `edit_head.py`, `train_editor.py`, `eval_editor.py`, `tools/build_ls_trajectories.py`.
+
+**Results on full validation (1224 polygons), frozen `lstm_bt` pointer:**
+
+|                                  | cov   | \|S\|/n | \|S\|/OPT | recovery median |
+|---                               |---    |---      |---        |---              |
+| pointer alone                    | 0.970 | 0.214   | 1.36      | (seed)          |
+| pointer + LS (target)            | 0.970 | 0.158   | 0.92      | 1.0 (gold)      |
+| pointer + editor (oracle, no DAgger) | 0.972 | 0.187   | 1.05  | **0.881**       |
+| pointer + editor (oracle, DAgger ep-21) | 0.940 | 0.166 | 0.92 | **0.955**     |
+
+Headline: editor recovers **88 % of LS reward gain on a typical polygon, beats LS on 25 %**.
+With DAgger it climbs to **95 %**, at the cost of dropping cov below baseline on the tail.
+
+### Phase 2 — Geo-free pilot (DONE — under-powered negative)
+
+Editor reads only `(x, y, in_S)` at inference — no geometric oracle. `disc_vis` is still
+allowed during training (LS labels, DAgger queries, coverage gate) but never read at
+deployment.
+
+Pilot run (`configs/editor_train_dagger_geo_free.json`, 80 k params, 1 attention layer):
+
+- recovery_median **0.000** at 5 epochs.
+- `remove_top1 = 0.06`, `swap_in_top1 = 0.007` (essentially random).
+- `gate_stopped = 0.9` — coverage gate did 90 % of the halting; editor itself was blind.
+
+This is a *fair pilot* of the simplest geo-free setup, **not** a fair test of the
+hypothesis "visibility can be learned implicitly from LS action labels." The pilot was
+underpowered along three axes simultaneously: too few parameters for 2D geometric
+reasoning, no polygon topology in the input, no signal pushing latents toward encoding
+visibility.
+
+### Phase 3 — Scaled geo-free editor (ACTIVE)
+
+Goal: actually test the implicit-visibility hypothesis. **Three additive upgrades**, all
+keeping the pointer frozen:
+
+1. **Bigger editor.** `hidden = 128`, `n_attn_layers = 3`, `heads = 8`. About 500 k – 1 M
+   parameters. Enough capacity for multi-hop reasoning over polygon vertices.
+2. **Polygon topology as input.** Add per-vertex features that describe the polygon's
+   shape (not its visibility):
+   - `pos_norm = v / n` — cyclic position in the boundary.
+   - `(dx_prev, dy_prev)`, `(dx_next, dy_next)` — vectors to adjacent boundary vertices.
+   New `D_in = 8`. Critically, none of these require `disc_vis`; they are derivable from
+   the polygon's `(x, y)` list plus its cyclic order, which is part of the input by
+   definition.
+3. **Auxiliary visibility-prediction loss (training-only).** Add a small head on the
+   editor's per-vertex latents that predicts `(vis_frac, marg_cov, redundancy)`. The
+   targets come from `disc_vis` during training. Multi-task loss:
+   `L = w_action·L_action + w_stop·L_stop + w_aux·MSE(latent_proj, vis_targets)`.
+   At inference, the auxiliary head is unused — but the latents it shaped during
+   training are still queried by the action head. This is the operationalisation of
+   "encode visibility in latent space."
+
+**Files to modify (all additive):**
+- `edit_head.py` — extended `compute_vertex_features_geo_free` (D_in=8), `EditHead`
+  gains `aux_visibility` flag + `aux_head` module, `edit_loss` gains `aux_target` arg.
+- `train_editor.py` — compute aux targets per batch (uses `disc_vis`, allowed during
+  training), pass through `edit_loss`. New CLI flags: `--aux-visibility`,
+  `--aux-weight`, plus `--editor-hidden 128 --editor-attn-layers 3 --editor-heads 8`
+  for the model scale-up.
+- `eval_editor.py` — no behaviour change at inference (aux head is dropped by `predict`);
+  feature dim derives from saved checkpoint args.
+- `configs/editor_train_dagger_geo_free_v2.json` — new config.
+
+**Decision criterion:**
+
+| recovery_median on full val | verdict |
+|---|---|
+| ≥ 0.75 | **success** — paper claim holds: visibility learned implicitly, no geometric oracle at inference |
+| 0.40 – 0.75 | partial — useful as an ablation; the oracle editor remains the main contribution |
+| < 0.40 | strong negative — implicit visibility learning at this data scale is intractable; pivot to "one-time static visibility features at deployment" |
+
+### Phase 4 — Eval + ablation (NEXT)
+
+Two side-by-side full-val runs to produce the paper table:
+- pointer + editor (oracle, 6-dim) — existing best
+- pointer + editor (geo-free v2, 8-dim + aux loss) — Phase 3 output
+
+### Verification
+
+1. `ast.parse` on `edit_head.py`, `train_editor.py`, `eval_editor.py`.
+2. Smoke train (50 polygons, 1 epoch) confirms the upgraded model initialises and
+   forward/backward pass on the new feature dim.
+3. Smoke eval with `--no-ls-reference` confirms `[disc_vis]` is not loaded at inference
+   for the geo-free-v2 checkpoint.
+4. Full training run logs auxiliary loss separately; rollout banner reports
+   `recovery_med` per epoch.

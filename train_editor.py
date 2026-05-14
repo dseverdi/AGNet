@@ -46,7 +46,13 @@ try:
 except ImportError:
     pass
 
-from edit_head import EditHead, compute_vertex_features, edit_loss
+from edit_head import (
+    EditHead,
+    compute_vertex_features,
+    compute_vertex_features_geo_free,
+    compute_visibility_targets,
+    edit_loss,
+)
 from utils import (
     get_or_build_disc_vis, evaluate_polygon_visibility_numpy_wo_gt,
     save_disc_vis_cache, load_disc_vis_cache,
@@ -131,6 +137,34 @@ def parse_args() -> argparse.Namespace:
                         "(default). Use --no-dagger-accumulate to replace.")
     p.add_argument("--no-dagger-accumulate", dest="dagger_accumulate",
                    action="store_false")
+    # Inference-time coverage gate (applied in DAgger rollouts and E2E eval).
+    p.add_argument("--cov-gate", type=float, default=None,
+                   help="Absolute coverage floor: refuse any editor edit that "
+                        "would drop disc_vis coverage below this value.")
+    p.add_argument("--cov-gate-relative", type=float, default=None,
+                   metavar="EPS",
+                   help="Per-polygon coverage floor = seed_cov - EPS. Takes "
+                        "priority over --cov-gate. E.g. 0.005 means each "
+                        "polygon's floor is its own seed coverage minus 0.5 pp. "
+                        "Applied in both DAgger rollouts and E2E eval rollouts.")
+    # Geometry-free feature mode.
+    p.add_argument("--geo-free-features", action="store_true", default=False,
+                   help="Use only (x, y, in_S) as editor input features (D_in=3). "
+                        "No disc_vis oracle at training or inference time. The "
+                        "editor must implicitly learn coverage from geometry.")
+    p.add_argument("--topology-features", action="store_true", default=False,
+                   help="Add polygon topology to geo-free features (D_in=8): "
+                        "cyclic position + vectors to previous and next boundary "
+                        "neighbours. Gives the model polygon shape without giving "
+                        "it visibility. Only meaningful with --geo-free-features.")
+    p.add_argument("--aux-visibility", action="store_true", default=False,
+                   help="Add an auxiliary head that predicts (vis_frac, marg_cov, "
+                        "redundancy) from the editor's latents during training. "
+                        "Targets come from disc_vis (allowed during training). The "
+                        "head is discarded at inference but the latents it shaped "
+                        "remain. Use to push visibility into latent space.")
+    p.add_argument("--aux-weight", type=float, default=0.5,
+                   help="Weight on the auxiliary visibility MSE loss.")
 
     # Capture defaults for config-merge.
     defaults = {a.dest: a.default for a in p._actions if a.dest != "help"}
@@ -146,6 +180,28 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit(
             "error: --train-traj is required (set via CLI or config file)")
     return args
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Coverage gate helper (mirrors eval_editor.py)
+# ──────────────────────────────────────────────────────────────────────
+def _disc_cov(vis: np.ndarray, S: list[int]) -> float:
+    """Cheap disc_vis-based coverage for a guard set S."""
+    if not S:
+        return 0.0
+    M = vis.shape[1]
+    covered = np.zeros(M, dtype=np.bool_)
+    for v in S:
+        if 0 <= v < vis.shape[0]:
+            np.bitwise_or(covered, vis[v], out=covered)
+    return float(covered.sum()) / max(1, M)
+
+
+def _eff_cov_gate(args, seed_cov: float) -> float | None:
+    """Return the coverage floor for one polygon given CLI gate args."""
+    if getattr(args, "cov_gate_relative", None) is not None:
+        return max(0.0, seed_cov - args.cov_gate_relative)
+    return getattr(args, "cov_gate", None)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -213,25 +269,50 @@ class TrajectoryStateDataset:
 #  Batched feature stacking (same polygon size n)
 # ──────────────────────────────────────────────────────────────────────
 def make_batch(ds: TrajectoryStateDataset, indices: list[int],
-               device: torch.device):
-    """All examples in `indices` must share polygon size n."""
+               device: torch.device, geo_free: bool = False,
+               topology: bool = False, aux_visibility: bool = False):
+    """All examples in `indices` must share polygon size n.
+
+    If geo_free=True with topology=True, build the 8-dim geo-free + topology
+    features. If aux_visibility=True (training only), also build the
+    visibility-target tensor from disc_vis for the auxiliary loss.
+    """
     feats_list = []
     in_S_list = []
     rm_idx_list = []
     ad_idx_list = []
     kinds = []
+    aux_target_list = []
 
     for ex in indices:
         rec, step = ds.fetch(ex)
         pts = rec["points"]                       # (n, 2)
         n = rec["n"]
-        # Pull the cached disc_vis (already populated during data gen).
-        disc = get_or_build_disc_vis(pts, rec["name"],
-                                     n_samples=ds.disc_vis_samples)
-        if not disc.get("valid"):
-            continue
-        vis = disc["vis_matrix"]
-        vf = compute_vertex_features(pts, step["state"], vis, device=device)
+
+        # Determine if we need disc_vis for this row.
+        need_disc_vis = (not geo_free) or aux_visibility
+        vis = None
+        if need_disc_vis:
+            disc = get_or_build_disc_vis(pts, rec["name"],
+                                         n_samples=ds.disc_vis_samples)
+            if not disc.get("valid"):
+                continue
+            vis = disc["vis_matrix"]
+
+        # Build input features.
+        if geo_free:
+            vf = compute_vertex_features_geo_free(pts, step["state"],
+                                                  device=device,
+                                                  topology=topology)
+        else:
+            vf = compute_vertex_features(pts, step["state"], vis, device=device)
+
+        # Auxiliary visibility target (training only).
+        if aux_visibility:
+            aux_t = compute_visibility_targets(pts, step["state"], vis,
+                                               device=device)
+            aux_target_list.append(aux_t)
+
         feats_list.append(vf.feats)
         in_S_list.append(vf.in_S)
         kinds.append(step["kind"])
@@ -248,6 +329,8 @@ def make_batch(ds: TrajectoryStateDataset, indices: list[int],
         "remove_idx": torch.tensor(rm_idx_list, dtype=torch.long, device=device),
         "add_idx":    torch.tensor(ad_idx_list, dtype=torch.long, device=device),
     }
+    if aux_target_list:
+        target["aux"] = torch.stack(aux_target_list, dim=0)   # (B, n, 3)
     return feats, in_S, target
 
 
@@ -350,6 +433,7 @@ def dagger_refresh(editor: "EditHead",
             vis = disc["vis_matrix"]
 
             S = list(rec["seed"])
+            gate = _eff_cov_gate(args, _disc_cov(vis, S))
             for _ in range(args.rollout_max_steps):
                 # LS teacher: best action at the current state.
                 _, _, mini = ls_best_improvement_trajectory(
@@ -372,7 +456,13 @@ def dagger_refresh(editor: "EditHead",
                 n_edit += 1
 
                 # Editor decides where to go next (drives distribution).
-                vf = compute_vertex_features(pts, S, vis, device=device)
+                if getattr(args, 'geo_free_features', False):
+                    vf = compute_vertex_features_geo_free(
+                        pts, S, device=device,
+                        topology=getattr(args, 'topology_features', False),
+                    )
+                else:
+                    vf = compute_vertex_features(pts, S, vis, device=device)
                 pred = editor.predict(
                     vf.feats, vf.in_S,
                     stop_threshold=args.rollout_stop_threshold,
@@ -382,16 +472,23 @@ def dagger_refresh(editor: "EditHead",
                     break
                 rm = pred["remove_idx"][0].item()
                 ad = pred["add_idx"][0].item()
+                # Build candidate set tentatively.
                 if ed_kind == "remove":
-                    if rm in S:
-                        S.remove(rm)
+                    if rm not in S:
+                        break
+                    cand = [v for v in S if v != rm]
                 elif ed_kind == "swap":
-                    if rm in S:
-                        S.remove(rm)
-                    if 0 <= ad < n and ad not in S:
-                        S.append(ad)
+                    if rm not in S:
+                        break
+                    cand = [v for v in S if v != rm]
+                    if 0 <= ad < n and ad not in cand:
+                        cand.append(ad)
                 else:
                     break
+                # Coverage gate: halt if this edit would drop below floor.
+                if gate is not None and _disc_cov(vis, cand) < gate:
+                    break
+                S = cand
             if k % 200 == 0:
                 rate = k / max(1e-6, time.perf_counter() - t0)
                 print(f"  [dagger] {k}/{n_polys}  rate={rate:.1f}/s  "
@@ -521,6 +618,7 @@ def end_to_end_rollout(
     seed_sizes, ed_sizes, full_sizes = [], [], []
     ns, opt_sizes = [], []
     stop_action_share = []
+    gate_stopped_share = []
     n_done = 0
 
     with torch.no_grad():
@@ -541,9 +639,17 @@ def end_to_end_rollout(
             r_full = _r(full_cov, len(ls_sol), n)
 
             S = list(seed)
+            gate = _eff_cov_gate(args, seed_cov)
             stops_seen = 0
+            gate_stopped = 0
             for _ in range(args.rollout_max_steps):
-                vf = compute_vertex_features(pts, S, vis, device=device)
+                if getattr(args, 'geo_free_features', False):
+                    vf = compute_vertex_features_geo_free(
+                        pts, S, device=device,
+                        topology=getattr(args, 'topology_features', False),
+                    )
+                else:
+                    vf = compute_vertex_features(pts, S, vis, device=device)
                 pred = editor.predict(vf.feats, vf.in_S,
                                       stop_threshold=args.rollout_stop_threshold)
                 kind = pred["kind"][0]
@@ -552,16 +658,24 @@ def end_to_end_rollout(
                     break
                 rm = pred["remove_idx"][0].item()
                 ad = pred["add_idx"][0].item()
+                # Build candidate set tentatively.
                 if kind == "remove":
-                    if rm in S:
-                        S.remove(rm)
+                    if rm not in S:
+                        break
+                    cand = [v for v in S if v != rm]
                 elif kind == "swap":
-                    if rm in S:
-                        S.remove(rm)
-                    if ad >= 0 and ad < n and ad not in S:
-                        S.append(ad)
+                    if rm not in S:
+                        break
+                    cand = [v for v in S if v != rm]
+                    if 0 <= ad < n and ad not in cand:
+                        cand.append(ad)
                 else:
                     break
+                # Coverage gate: halt if this edit would drop below floor.
+                if gate is not None and _disc_cov(vis, cand) < gate:
+                    gate_stopped = 1
+                    break
+                S = cand
             stop_action_share.append(stops_seen)
             try:
                 ed_cov = float(evaluate_polygon_visibility_numpy_wo_gt(
@@ -572,6 +686,7 @@ def end_to_end_rollout(
 
             d_full = r_full - r_seed
             d_ed   = r_ed   - r_seed
+            gate_stopped_share.append(gate_stopped)
             if d_full > 1e-6:
                 recoveries.append(d_ed / d_full)
             seed_covs.append(seed_cov)
@@ -619,6 +734,7 @@ def end_to_end_rollout(
         "ed_size_mean":    float(np.mean(ed_sizes))   if ed_sizes   else 0.0,
         "full_size_mean":  float(np.mean(full_sizes)) if full_sizes else 0.0,
         "stop_share":      float(np.mean(stop_action_share)) if stop_action_share else 0.0,
+        "gate_stopped_share": float(np.mean(gate_stopped_share)) if gate_stopped_share else 0.0,
     }
 
 
@@ -645,22 +761,26 @@ def main() -> None:
         if args.val_traj else None
     )
 
-    # Disc_vis cache: load any persisted entries, then warm up any
-    # missing polygons up front so the first batch isn't doing silent
-    # work that looks like a hang.
+    # Disc_vis cache: only needed when not in geo-free mode.
+    # In geo-free mode disc_vis is still used for the coverage gate and
+    # DAgger LS oracle — but NOT for feature computation.
     cache_path = args.disc_vis_cache_path
     if cache_path and not os.path.isabs(cache_path):
         cache_path = os.path.join(REPO_ROOT, cache_path)
     if cache_path and os.path.exists(cache_path):
         load_disc_vis_cache(cache_path)
-    print("[editor] pre-warming disc_vis cache (one-time after fresh process)...")
-    prewarm_disc_vis_for_records(
-        train_data.records, args.disc_vis_samples, label="train",
-    )
-    if val_data is not None:
+    if not args.geo_free_features:
+        print("[editor] pre-warming disc_vis cache (one-time after fresh process)...")
         prewarm_disc_vis_for_records(
-            val_data.records, args.disc_vis_samples, label="dev",
+            train_data.records, args.disc_vis_samples, label="train",
         )
+        if val_data is not None:
+            prewarm_disc_vis_for_records(
+                val_data.records, args.disc_vis_samples, label="dev",
+            )
+    else:
+        print("[editor] geo-free mode: skipping disc_vis prewarm for features "
+              "(still used for LS oracle in DAgger)")
     if cache_path:
         try:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -683,10 +803,19 @@ def main() -> None:
         print(f"[editor] STOP pos_weight (manual) = {stop_pw:.2f}")
 
     # Editor + pointer (frozen).
+    if args.geo_free_features:
+        d_in = 8 if args.topology_features else 3
+        feat_label = f"geo_free+topology({d_in})" if args.topology_features else f"geo_free({d_in})"
+    else:
+        d_in = None  # EditHead uses default (6)
+        feat_label = "oracle(6)"
     editor = EditHead(hidden=args.editor_hidden,
                       n_attn_layers=args.editor_attn_layers,
-                      heads=args.editor_heads).to(device)
-    print(f"[editor] params = {editor.num_params():,}")
+                      heads=args.editor_heads,
+                      d_in=d_in,
+                      aux_visibility=args.aux_visibility).to(device)
+    print(f"[editor] params = {editor.num_params():,}  features={feat_label}"
+          + (f"  +aux_visibility(w={args.aux_weight})" if args.aux_visibility else ""))
     optimizer = torch.optim.AdamW(editor.parameters(), lr=args.lr,
                                   weight_decay=1e-4)
 
@@ -742,11 +871,15 @@ def main() -> None:
         L_sum = 0.0
         L_stop_sum = 0.0
         L_action_sum = 0.0
+        L_aux_sum = 0.0
         per_kind = defaultdict(int)
 
         for batch_indices in epoch_batches(train_data, args.batch_size,
                                            shuffle=True):
-            batch = make_batch(train_data, batch_indices, device)
+            batch = make_batch(train_data, batch_indices, device,
+                               geo_free=args.geo_free_features,
+                               topology=args.topology_features,
+                               aux_visibility=args.aux_visibility)
             if batch is None:
                 continue
             feats, in_S, target = batch
@@ -754,7 +887,9 @@ def main() -> None:
             out = editor(feats, in_S)
             loss_d = edit_loss(out, target,
                                w_stop=args.w_stop, w_action=args.w_action,
-                               stop_pos_weight=stop_pw)
+                               stop_pos_weight=stop_pw,
+                               aux_target=target.get("aux"),
+                               w_aux=args.aux_weight)
             optimizer.zero_grad(set_to_none=True)
             loss_d["loss"].backward()
             torch.nn.utils.clip_grad_norm_(editor.parameters(), 1.0)
@@ -764,6 +899,8 @@ def main() -> None:
             L_sum += loss_d["loss"].item() * B
             L_stop_sum += loss_d["L_stop"].item() * B
             L_action_sum += loss_d["L_action"].item() * B
+            if "L_aux" in loss_d:
+                L_aux_sum += loss_d["L_aux"].item() * B
             n_examples += B
             for k in target["kind"]:
                 per_kind[k] += 1
@@ -771,6 +908,7 @@ def main() -> None:
         train_loss = L_sum / max(1, n_examples)
         train_stop = L_stop_sum / max(1, n_examples)
         train_action = L_action_sum / max(1, n_examples)
+        train_aux = L_aux_sum / max(1, n_examples) if L_aux_sum > 0 else None
         epoch_time = time.perf_counter() - t0
 
         log = {
@@ -778,12 +916,14 @@ def main() -> None:
             "train_loss": train_loss,
             "train_loss_stop": train_stop,
             "train_loss_action": train_action,
+            "train_loss_aux": train_aux,
             "n_examples": n_examples,
             "kind_counts": dict(per_kind),
             "epoch_time_s": epoch_time,
         }
+        aux_part = f" aux={train_aux:.4f}" if train_aux is not None else ""
         msg = (f"[ep {epoch:3d}] L={train_loss:.4f} "
-               f"(stop={train_stop:.4f} act={train_action:.4f}) "
+               f"(stop={train_stop:.4f} act={train_action:.4f}{aux_part}) "
                f"n={n_examples}  {epoch_time:.1f}s")
         print(msg)
 
@@ -808,7 +948,10 @@ def main() -> None:
                 for n, ids in ds_buckets.items():
                     for i in range(0, len(ids), args.batch_size):
                         chunk = ids[i: i + args.batch_size]
-                        b = make_batch(val_data, chunk, device)
+                        b = make_batch(val_data, chunk, device,
+                                       geo_free=args.geo_free_features,
+                                       topology=args.topology_features,
+                                       aux_visibility=False)
                         if b is None:
                             continue
                         feats, in_S, target = b
@@ -866,7 +1009,8 @@ def main() -> None:
                   f"P[>=1.0]={roll['frac_recovery_ge_1.0']:.3f}  "
                   f"[reward gain ed vs LS, fraction matching/beating LS]")
             print(f"             editor: stop_share={roll['stop_share']:.2f}  "
-                  f"[fraction of rollouts where STOP head fired vs hit step cap]")
+                  f"gate_stopped={roll['gate_stopped_share']:.2f}  "
+                  f"[STOP head / coverage gate / step cap]")
             metric = roll["recovery_median"]
             if metric > best_recovery:
                 best_recovery = metric
