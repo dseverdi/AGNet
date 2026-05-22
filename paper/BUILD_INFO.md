@@ -48,10 +48,20 @@ latexmk -pdf paper.tex
 ### Full rebuild (if JSON results or data changed):
 ```bash
 cd ../
-python paper/scripts/build_tables.py  # regenerate tables
+source .venv/bin/activate            # matplotlib lives here
+python paper/scripts/build_tables.py   # regenerate tables
+python paper/scripts/build_figures.py  # regenerate figures
 cd paper/
 latexmk -pdf paper.tex
 ```
+
+### Figure generation
+`paper/scripts/build_figures.py` produces three PDFs into `paper/gfx/setpred/` from the same `paper/data/*.json` files used by `build_tables.py`:
+- `fig_coverage_cdf.pdf` — per-polygon coverage CDF, in-dist + OOD
+- `fig_pareto.pdf` — coverage vs $|S|/\OPT$ Pareto curve, in-dist + OOD
+- `fig_kinvariance.pdf` — mean coverage vs $K$ for several thresholds
+
+Requires `matplotlib` (install via `pip install matplotlib` inside `.venv`).
 
 ### Clean and rebuild:
 ```bash

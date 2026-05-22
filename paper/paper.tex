@@ -25,7 +25,7 @@
 \maketitle
 
 \begin{abstract}
-We study neural combinatorial optimization (NCO) for the vertex-guard Art Gallery Problem (AGP), an NP-hard geometric set-cover variant in which guards must be chosen from the vertices of a simple polygon so that their union of visibility regions covers the polygon. A standard LSTM pointer network trained with preference optimization (PO) on Bradley--Terry pairs produces a solver that is fast and often near-optimal in guard count, but exhibits a long left tail in coverage: a non-negligible fraction of polygons are left with uncovered area, and the failure rate grows sharply on out-of-distribution polygons. We diagnose three pathologies of \emph{iterative} neural editors that try to patch the pointer policy --- compounding errors, $\EOS$/action coupling, and a train--inference distribution gap --- and propose a single-shot alternative. The proposed \emph{SetPredictor} reads the frozen pointer encoder's per-vertex embeddings and emits, in one forward pass, an independent inclusion probability per vertex. A scalar threshold $t$ then converts probabilities into a guard set without any geometric input at inference time --- only the polygon vertices and the pretrained pointer encoder are required (``geo-free'' inference). On a held-out partition of 367 in-distribution polygons, lowering $t$ from $0.30$ down to $0.20$ moves the operating point along a Pareto curve: at $t{=}0.20$ the model attains mean coverage $0.9993$, with all 367 polygons reaching coverage $\ge 0.95$ and 363 reaching $\ge 0.99$, while the pretrained pointer alone leaves 71 polygons below $0.95$. On a 2107-polygon out-of-distribution test set (sizes up to $n{=}1000$), the same threshold reduces the pointer's $\#\{\Covf{}{}<0.95\}$ from 310 to 3, a $100\times$ reduction in coverage failures. The cost is a controlled growth in guard count: mean $|S|/\OPT$ rises from $\approx 1.09$ for the pointer alone to $\approx 2.20$ at $t{=}0.30$ and $\approx 2.90$ at $t{=}0.20$ on the held-out set. We position the SetPredictor not as a replacement for classical greedy or local-search heuristics on guard count, but as a distributionally robust safety layer for a neural pointer policy.
+We consider neural combinatorial optimization for the vertex-guard Art Gallery Problem, an NP-hard geometric set-cover variant in which guards must be chosen from the vertices of a simple polygon so that their union of visibility regions covers the polygon. Out-of-distribution instances appear naturally as the polygon size grows beyond the training range, and coverage --- the measurable feasibility constraint of the problem --- is then where a learned solver tends to fail. A pointer network fine-tuned with preference optimization on Bradley--Terry pairs produces competitive guard counts on in-distribution polygons, but leaves a residual tail of polygons with incomplete coverage. We propose a small single-shot per-vertex classifier, the SetPredictor, that reads the frozen pointer encoder's embeddings and predicts an inclusion probability per vertex; a scalar threshold is the only operating-point knob. The model uses no geometric input at inference time. Across held-out in-distribution and out-of-distribution evaluations, the SetPredictor improves coverage feasibility at a controlled and tunable cost in guard count. We position it as a post-processor for neural pointer solvers, not as a competitor to classical greedy or local-search baselines on guard count.
 \end{abstract}
 
 \section{Introduction}
@@ -37,17 +37,14 @@ Neural combinatorial optimization (NCO) has matured into a credible alternative 
 
 The remaining failure mode is in the tail. A non-negligible fraction of polygons are left with uncovered area --- for example, on a held-out in-distribution set of 367 polygons, 71 of them have coverage below $0.95$ under the pretrained pointer. The failure rate is much higher on out-of-distribution (OOD) polygons whose vertex count exceeds the training range: on a 2107-polygon test split with $n$ up to $1000$, 310 polygons have coverage below $0.95$ and the minimum observed coverage drops to $0.049$. Closing this tail is the central problem of this paper.
 
-A natural approach is to learn a \emph{neural editor} that takes the pointer policy's output and iteratively patches it: add a vertex when coverage is low, remove one when redundancy is high, terminate when a policy says to stop. We tried this. Across three architectures of increasing capacity --- including a 600k-parameter variant with topology features and an auxiliary visibility-prediction loss --- iterative editors failed to improve over the pretrained pointer in any cov-preserving regime. We diagnose three structural pathologies: compounding errors at inference time, $\EOS$/action coupling (a single classification head must decide both \emph{what to do} and \emph{whether to stop}), and a train--inference distribution gap that DAgger refresh alone does not close.
+An obvious approach to closing this tail is a learned iterative editor that takes the pointer policy's output and patches it one vertex at a time. We considered three such editor architectures of increasing capacity (up to roughly 600k parameters, with topology features and an auxiliary visibility-prediction loss) and found that none of them improved over the pretrained pointer in any coverage-preserving regime. The reason is structural: iterative editors couple action selection with a termination signal, accumulate errors over rollouts, and operate at inference on states they did not see at training. We discuss this briefly in Section~\ref{sec:method-diagnostic} as motivation for a single-shot design.
 
-This negative result motivates a single-shot reformulation. The \emph{SetPredictor} reads the pretrained pointer encoder's per-vertex embeddings and predicts, in one forward pass, an independent inclusion probability $p_i \in [0,1]$ for each vertex $i$. A scalar threshold $t$ converts $\{p_i\}$ into a guard set $S = \{i : p_i \ge t\}$. The threshold $t$ is a single continuous knob: lowering it trades guard count for coverage along a smooth Pareto curve. By construction the formulation eliminates all three editor pathologies: there is no rollout, so no compounding errors; there is no $\EOS$, so no action--termination coupling; the model is trained and used the same way, so there is no inference-time distribution gap.
-
-We also make a deliberate methodological choice: the SetPredictor receives only the pointer encoder's embeddings and the vertex coordinates --- \emph{no} visibility matrices, area features, or CGAL-derived geometry at inference time. We call this \emph{geo-free} inference. The encoder embeddings already contain enough geometric information to allow the SetPredictor to recover sets that pass a coverage gate.
+We propose the \emph{SetPredictor}: a small per-vertex classifier that reads the pretrained pointer encoder's embeddings and predicts an inclusion probability $p_i \in [0,1]$ for each vertex $i$ in a single forward pass. A scalar threshold $t$ converts $\{p_i\}$ into a guard set $S = \{i : p_i \ge t\}$, and is the only operating-point knob: lowering $t$ admits more vertices and traces a Pareto curve between coverage and guard count. The model receives no visibility matrix and no CGAL-derived geometry at inference time --- only the polygon vertices and the frozen encoder embeddings derived from them. We refer to this as \emph{geo-free} inference.
 
 \paragraph{Contributions.}
 \begin{enumerate}
-  \item \textbf{Diagnostic.} We exhibit three structural failure modes of iterative neural editors for the vertex-guard AGP (compounding errors, $\EOS$/action coupling, train--inference distribution gap) and show that adding capacity, topology features, an auxiliary visibility loss, and DAgger refresh did not close the gap on a fixed in-distribution evaluation.
-  \item \textbf{Method.} We propose SetPredictor, a single-shot per-vertex set-membership predictor that reads pretrained pointer encoder embeddings and emits an inclusion probability per vertex, with inference controlled by a single threshold $t$. The method is geo-free at inference time, requires no rollout, and is trained against a coverage-anchored target set obtained by local-search refinement of the pointer's seed.
-  \item \textbf{Empirical.} On a 70/30 held-out partition of the development set (857 / 367 polygons) the SetPredictor at $t{=}0.20$ achieves mean coverage $0.9993$, with $\#\{\Covf{}{}\ge 0.95\} = 367/367$, $\#\{\Covf{}{}\ge 0.99\} = 363/367$, and $\#\{\Covf{}{}=1\} = 243/367$; the pretrained pointer alone leaves 71 polygons below $0.95$. On a 2107-polygon OOD test set (sizes up to $n{=}1000$) the same threshold reduces $\#\{\Covf{}{}<0.95\}$ from 310 to 3, a $100\times$ reduction in coverage failures. Inference is a single forward pass per polygon; the model has $\sim$464k parameters; iterating the prediction is empirically a fixed point.
+  \item \textbf{Method.} We propose SetPredictor, a small single-shot per-vertex classifier over frozen pretrained pointer embeddings, with a single scalar threshold as its operating point and no geometric input at inference time. The training target is a coverage-anchored set obtained by local-search refinement of the pointer's seed.
+  \item \textbf{Empirical.} On a held-out in-distribution partition and on an out-of-distribution test set of much larger polygons, the SetPredictor improves coverage feasibility over the pretrained pointer at a controlled, tunable cost in guard count, traces a smooth Pareto curve under threshold sweep, and is empirically a fixed point under iteration of its own prediction. The detailed measurements are reported in Section~\ref{sec:results}.
 \end{enumerate}
 
 The remainder of the paper is organized as follows. Section~\ref{sec:problem} fixes notation. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} presents the diagnostic and the SetPredictor. Section~\ref{sec:experiments} describes the experimental setup, Section~\ref{sec:results} the results. Section~\ref{sec:discussion} discusses implications and Section~\ref{sec:limitations} states limitations. Section~\ref{sec:conclusion} concludes.
@@ -78,6 +75,8 @@ Let $\pi^\star$ be an optimal index set for the vertex-guard AGP and note that $
 \section{Related Work}
 \label{sec:related}
 
+This section places the present work in three relevant lines of research: classical algorithms for the Art Gallery Problem, neural combinatorial optimization for related discrete problems, and post-hoc repair of learned solvers.
+
 \paragraph{The Art Gallery Problem.} Lee and Lin~\cite{LeeLin1986} established NP-hardness for several variants of the AGP; O'Rourke~\cite{ORourke1987AGT} surveys the foundational geometric and combinatorial results. The vertex-guard variant has a long history of approximation algorithms and exact integer-programming approaches; we treat published instance libraries~\cite{art-gallery-instances-page} as the source of polygons in our experiments. Classical greedy heuristics~\cite{GonzalezBanos2001} place guards to maximize marginal coverage and are reliable on small to mid-sized polygons; local search refines candidate guard sets by swapping or removing vertices and is the basis for our training-target construction.
 
 \paragraph{Neural combinatorial optimization.} Pointer networks~\cite{Vinyals2015} introduced the architecture of attending over input tokens to produce variable-length output index sequences and were extended to combinatorial optimization with reinforcement learning by Bello et al.~\cite{Bello2016} using REINFORCE~\cite{Williams1992} with a learned baseline. Subsequent work introduced attention-only architectures for routing problems~\cite{Kool2019Attention} and policy optimization variants such as POMO~\cite{Kwon2020POMO} that exploit problem symmetries. We adopt the recent preference-optimization (PO) recipe of Pan et al.~\cite{Pan2025PO}, which trains the pointer policy with a Bradley--Terry~\cite{BradleyTerry1952} ranking loss over pairs of solutions, replacing the variance-heavy REINFORCE objective and the brittleness of supervised cloning. A broader methodological survey is provided by Bengio et al.~\cite{survey:BENGIO2021405}.
@@ -100,26 +99,10 @@ where preferences are sampled from the policy's own rollouts under a coverage ga
 
 Throughout the remainder of the paper, \emph{the encoder of this PO-trained pointer is frozen} and used as a feature extractor. We denote its per-vertex embeddings by $\{h_i\}_{i=1}^n$, $h_i \in \mathbb{R}^{128}$.
 
-\subsection{Diagnostic: three failure modes of iterative editors}
+\subsection{Architectural alternative: iterative editor}
 \label{sec:method-diagnostic}
 
-We attempted three iterative-editor designs for closing the pointer's coverage tail. Each design takes the pointer's seed solution as input and emits a sequence of edits ($\textsc{add}\ i$, $\textsc{remove}\ i$, $\textsc{stop}$) over the vertices. The three designs differ by capacity and inputs.
-
-\begin{itemize}
-  \item \textbf{Editor v1} ($\sim$80k parameters): per-vertex MLP over coordinates and an in-set indicator; single classification head over $\{\textsc{add}, \textsc{remove}, \textsc{stop}\} \times \{1,\dots,n\}$.
-  \item \textbf{Editor v2} ($\sim$600k parameters): adds polygon edge topology features, an auxiliary visibility-prediction loss, and DAgger refresh.
-  \item \textbf{Editor v3}: strict coverage gate $\tau{=}0.99$ during training and a strong $\textsc{stop}$ bias.
-\end{itemize}
-
-None of the three designs improves over the pretrained pointer in any cov-preserving regime: the median coverage at termination matches the seed, the $|\pi|/\OPT$ does not decrease, and the long left tail in coverage is unchanged. We attribute the failure to three structural pathologies.
-
-\paragraph{(a) Compounding errors.} At training time the editor sees a curriculum of cleanly-labeled edits; at inference time, each edit changes the current set, and a single wrong action takes the rollout into states not seen during training. Mid-rollout error compounds and the policy cannot recover.
-
-\paragraph{(b) $\EOS$/action coupling.} A single classification head over $\{\textsc{add}, \textsc{remove}, \textsc{stop}\}\times\{1,\dots,n\}$ must simultaneously decide \emph{what} to do and \emph{whether} to stop. The two decisions have different statistics: $\textsc{stop}$ should be rare early and common late, while specific add/remove choices depend on the current coverage. The shared softmax produces stop probabilities that are either too eager (the rollout terminates with the seed unchanged) or too reluctant (the rollout cycles between adds and removes without progress).
-
-\paragraph{(c) Train--inference distribution gap.} The editor is trained on trajectories generated from local search applied to the pretrained pointer's seed; at inference it is applied to its own evolving prediction. DAgger refresh closes part of the gap by mixing the model's own rollouts into the training distribution, but in our experiments the closure was insufficient: the model still terminates too early on polygons where the seed is far from a feasible cover.
-
-These three pathologies are structural to iterative editors with a single $\EOS$/action head; they motivate a single-shot reformulation.
+Before describing the SetPredictor, we briefly motivate the single-shot design by contrast with the natural alternative: a learned iterative editor that applies a sequence of $\textsc{add}/\textsc{remove}/\textsc{stop}$ edits to the seed. We experimented with three such editor architectures of increasing capacity (a small MLP over coordinates and in-set indicator, $\sim$80k parameters; a $\sim$600k-parameter model with polygon topology features, an auxiliary visibility-prediction loss and DAgger refresh~\cite{RossGordonBagnell2011DAgger}; and a strict-gate variant with a strong $\textsc{stop}$ bias). None of these editors improved over the pretrained pointer in any coverage-preserving regime: median coverage at termination matched the seed, $|\pi|/\OPT$ did not decrease, and the residual coverage tail was unchanged. Three structural reasons make iteration difficult for this task: rollouts accumulate errors because the editor sees clean trajectories at training but its own evolving predictions at inference; a single classification head over $\{\textsc{add}, \textsc{remove}, \textsc{stop}\}\times\{1,\dots,n\}$ couples action selection with termination, producing $\textsc{stop}$ probabilities that are either too eager or too reluctant; and the training-time and inference-time state distributions diverge in ways that DAgger refresh alone did not close. The single-shot design we present next removes all three by construction: there is no rollout, there is no $\textsc{stop}$ token, and the model is trained and used the same way.
 
 \subsection{SetPredictor architecture}
 \label{sec:method-arch}
@@ -197,6 +180,8 @@ Optimal guard counts $\OPT$ are taken from the AGPVG library's optimal solutions
 \section{Results}
 \label{sec:results}
 
+We organise the results in five subsections. Section~\ref{sec:res-headline} reports the held-out in-distribution headline, Section~\ref{sec:res-dist} the per-polygon coverage distribution that lies behind it, Section~\ref{sec:res-pareto} the coverage--cost Pareto curve, Section~\ref{sec:res-fixed-point} the fixed-point behaviour of iterative inference, and Section~\ref{sec:res-ood} the out-of-distribution evaluation that is the main load-bearing measurement of the paper.
+
 \subsection{Headline: held-out evaluation on \texttt{dev\_test}}
 \label{sec:res-headline}
 
@@ -221,7 +206,14 @@ Table~\ref{tab:headline} reports the headline numbers on \texttt{dev\_test}. At 
   \label{tab:dist_shift}
 \end{table}
 
-The shift is most visible at the lower tails (Table~\ref{tab:dist_shift}): the pointer has 71 polygons below $\Covf{}{}=0.95$ and a worst case of $0.830$; at $t{=}0.20$, no polygon is below $0.95$ and the worst case is $0.977$.
+The shift is most visible at the lower tails (Table~\ref{tab:dist_shift}): the pointer has 71 polygons below $\Covf{}{}=0.95$ and a worst case of $0.830$; at $t{=}0.20$, no polygon is below $0.95$ and the worst case is $0.977$. Figure~\ref{fig:coverage_cdf} visualises the same shift as a coarse empirical complementary CDF on both partitions: the curve for the SetPredictor sits to the right of the pretrained pointer at every threshold, and the difference is most pronounced on the out-of-distribution panel.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{gfx/setpred/fig_coverage_cdf.pdf}
+  \caption{Per-polygon coverage distribution, in-distribution (left, 367 polygons) and out-of-distribution (right, 2107 polygons). For each method we plot the fraction of polygons with coverage at least $x$, against $x$. Curves are coarse stair-step CDFs constructed from the per-cell coverage quantiles and thresholded counts; the dashed vertical line marks the $0.95$ feasibility gate. Across both panels and across all three thresholds, the SetPredictor curve sits to the right of the pretrained pointer.}
+  \label{fig:coverage_cdf}
+\end{figure}
 
 \subsection{Pareto curve}
 \label{sec:res-pareto}
@@ -234,7 +226,14 @@ The shift is most visible at the lower tails (Table~\ref{tab:dist_shift}): the p
   \label{tab:pareto}
 \end{table}
 
-Table~\ref{tab:pareto} traces the Pareto curve from $t{=}0.30$ to $t{=}0.20$. All three operating points satisfy the coverage gate $\Covf{}{}\ge 0.95$ on every \texttt{dev\_test} polygon; $t{=}0.20$ is the most conservative (largest $|S|$, fewest residual sub-$0.99$ polygons). Between $t{=}0.30$ and $t{=}0.20$, mean coverage rises by $\approx 0.0015$ and mean $|S|/n$ rises by $\approx 0.10$.
+Table~\ref{tab:pareto} traces the Pareto curve from $t{=}0.30$ to $t{=}0.20$. All three operating points satisfy the coverage gate $\Covf{}{}\ge 0.95$ on every \texttt{dev\_test} polygon; $t{=}0.20$ is the most conservative (largest $|S|$, fewest residual sub-$0.99$ polygons). Between $t{=}0.30$ and $t{=}0.20$, mean coverage rises by $\approx 0.0015$ and mean $|S|/n$ rises by $\approx 0.10$. The corresponding cost in guard count, measured against the optimum, rises from $\approx 1.09$ for the pretrained pointer alone to $\approx 2.20$ at $t{=}0.30$ and $\approx 2.90$ at $t{=}0.20$. Figure~\ref{fig:pareto} plots the same trade-off across a broader threshold sweep on \texttt{dev\_tune} alongside the three canonical operating points on \texttt{dev\_test} and on the out-of-distribution \texttt{test} split.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{gfx/setpred/fig_pareto.pdf}
+  \caption{Coverage--cost trade-off, in-distribution (left) and out-of-distribution (right). The horizontal axis is the mean guard count relative to the optimum, $|S|/\OPT$; the vertical axis is mean per-polygon coverage. The pretrained pointer (triangle) sits at low cost and the bottom of its coverage curve; the SetPredictor (circles) traces a monotone curve as the threshold $t$ is lowered, gaining coverage at a controlled cost in $|S|/\OPT$. The left panel includes the broader \texttt{dev\_tune} threshold sweep as a faint connecting curve.}
+  \label{fig:pareto}
+\end{figure}
 
 \subsection{Iterative inference is a fixed point}
 \label{sec:res-fixed-point}
@@ -247,7 +246,14 @@ Table~\ref{tab:pareto} traces the Pareto curve from $t{=}0.30$ to $t{=}0.20$. Al
   \label{tab:fixed_point}
 \end{table}
 
-Table~\ref{tab:fixed_point} confirms the fixed-point behavior: across $K\in\{1,2,3,5\}$ the changes are at the fourth decimal place in all three reported metrics. A single forward pass is sufficient.
+Table~\ref{tab:fixed_point} confirms the fixed-point behaviour: across $K\in\{1,2,3,5\}$ the changes are at the fourth decimal place in all three reported metrics. Figure~\ref{fig:kinvariance} plots the same information across six thresholds; the six lines are visually flat against the small vertical range, confirming that a single forward pass is sufficient and that iteration is, empirically, a fixed point of the SetPredictor.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\linewidth]{gfx/setpred/fig_kinvariance.pdf}
+  \caption{Iterative inference is empirically a fixed point. Mean coverage as a function of the number of inference passes $K\in\{1,2,3,5\}$, for six thresholds $t\in\{0.5,0.6,0.65,0.7,0.75,0.8\}$, on the full \texttt{dev} split (1224 polygons). The vertical axis is tightly cropped to show that the across-$K$ variation is small (fourth decimal place) at every threshold. We use $K{=}1$ in the rest of the paper.}
+  \label{fig:kinvariance}
+\end{figure}
 
 \subsection{Out-of-distribution evaluation on \texttt{test}}
 \label{sec:res-ood}
@@ -265,15 +271,17 @@ The OOD evaluation (Table~\ref{tab:ood_test}) is the strongest evidence for the 
 \section{Discussion}
 \label{sec:discussion}
 
-\paragraph{The SetPredictor is a safety layer, not a guard-count winner.} Classical greedy and local search beat the SetPredictor on $|S|/\OPT$ at preserved coverage --- this is not in dispute and we do not claim otherwise. The SetPredictor's role is different: it is the first method we know of that closes the pretrained pointer's coverage tail in a single forward pass at inference time, with no geometric input. The relevant comparison is therefore not against an oracle solver but against the pretrained pointer it post-processes.
+The empirical finding behind the discussion below is that a small single-shot per-vertex classifier over frozen pretrained pointer embeddings reliably improves coverage feasibility, both on the held-out in-distribution partition and on larger out-of-distribution polygons, at a measured and tunable cost in guard count. The following paragraphs consider how to frame that result against classical baselines, why the architectural choices behind the SetPredictor were made, and which aspects of the measurement we view as most consequential.
 
-\paragraph{Why does a single-shot model work where iterative editors fail?} Three reasons, each tied to a pathology of Section~\ref{sec:method-diagnostic}. First, there are no rollouts, so compounding errors cannot occur. Second, there is no $\EOS$ head: the model decides only what is in or out, never when to stop. Third, the model is trained and used the same way --- it receives the seed indicator at training and at inference --- so the train--inference distribution gap closes by construction.
+\paragraph{Framing of the comparison.} Classical greedy and local-search heuristics outperform the SetPredictor on $|S|/\OPT$ at preserved coverage. We do not contest this. The SetPredictor is reported as a post-processor for a pretrained pointer policy: the relevant comparison is against the pointer it operates on, not against an oracle solver. On that comparison, the SetPredictor closes the pointer's residual coverage tail in a single forward pass without geometric input, at a tunable cost in guard count.
 
-\paragraph{Why does geo-free inference suffice?} The pretrained pointer encoder's per-vertex embeddings $h_i$ were trained on a coverage-aware preference objective and therefore carry geometric information about each vertex's role in the polygon. The SetPredictor reuses this information rather than recomputing it. This explains why a small ($\sim$464k) Transformer over the encoder embeddings is enough; the heavy geometric lifting was done once, by the pointer.
+\paragraph{Why a single-shot design.} The architectural choice not to iterate is deliberate. As discussed in Section~\ref{sec:method-diagnostic}, the three structural difficulties of iterative editors --- compounding errors, $\textsc{stop}$/action coupling, and the train--inference distribution gap --- all disappear when the prediction is produced in one forward pass conditioned on the seed: there are no rollouts, the model has no $\textsc{stop}$ token, and the input distribution it sees at training matches what it sees at inference.
 
-\paragraph{The threshold is the right interface.} The single-scalar threshold $t$ is a continuous and predictable knob: lower $t$ uniformly increases both coverage and $|S|$ along a Pareto curve, and the curve is monotone in our experiments. This makes the SetPredictor easy to deploy with an explicit coverage budget: choose $t$ such that the empirical $\#\{\Covf{}{}\ge\tau\}/n$ on a validation set meets the desired target.
+\paragraph{Why geo-free inference suffices.} The pretrained pointer encoder's per-vertex embeddings were learned under a coverage-aware preference objective and carry geometric information about each vertex's role in the polygon. The SetPredictor reuses this representation rather than recomputing geometry, which is why a small Transformer over the encoder embeddings is sufficient: the heavy geometric work is done once, by the pointer encoder.
 
-\paragraph{Out-of-distribution generalization is the dominant effect.} The $100\times$ reduction in coverage failures on \texttt{test} is the most consequential result of the paper. The pretrained pointer collapses on polygons whose vertex count exceeds its training range; the SetPredictor, despite being trained on the same range, generalizes to much larger polygons because the per-vertex prediction depends only on local features and an embedding that is in turn computed locally (per vertex). The architecture does not have to extrapolate over sequence length the way an autoregressive policy does.
+\paragraph{The threshold as a continuous knob.} The single-scalar threshold $t$ is a continuous and predictable operating-point control: lowering $t$ admits more vertices and traces a monotone curve between coverage and guard count in our experiments. This makes the SetPredictor easy to deploy under an explicit coverage budget: choose $t$ such that the empirical $\#\{\Covf{}{}\ge\tau\}/n$ on a validation partition meets the desired target.
+
+\paragraph{Out-of-distribution behaviour.} The reduction in coverage failures on the out-of-distribution \texttt{test} split is the most consequential measurement of the paper. The pretrained pointer's coverage degrades sharply on polygons whose vertex count exceeds its training range, while the SetPredictor --- trained on the same range --- retains coverage feasibility on much larger polygons. A plausible reason is that the per-vertex prediction depends only on local features and a vertex-local embedding, so the model does not need to extrapolate over sequence length the way an autoregressive policy does.
 
 \section{Limitations}
 \label{sec:limitations}
@@ -291,9 +299,9 @@ The OOD evaluation (Table~\ref{tab:ood_test}) is the strongest evidence for the 
 \section{Conclusion}
 \label{sec:conclusion}
 
-We posed the question of how to close the coverage tail of a PO/BT-trained pointer policy for the vertex-guard Art Gallery Problem. We showed that iterative neural editors, despite increasing capacity, topology features, an auxiliary visibility loss, and DAgger refresh, fail to improve over the pointer in any cov-preserving regime, and traced the failure to three structural pathologies (compounding errors, $\EOS$/action coupling, train--inference distribution gap). We then introduced the SetPredictor, a single-shot per-vertex set-membership predictor over frozen pointer embeddings, geo-free at inference time and controlled by a single scalar threshold. On 367 held-out in-distribution polygons, the SetPredictor eliminates the pointer's sub-$0.95$ coverage tail entirely; on 2107 out-of-distribution polygons it reduces coverage failures by two orders of magnitude. The cost is a controlled and tunable growth in guard count.
+We considered the problem of closing the residual coverage tail of a PO/BT-trained pointer policy for the vertex-guard Art Gallery Problem. We introduced the SetPredictor, a single-shot per-vertex classifier over frozen pointer embeddings, controlled by a single scalar threshold and using no geometric input at inference time. On held-out in-distribution polygons the SetPredictor brings the rate of sub-$0.95$ coverage to zero in our evaluation; on out-of-distribution polygons of much larger size it reduces the rate of coverage failures by approximately two orders of magnitude. The cost is a controlled and tunable increase in guard count. The architectural choice of a single-shot design --- as opposed to a learned iterative editor over the same input --- is motivated by three structural difficulties of iteration that the single-shot formulation removes by construction.
 
-We position the SetPredictor as a distributional safety layer for neural pointer solvers, not as a competitor to classical greedy or local search on guard count. Two directions suggest themselves. The first is to retrain the pretrained pointer with a Transformer encoder and a coverage-aware preference signal that already keeps the tail short; the SetPredictor would then need a smaller correction. The second is to study how the threshold $t$ should depend on the polygon (per-instance $t$) rather than being a global constant; the present global-$t$ design is intentionally simple and already adequate.
+We report the SetPredictor as a post-processor for neural pointer solvers, complementary to but not in competition with classical greedy and local-search baselines on guard count. Two directions follow naturally from the present work. First, training the pointer with a stronger encoder (for example, a Transformer) and a coverage-aware preference signal may already shorten the residual tail, leaving the SetPredictor with a smaller correction to apply. Second, the operating-point threshold $t$ is global in the present design; making it depend on the instance --- for example, predicting a per-polygon $t$ from the same encoder embeddings --- is a natural next step.
 
 \bibliographystyle{plain}
 \bibliography{paper}
