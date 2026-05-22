@@ -359,8 +359,9 @@ def main() -> None:
             )
             log["sweep"] = sweep
             seed = sweep["seed"]
+            opt_s = f"{seed['opt']:.4f}" if seed['opt'] is not None else "  —  "
             print(f"           seed  cov={seed['cov']:.4f}  |S|/n={seed['chv']:.4f}  "
-                  f"|S|/OPT={seed['opt']:.4f}")
+                  f"|S|/OPT={opt_s}")
             for t, m in sweep["thresholds"].items():
                 cov_s = f"{m['cov']:.4f}" if m['cov'] is not None else "  —  "
                 chv_s = f"{m['chv']:.4f}" if m['chv'] is not None else "  —  "

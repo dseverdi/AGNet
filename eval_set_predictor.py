@@ -319,8 +319,9 @@ def main() -> None:
     print(f"  SetPredictor sweep  ({summary['n_polygons']} polygons, wall {summary['wall_s']:.0f}s)")
     print("=" * 70)
     seed = summary["seed"]
+    opt_s = f"{seed['opt']:.4f}" if seed['opt'] is not None else "  —  "
     print(f"  seed  cov={seed['cov']:.4f}  |S|/n={seed['chv']:.4f}  "
-          f"|S|/OPT={seed['opt']:.4f}")
+          f"|S|/OPT={opt_s}")
     if seed.get("dist"):
         d = seed["dist"]
         print(f"  seed dist: min cov={d['cov_min']:.4f}  "
