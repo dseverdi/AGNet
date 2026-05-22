@@ -63,7 +63,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=str,
                    default="checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt")
-    p.add_argument("--split", choices=["train", "dev"], default="train")
+    p.add_argument("--split", choices=["train", "dev", "test", "large"],
+                   default="train")
     p.add_argument("--n-samples", type=int, default=-1,
                    help="-1 = full split")
     p.add_argument("--embedding-size", type=int, default=128)
@@ -312,11 +313,11 @@ def main() -> None:
     print(f"[traj] LS reward: lam={args.lam} tau={args.tau} tau_pen={args.tau_penalty}")
 
     # prepare_datasets needs both paths; we'll just take the right one.
-    train_ds, val_ds = prepare_datasets(
-        split_dir if args.split == "train" else other_dir,
-        split_dir if args.split == "dev"   else other_dir,
-        normalize=True,
-    )
+    # train_path: split_dir when split=="train", else fall back to train/.
+    # val_path:   split_dir when split is dev/test/large (anything non-train).
+    train_path = split_dir if args.split == "train" else other_dir
+    val_path   = split_dir if args.split != "train" else other_dir
+    train_ds, val_ds = prepare_datasets(train_path, val_path, normalize=True)
     ds = train_ds if args.split == "train" else val_ds
     if args.n_samples > 0:
         ds.samples = ds.samples[: args.n_samples]
