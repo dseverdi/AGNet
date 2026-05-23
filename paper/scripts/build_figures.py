@@ -240,7 +240,261 @@ def fig_kinvariance() -> None:
     save(fig, "fig_kinvariance.pdf")
 
 
+# ──────────────────────────────────────────────────────────────────────
+#  New figures: training curve, worked example, stretch figures
+#
+#  Each new figure reads a paper/data/*.json file with a documented schema
+#  (see BUILD_INFO.md) and skips gracefully if the data is not on disk.
+# ──────────────────────────────────────────────────────────────────────
+
+def _maybe_load(name: str) -> dict | None:
+    path = DATA / name
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        print(f"warn: failed to parse {path}: {exc}")
+        return None
+
+
+def fig_po_training() -> None:
+    """PO/BT training curve on the held-out dev split.
+
+    Reads paper/data/po_agp_training.json. Expected schema:
+        {"epochs": [int, ...],
+         "coverage_greedy_mean": [float, ...],
+         "guard_ratio_greedy_mean": [float, ...],
+         "size_over_opt_greedy_mean": [float, ...]   # optional
+        }
+    """
+    d = _maybe_load("po_agp_training.json")
+    if d is None:
+        print("skip fig_po_training: paper/data/po_agp_training.json not found")
+        return
+
+    epochs = d.get("epochs")
+    cov_g = d.get("coverage_greedy_mean")
+    if not epochs or not cov_g:
+        print("skip fig_po_training: required fields (epochs, coverage_greedy_mean) missing")
+        return
+
+    fig, ax_cov = plt.subplots(figsize=(5.4, 3.2))
+    ax_cov.plot(epochs, cov_g, "-o", color=COLORS["seed"],
+                markersize=3, linewidth=1.4, label="coverage (greedy decode)")
+    ax_cov.set_xlabel("Training epoch")
+    ax_cov.set_ylabel("Mean coverage", color=COLORS["seed"])
+    ax_cov.tick_params(axis="y", labelcolor=COLORS["seed"])
+    ax_cov.grid(alpha=0.3, linewidth=0.5)
+    ax_cov.set_ylim(0.0, 1.02)
+
+    sopt = d.get("size_over_opt_greedy_mean")
+    gr_g = d.get("guard_ratio_greedy_mean")
+    second = sopt if sopt else gr_g
+    second_label = ("$|S|/\\mathrm{OPT}$" if sopt
+                    else ("$|S|/n$" if gr_g else None))
+    if second is not None:
+        ax_sopt = ax_cov.twinx()
+        ax_sopt.plot(epochs, second, "-s", color=COLORS["t020"],
+                     markersize=3, linewidth=1.4, label=second_label)
+        ax_sopt.set_ylabel("Mean " + second_label, color=COLORS["t020"])
+        ax_sopt.tick_params(axis="y", labelcolor=COLORS["t020"])
+        h1, l1 = ax_cov.get_legend_handles_labels()
+        h2, l2 = ax_sopt.get_legend_handles_labels()
+        ax_cov.legend(h1 + h2, l1 + l2, loc="lower right", frameon=False)
+
+    ax_cov.set_title("PO/BT training dynamics (held-out dev)")
+    save(fig, "fig_po_training.pdf")
+
+
+def fig_worked_example() -> None:
+    """One or two polygons drawn with seed / probe / optimum overlays.
+
+    Reads paper/data/worked_examples.json. Expected schema:
+        {"examples": [
+            {"name": str,
+             "split": str,
+             "n": int,
+             "points": [[x, y], ...],
+             "seed_idxs": [int, ...],
+             "probe_idxs": [int, ...],
+             "opt_idxs": [int, ...] | null,
+             "seed_coverage": float,
+             "probe_coverage": float,
+             "opt_coverage": float | null},
+            ...
+        ]}
+    """
+    d = _maybe_load("worked_examples.json")
+    if d is None:
+        print("skip fig_worked_example: paper/data/worked_examples.json not found")
+        return
+
+    examples = d.get("examples") or []
+    if not examples:
+        print("skip fig_worked_example: no examples in JSON")
+        return
+
+    import numpy as np  # local: only needed when this figure runs
+
+    n_examples = len(examples)
+    n_panels_per = 3
+    fig, axes = plt.subplots(
+        n_examples, n_panels_per,
+        figsize=(3.0 * n_panels_per, 3.0 * n_examples),
+        squeeze=False,
+    )
+
+    panel_specs = [
+        (0, "seed_idxs",  "seed_coverage",  "Pretrained policy"),
+        (1, "probe_idxs", "probe_coverage", "Policy + probe ($t{=}0.30$)"),
+        (2, "opt_idxs",   "opt_coverage",   "Optimum"),
+    ]
+
+    for row, ex in enumerate(examples):
+        pts = np.array(ex["points"], dtype=float)
+        for col, idx_key, cov_key, title_root in panel_specs:
+            ax = axes[row, col]
+            ax.plot(np.append(pts[:, 0], pts[0, 0]),
+                    np.append(pts[:, 1], pts[0, 1]),
+                    color="black", linewidth=1.4)
+            idxs = ex.get(idx_key)
+            if idxs is not None:
+                guards = pts[np.asarray(idxs, dtype=int)]
+                ax.scatter(guards[:, 0], guards[:, 1],
+                           color="red", s=36, zorder=5,
+                           edgecolor="black", linewidth=0.4)
+                cov = ex.get(cov_key)
+                size_str = f"$|S|{{=}}{len(idxs)}$"
+                cov_str = (f"$\\mathrm{{Cov}}{{=}}{cov:.3f}$"
+                           if cov is not None else "")
+                subtitle = ", ".join(s for s in [size_str, cov_str] if s)
+                title = (f"{title_root}\n{subtitle}" if row == 0
+                         else subtitle)
+            else:
+                title = (f"{title_root}\n(unavailable)" if row == 0
+                         else "(unavailable)")
+            ax.set_title(title, fontsize=8)
+            ax.set_aspect("equal")
+            ax.axis("off")
+
+        axes[row, 0].text(-0.06, 0.5, ex.get("name", ""),
+                          transform=axes[row, 0].transAxes,
+                          rotation=90, va="center", ha="right",
+                          fontsize=8, family="monospace")
+
+    plt.tight_layout()
+    save(fig, "fig_worked_example.pdf")
+
+
+def fig_encoder_pca() -> None:
+    """2D projection of frozen PO/BT encoder embeddings, colored by guard label.
+
+    Reads paper/data/encoder_pca.json. Expected schema:
+        {"points_2d": [[x, y], ...],
+         "labels": [0/1, ...],
+         "method": "pca" | "umap" | "tsne",
+         "explained_variance": [float, float] | null
+        }
+    """
+    d = _maybe_load("encoder_pca.json")
+    if d is None:
+        print("skip fig_encoder_pca: paper/data/encoder_pca.json not found")
+        return
+
+    import numpy as np
+
+    xy = np.asarray(d.get("points_2d") or [], dtype=float)
+    labels = np.asarray(d.get("labels") or [], dtype=int)
+    if xy.size == 0 or labels.size != len(xy):
+        print("skip fig_encoder_pca: invalid points_2d / labels shape")
+        return
+
+    method = (d.get("method") or "pca").upper()
+    ev = d.get("explained_variance")
+
+    fig, ax = plt.subplots(figsize=(4.4, 3.4))
+    non_guard = labels == 0
+    guard = labels == 1
+    ax.scatter(xy[non_guard, 0], xy[non_guard, 1], s=8,
+               color=COLORS["seed"], alpha=0.35, label="non-guard")
+    ax.scatter(xy[guard, 0], xy[guard, 1], s=10,
+               color=COLORS["t020"], alpha=0.75, label="guard (LS target)")
+
+    if method == "PCA" and ev and len(ev) >= 2:
+        ax.set_xlabel(f"PC1 ({ev[0]*100:.1f}\\% var)")
+        ax.set_ylabel(f"PC2 ({ev[1]*100:.1f}\\% var)")
+    else:
+        ax.set_xlabel(f"{method} dim 1")
+        ax.set_ylabel(f"{method} dim 2")
+    ax.set_title("Frozen PO/BT encoder embeddings")
+    ax.legend(loc="best", frameon=False)
+    ax.grid(alpha=0.3, linewidth=0.5)
+    save(fig, "fig_encoder_pca.pdf")
+
+
+def fig_cov_vs_n() -> None:
+    """Per-polygon coverage vs polygon size n on the OOD test split.
+
+    Reads paper/data/setpred_test_OOD_per_polygon.json. Expected schema:
+        {"polygons": [
+            {"name": str,
+             "n": int,
+             "seed_cov": float,
+             "probe_cov_t020": float | null},
+            ...
+        ]}
+    """
+    d = _maybe_load("setpred_test_OOD_per_polygon.json")
+    if d is None:
+        print("skip fig_cov_vs_n: paper/data/setpred_test_OOD_per_polygon.json not found")
+        return
+
+    polys = d.get("polygons") or []
+    if not polys:
+        print("skip fig_cov_vs_n: no polygons in JSON")
+        return
+
+    import numpy as np
+
+    ns = np.array([p["n"] for p in polys])
+    seed_cov = np.array([p.get("seed_cov", np.nan) for p in polys])
+    probe_cov = np.array([p.get("probe_cov_t020", np.nan) for p in polys])
+
+    fig, ax = plt.subplots(figsize=(5.4, 3.4))
+    ax.scatter(ns, seed_cov, s=6, alpha=0.45,
+               color=COLORS["seed"], label="Pretrained pointer")
+    ax.scatter(ns, probe_cov, s=6, alpha=0.45,
+               color=COLORS["t020"], label="SetPredictor $t{=}0.20$")
+    ax.axhline(0.95, color="gray", linestyle=":", linewidth=0.8)
+    ax.set_xlabel("Polygon vertex count $n$")
+    ax.set_ylabel("Per-polygon coverage $\\mathrm{Cov}$")
+    ax.set_xscale("log")
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_title("Out-of-distribution coverage vs polygon size (test, 2107 polygons)")
+    ax.grid(alpha=0.3, linewidth=0.5)
+    ax.legend(loc="lower left", frameon=False)
+    save(fig, "fig_cov_vs_n.pdf")
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Dispatcher: attempts every figure, reports skips/failures cleanly.
+# ──────────────────────────────────────────────────────────────────────
+
+def _run(fn, name: str) -> None:
+    try:
+        fn()
+    except FileNotFoundError as exc:
+        print(f"skip {name}: {exc}")
+    except Exception as exc:
+        print(f"fail {name}: {type(exc).__name__}: {exc}")
+
+
 if __name__ == "__main__":
-    fig_coverage_cdf()
-    fig_pareto()
-    fig_kinvariance()
+    _run(fig_coverage_cdf, "fig_coverage_cdf")
+    _run(fig_pareto,       "fig_pareto")
+    _run(fig_kinvariance,  "fig_kinvariance")
+    _run(fig_po_training,  "fig_po_training")
+    _run(fig_worked_example, "fig_worked_example")
+    _run(fig_encoder_pca,  "fig_encoder_pca")
+    _run(fig_cov_vs_n,     "fig_cov_vs_n")

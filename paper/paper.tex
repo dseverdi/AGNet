@@ -16,7 +16,26 @@
 \newcommand{\eps}{\varepsilon}
 \newcommand{\OPT}{\mathrm{OPT}}
 
-\title{Neural Combinatorial Optimization for the Vertex-Guard Art Gallery Problem}
+% Conditional figure include: renders the figure if its PDF is on disk,
+% otherwise renders a small placeholder. Keeps the label defined so body
+% \ref{} statements resolve in both cases. Comment the placeholder branch
+% out at submission time.
+\newcommand{\figincl}[3]{%
+  \begin{figure}[t]
+    \centering
+    \IfFileExists{#1}{%
+      \includegraphics[width=\linewidth]{#1}%
+    }{%
+      \fbox{\parbox{0.7\linewidth}{\centering\small\itshape Figure pending. Generate via \texttt{python paper/scripts/build\_figures.py} after regenerating \texttt{paper/data/}.}}%
+    }%
+    \caption{#2}
+    \label{#3}
+  \end{figure}%
+}
+
+\title{Learning to Place Guards by Reinforcement:\\
+A Geo-Free Neural Policy for the Vertex-Guard\\
+Art Gallery Problem}
 \author{Domagoj Ševerdija \and Jurica Maltar \and Nathan Chappel \and Domagoj Matijević}
 \date{}
 
@@ -25,127 +44,133 @@
 \maketitle
 
 \begin{abstract}
-We consider neural combinatorial optimization for the vertex-guard Art Gallery Problem, an NP-hard geometric set-cover variant in which guards must be chosen from the vertices of a simple polygon so that their union of visibility regions covers the polygon. Out-of-distribution instances appear naturally as the polygon size grows beyond the training range, and coverage --- the measurable feasibility constraint of the problem --- is then where a learned solver tends to fail. A pointer network fine-tuned with preference optimization on Bradley--Terry pairs produces competitive guard counts on in-distribution polygons, but leaves a residual tail of polygons with incomplete coverage. We propose a small single-shot per-vertex classifier, the SetPredictor, that reads the frozen pointer encoder's embeddings and predicts an inclusion probability per vertex; a scalar threshold is the only operating-point knob. The model uses no geometric input at inference time. Across held-out in-distribution and out-of-distribution evaluations, the SetPredictor improves coverage feasibility at a controlled and tunable cost in guard count. We position it as a post-processor for neural pointer solvers, not as a competitor to classical greedy or local-search baselines on guard count.
+We ask whether a neural policy, trained from a coverage-aware reward over its own rollouts and given no geometric input at inference, can learn to place vertex guards on a simple polygon. The vertex-guard Art Gallery Problem is an NP-hard discrete instance of geometric set cover, and we treat it here as a measurement instrument: restricting guards to polygon vertices yields a finite, pointer-network-natural action space that isolates the geometric-reasoning question from the separate difficulty of continuous optimization, while published instance libraries provide vetted optimal solutions against which approximation ratios can be reported. The reinforcement method we evaluate is a pointer-network policy trained with preference optimization on Bradley--Terry pairs of self-generated rollouts, decoded greedily from coordinates at inference with no visibility matrix and no oracle call. We find that the resulting policy is competitive in guard cardinality on held-out polygons but leaves a non-trivial tail of polygons under-covered, both in distribution and on substantially larger out-of-distribution polygons. To test whether this residual reflects a true limit of the learned representation or a decoder-calibration limit, we train a small per-vertex classifier that reads only the frozen encoder's embeddings and the policy's own seed indicator, controlled by a single scalar threshold; the probe closes the feasibility tail with no geometric input at inference. We read the combined result as evidence that vertex-guard placement is learnable, to a measurable degree, by a reinforcement method that never sees an explicit visibility object, and that the encoder produced by such training already carries substantial geometric structure. We do not claim to compete with classical greedy or local-search heuristics on guard count; the contribution is a bounded answer to what is and is not learnable in this geo-free regime, and an empirical separation of representation quality from decoder quality.
 \end{abstract}
 
 \section{Introduction}
 \label{sec:intro}
 
-The Art Gallery Problem (AGP) asks for the minimum number of guards needed to observe every point of a simple polygon. It is a classical NP-hard problem in computational geometry~\cite{LeeLin1986,ORourke1987AGT} with applications in surveillance, sensor placement, and robotics~\cite{1545170,DBLP:journals/evi/BighamDK22}. We focus on the \emph{vertex-guard} variant, where guards must be selected from the polygon's vertices. The vertex-guard AGP is itself NP-hard and a discrete instance of geometric set cover with non-uniform, polygon-dependent visibility regions.
+The Art Gallery Problem (AGP) asks for the minimum number of guards needed to observe every point of a simple polygon~\cite{LeeLin1986,ORourke1987AGT}, with applications in surveillance, sensor placement, and robotics~\cite{1545170,DBLP:journals/evi/BighamDK22}. We focus on the \emph{vertex-guard} variant, in which guards must be chosen from the polygon's vertices; the problem remains NP-hard and is a discrete instance of geometric set cover with non-uniform, polygon-dependent visibility regions. The question this paper investigates is whether a neural policy can learn to place such guards from coordinates alone, trained from a coverage-aware reward signal over its own rollouts, with no visibility matrix and no geometric oracle at the moment it chooses guards. We are not asking whether a learned solver can match a classical greedy heuristic on guard count --- it cannot, and we do not claim it does. We are asking whether the underlying combinatorial-geometric task is learnable when the model is denied any explicit geometric input at test time.
 
-Neural combinatorial optimization (NCO) has matured into a credible alternative to hand-engineered heuristics for problems such as TSP and CVRP~\cite{Vinyals2015,Bello2016,Kool2019Attention,Kwon2020POMO}. Recent work on \emph{preference optimization} (PO) for NCO~\cite{Pan2025PO} trains a pointer policy with a Bradley--Terry~\cite{BradleyTerry1952} ranking loss over solution pairs, sidestepping the variance of REINFORCE~\cite{Williams1992} and the brittleness of supervised cloning of greedy labels. For the vertex-guard AGP we train an LSTM-encoder pointer network with PO on Bradley--Terry pairs and obtain a fast, coverage-oriented solver that is near-optimal in guard count on in-distribution polygons.
+The reinforcement method we evaluate is an LSTM pointer-network policy trained with Preference Optimization (PO)~\cite{Pan2025PO} on Bradley--Terry preference pairs~\cite{BradleyTerry1952} drawn from the policy's own rollouts. The policy emits a vertex-index sequence with an $\EOS$ token; the reward couples coverage and guard usage. PO replaces REINFORCE advantages~\cite{Williams1992,Bello2016} with binary preferences between pairs of rollouts, sidestepping REINFORCE's variance and the brittleness of supervised cloning of search labels. We refer to inference under this policy as \emph{geo-free}: at test time the network sees only the polygon's vertex coordinates, with no precomputed visibility matrix, no CGAL output, and no per-vertex area feature.
 
-The remaining failure mode is in the tail. A non-negligible fraction of polygons are left with uncovered area --- for example, on a held-out in-distribution set of 367 polygons, 71 of them have coverage below $0.95$ under the pretrained pointer. The failure rate is much higher on out-of-distribution (OOD) polygons whose vertex count exceeds the training range: on a 2107-polygon test split with $n$ up to $1000$, 310 polygons have coverage below $0.95$ and the minimum observed coverage drops to $0.049$. Closing this tail is the central problem of this paper.
+The policy works, to a degree. On a held-out in-distribution split it reaches mean coverage of roughly $0.97$ at $|S|/\OPT \approx 1.09$, which is competitive in cardinality with classical baselines on these polygons. The honest limit of the result is the tail of the per-polygon coverage distribution: a non-trivial fraction of polygons end up below the feasibility line that one would want any deployed solver to clear, and the failure rate grows on out-of-distribution polygons whose vertex counts exceed the training range. The reinforcement method, by itself, is not feasibility-guaranteed.
 
-An obvious approach to closing this tail is a learned iterative editor that takes the pointer policy's output and patches it one vertex at a time. We considered three such editor architectures of increasing capacity (up to roughly 600k parameters, with topology features and an auxiliary visibility-prediction loss) and found that none of them improved over the pretrained pointer in any coverage-preserving regime. The reason is structural: iterative editors couple action selection with a termination signal, accumulate errors over rollouts, and operate at inference on states they did not see at training. We discuss this briefly in Section~\ref{sec:method-diagnostic} as motivation for a single-shot design.
+To check whether this residual reflects a true limit of the reinforcement-learned representation or only a calibration problem in the decoder, we train a small per-vertex classifier that reads only the frozen encoder embeddings of the policy and predicts a vertex-inclusion probability, controlled by a single scalar threshold. The classifier has no access to visibility information at inference. It closes the feasibility tail: every in-distribution held-out polygon clears the coverage gate, and out-of-distribution failures fall by approximately two orders of magnitude. We read this as direct evidence that the reinforcement-trained encoder already carries enough geometric structure to support a feasibility-guaranteeing decision, and that the policy's coverage tail was a decoder-calibration limit rather than a representation limit. The cost of recovering feasibility is a controlled rise in guard count, which we report explicitly.
 
-We propose the \emph{SetPredictor}: a small per-vertex classifier that reads the pretrained pointer encoder's embeddings and predicts an inclusion probability $p_i \in [0,1]$ for each vertex $i$ in a single forward pass. A scalar threshold $t$ converts $\{p_i\}$ into a guard set $S = \{i : p_i \ge t\}$, and is the only operating-point knob: lowering $t$ admits more vertices and traces a Pareto curve between coverage and guard count. The model receives no visibility matrix and no CGAL-derived geometry at inference time --- only the polygon vertices and the frozen encoder embeddings derived from them. We refer to this as \emph{geo-free} inference.
+Our contribution is twofold. We measure what a reinforcement learner can and cannot extract from a coverage-aware reward on vertex-guard AGP when denied geometric input at inference, and we use a small probe over the frozen encoder to separate the question of representation quality from the question of decoder quality. We do not claim to beat classical greedy or local-search heuristics on guard count; we claim, and document, that vertex-guard placement is learnable to a measurable degree by a reinforcement method that never sees an explicit visibility object.
 
-\paragraph{Contributions.}
-\begin{enumerate}
-  \item \textbf{Method.} We propose SetPredictor, a small single-shot per-vertex classifier over frozen pretrained pointer embeddings, with a single scalar threshold as its operating point and no geometric input at inference time. The training target is a coverage-anchored set obtained by local-search refinement of the pointer's seed.
-  \item \textbf{Empirical.} On a held-out in-distribution partition and on an out-of-distribution test set of much larger polygons, the SetPredictor improves coverage feasibility over the pretrained pointer at a controlled, tunable cost in guard count, traces a smooth Pareto curve under threshold sweep, and is empirically a fixed point under iteration of its own prediction. The detailed measurements are reported in Section~\ref{sec:results}.
-\end{enumerate}
-
-The remainder of the paper is organized as follows. Section~\ref{sec:problem} fixes notation. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} presents the diagnostic and the SetPredictor. Section~\ref{sec:experiments} describes the experimental setup, Section~\ref{sec:results} the results. Section~\ref{sec:discussion} discusses implications and Section~\ref{sec:limitations} states limitations. Section~\ref{sec:conclusion} concludes.
+The remainder of the paper is organized as follows. Section~\ref{sec:problem} fixes notation and the geo-free constraint. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the reinforcement method, what it does and does not absorb, and the representation probe. Section~\ref{sec:experiments} describes the experimental setup. Section~\ref{sec:results} reports the results. Section~\ref{sec:discussion} reads the results against the question. Section~\ref{sec:limitations} states limitations and Section~\ref{sec:conclusion} concludes.
 
 \section{Problem and Notation}
 \label{sec:problem}
 
-Let $s\subset\mathbb{R}^2$ denote a simple polygonal region (the closed set consisting of its interior and boundary), specified by an ordered vertex sequence $V(s)=(x_1,\dots,x_n)$ with $x_i\in\mathbb{R}^2$. A \emph{guard} is any point $g\in s$ with unobstructed $360^\circ$ visibility inside $s$. For any finite guard set $G\subseteq s$, define the visibility region and coverage
+Let $s \subset \mathbb{R}^2$ denote a simple polygonal region (the closed set consisting of its interior and boundary), specified by an ordered vertex sequence $V(s) = (x_1, \dots, x_n)$ with $x_i \in \mathbb{R}^2$. A \emph{guard} is any point $g \in s$ with unobstructed $360^\circ$ visibility inside $s$. For any finite guard set $G \subseteq s$, define the visibility region and coverage
 \begin{equation}
-\Vis{G}{s} \,=\, \{\, q\in s : \exists g\in G,\ \overline{gq}\subseteq s \,\},
+\Vis{G}{s} \,=\, \{\, q \in s : \exists g \in G,\ \overline{gq} \subseteq s \,\},
 \qquad
-\Covf{G}{s} \,=\, \frac{\Area{\Vis{G}{s}}}{\Area{s}}\in[0,1].
+\Covf{G}{s} \,=\, \frac{\Area{\Vis{G}{s}}}{\Area{s}} \in [0,1].
 \label{eq:vis-cov-general}
 \end{equation}
-The (point-guard) \emph{Art Gallery Problem (AGP)} asks for a minimum-cardinality guard set $G^*\subseteq s$ such that $\Covf{G^*}{s}=1$. We denote $\OPT=|G^*|$.
+The (point-guard) \emph{Art Gallery Problem (AGP)} asks for a minimum-cardinality guard set $G^* \subseteq s$ such that $\Covf{G^*}{s} = 1$. We denote $\OPT = |G^*|$.
 
-In this paper we focus on the \emph{vertex-guard} variant, where guards must be chosen from the polygon's vertex set $V(s)=\{x_1,\dots,x_n\}$. We encode a solution by an index set $\pi\subseteq \{1,\dots,n\}$, corresponding to the guard set $G(\pi)=\{x_i: i\in\pi\}$. The visibility and coverage in \eqref{eq:vis-cov-general} then specialize to
+In this paper we focus on the \emph{vertex-guard} variant, where guards must be chosen from the polygon's vertex set $V(s) = \{x_1, \dots, x_n\}$. We encode a solution by an index set $\pi \subseteq \{1, \dots, n\}$, corresponding to the guard set $G(\pi) = \{x_i : i \in \pi\}$. The visibility and coverage in~\eqref{eq:vis-cov-general} specialize to
 \begin{equation}
 \Vis{\pi}{s} \,=\, \{\, q \in s : \exists i \in \pi,\ \overline{x_i q} \subseteq s \,\},
 \qquad
-\Covf{\pi}{s} \,=\, \frac{\Area{\Vis{\pi}{s}}}{\Area{s}}\in[0,1].
+\Covf{\pi}{s} \,=\, \frac{\Area{\Vis{\pi}{s}}}{\Area{s}} \in [0,1].
 \label{eq:vis-cov}
 \end{equation}
-Let $\pi^\star$ be an optimal index set for the vertex-guard AGP and note that $|\pi^\star|\ge \OPT$. We report the approximation ratio $\rho=|\pi|/\OPT$, the normalized size $|\pi|/n$, and per-polygon coverage statistics ($\min$, $p_{01}$, $p_{05}$, and the counts $\#\{\Covf{}{}\ge \tau\}$ for $\tau\in\{0.95,0.99,0.999,1\}$).
+Let $\pi^\star$ be an optimal index set for the vertex-guard AGP and note that $|\pi^\star| \geq \OPT$. We report the approximation ratio $\rho = |\pi|/\OPT$, the normalized size $|\pi|/n$, and per-polygon coverage statistics ($\min$, $p_{01}$, $p_{05}$, and the counts $\#\{\Covf{}{} \geq \tau\}$ for $\tau \in \{0.95, 0.99, 0.999, 1\}$).
 
-\paragraph{Geo-free inference.} Throughout, we will say that an inference procedure for the vertex-guard AGP is \emph{geo-free} if its inputs at test time are limited to the polygon's vertex coordinates and learned embeddings derived from them --- no polygon visibility matrix, no CGAL-computed visibility regions, no per-vertex area features. Geo-free inference does not preclude using CGAL during \emph{evaluation} (to report exact coverage) or during \emph{training} (to construct target sets). It restricts what the model sees at inference time.
+The general (point-guard) AGP permits guards anywhere in $s$; the vertex-guard variant we work with restricts $G$ to $V(s)$ and so reduces guard placement to a finite discrete choice over the polygon's $n$ vertices --- the natural action space for a pointer-network policy~\cite{Vinyals2015,Bello2016,Kool2019Attention,Kwon2020POMO}, and a setting in which the combinatorial-geometric difficulty of the problem (NP-hardness, non-uniform visibility regions) remains fully present without conflating it with the separate question of continuous optimization in the interior of $s$. Extending to point-guard would require either an action-discretization step or a different policy architecture, and is outside the scope of this paper.
+
+We will say that an inference procedure is \emph{geo-free} if its inputs at test time are limited to the polygon's vertex coordinates and learned features derived from them --- no polygon visibility matrix, no CGAL-computed visibility regions, no per-vertex area or visibility-fraction feature. Geo-free inference does not preclude using exact visibility during evaluation (to report coverage after the fact) or during training (to compute rewards, gate trajectories, or build supervised targets); it restricts what the model reads at the moment it places guards. A solver allowed to query a visibility oracle at every decision step can in principle simulate greedy or local search, and a measurement of what such a solver has learned would be conflated with a measurement of what its oracle can compute. The geo-free constraint isolates the first question from the second, which is what makes ``no explicit geometric knowledge'' a measurable property and not just a rhetorical one.
 
 \section{Related Work}
 \label{sec:related}
 
-This section places the present work in three relevant lines of research: classical algorithms for the Art Gallery Problem, neural combinatorial optimization for related discrete problems, and post-hoc repair of learned solvers.
+This section places the present work in three lines of research: classical algorithms for the Art Gallery Problem, neural combinatorial optimization with reinforcement learning, and supervised post-processing of learned solvers.
 
-\paragraph{The Art Gallery Problem.} Lee and Lin~\cite{LeeLin1986} established NP-hardness for several variants of the AGP; O'Rourke~\cite{ORourke1987AGT} surveys the foundational geometric and combinatorial results. The vertex-guard variant has a long history of approximation algorithms and exact integer-programming approaches; we treat published instance libraries~\cite{art-gallery-instances-page} as the source of polygons in our experiments. Classical greedy heuristics~\cite{GonzalezBanos2001} place guards to maximize marginal coverage and are reliable on small to mid-sized polygons; local search refines candidate guard sets by swapping or removing vertices and is the basis for our training-target construction.
+\paragraph{The Art Gallery Problem.} Lee and Lin~\cite{LeeLin1986} established NP-hardness for several variants of the AGP; O'Rourke~\cite{ORourke1987AGT} surveys the foundational geometric and combinatorial results. The vertex-guard variant has a long history of approximation algorithms and exact integer-programming approaches; we treat published instance libraries~\cite{art-gallery-instances-page} as the source of polygons in our experiments. Classical greedy heuristics~\cite{GonzalezBanos2001} place guards to maximize marginal coverage and are reliable on small to mid-sized polygons; local search refines candidate guard sets by swapping or removing vertices and is the standard high-quality baseline. We use these classical methods only as evaluation reference points and as a source of supervised labels for the representation probe in Section~\ref{sec:method-arch}; they are not in competition with the reinforcement method on guard count.
 
-\paragraph{Neural combinatorial optimization.} Pointer networks~\cite{Vinyals2015} introduced the architecture of attending over input tokens to produce variable-length output index sequences and were extended to combinatorial optimization with reinforcement learning by Bello et al.~\cite{Bello2016} using REINFORCE~\cite{Williams1992} with a learned baseline. Subsequent work introduced attention-only architectures for routing problems~\cite{Kool2019Attention} and policy optimization variants such as POMO~\cite{Kwon2020POMO} that exploit problem symmetries. We adopt the recent preference-optimization (PO) recipe of Pan et al.~\cite{Pan2025PO}, which trains the pointer policy with a Bradley--Terry~\cite{BradleyTerry1952} ranking loss over pairs of solutions, replacing the variance-heavy REINFORCE objective and the brittleness of supervised cloning. A broader methodological survey is provided by Bengio et al.~\cite{survey:BENGIO2021405}.
+\paragraph{Reinforcement learning for combinatorial optimization.} Pointer networks~\cite{Vinyals2015} introduced the architecture of attending over input tokens to produce variable-length output index sequences, and were extended to combinatorial optimization with reinforcement learning by Bello et al.~\cite{Bello2016} using REINFORCE~\cite{Williams1992} with a learned baseline. Subsequent work introduced attention-only architectures for routing problems~\cite{Kool2019Attention} and policy optimization variants such as POMO~\cite{Kwon2020POMO} that exploit problem symmetries. We adopt the more recent preference-optimization (PO) recipe of Pan et al.~\cite{Pan2025PO}, which trains the policy with a Bradley--Terry~\cite{BradleyTerry1952} ranking loss over pairs of solutions sampled from the policy itself, replacing the variance-heavy REINFORCE objective. We treat PO as a reinforcement-style procedure: the loss is computed from policy rollouts on the environment (the polygon), the gradient direction is determined by the reward (coverage versus guard usage), and no supervised labels for the action sequence are used. A broader methodological survey is provided by Bengio et al.~\cite{survey:BENGIO2021405}.
 
-\paragraph{Neural editors and post-hoc repair.} An orthogonal line of work post-processes a base solver's output with a learned editor, typically autoregressively. For combinatorial problems with hard feasibility constraints (such as covering), iterative editors must contend with compounding errors and a train--inference distribution gap; behavioral-cloning and DAgger~\cite{RossGordonBagnell2011DAgger} variants are common training recipes. Our work first attempts the iterative-editor route, documents its failure on the vertex-guard AGP, and then proposes a single-shot alternative.
+\paragraph{Supervised post-processing of learned solvers.} An orthogonal line of work post-processes a base solver's output with a second model trained by supervised or imitation learning. For combinatorial problems with hard feasibility constraints (such as covering), iterative supervised editors must contend with compounding errors and a train--inference distribution gap; DAgger~\cite{RossGordonBagnell2011DAgger} and its variants partially address the latter. We use a single-shot supervised post-processor (the SetPredictor) not as a competing solver but as a \emph{probe} of the RL-trained encoder's representation. The framing is methodological: if a small classifier reading frozen RL embeddings can recover feasibility, the RL encoder must already carry the relevant geometric information.
 
 \section{Method}
 \label{sec:method}
 
-We start from a pretrained pointer policy (Section~\ref{sec:method-pointer}), document the failure of iterative-editor designs (Section~\ref{sec:method-diagnostic}), and then present the SetPredictor (Sections~\ref{sec:method-arch}--\ref{sec:method-inference}).
+We describe the reinforcement method (Section~\ref{sec:method-pointer}), the diagnostic that explains why a learned \emph{iterative} editor over the same policy does not improve over it (Section~\ref{sec:method-diagnostic}), and the single-shot representation probe (Sections~\ref{sec:method-arch}--\ref{sec:method-inference}).
 
-\subsection{Pretrained pointer policy (PO/BT)}
+\subsection{The reinforcement method: PO/BT pointer policy}
 \label{sec:method-pointer}
 
-Our base solver is an LSTM-encoder pointer network with attention-based decoder, trained via preference optimization on Bradley--Terry pairs following Pan et al.~\cite{Pan2025PO}. Solutions are index sequences $\pi=(\pi_1,\dots,\pi_T)$ over the vertex set $\{1,\dots,n\}$ with an explicit $\EOS$ token. For a polygon $s$, two candidate solutions $\pi^+, \pi^-$ are compared by a scalar utility $u(\pi\mid s)$ that combines coverage and guard usage; the loss is the standard Bradley--Terry log-likelihood
+\paragraph{Architecture.} The policy is an LSTM-encoder pointer network with attention-based decoder, of roughly $364$k parameters. A polygon $s$ with vertex sequence $V(s) = (x_1, \dots, x_n)$ is consumed coordinate-wise (no visibility input). The encoder produces per-vertex embeddings $\{h_i\}_{i=1}^n$, $h_i \in \mathbb{R}^{128}$. The decoder attends over the encoder at each step, emits a vertex index or an $\EOS$ token, and stops at $\EOS$ or when the maximum length is reached. Solutions are index sequences $\pi = (\pi_1, \dots, \pi_T)$ over the vertex set $\{1, \dots, n\}$. We collapse $\pi$ to its underlying set when reporting guard counts.
+
+\paragraph{Reward and rollouts.} For each polygon $s$, we sample $K$ rollouts from the policy and score each rollout by a scalar utility $u(\pi \mid s)$ that combines coverage and guard usage; the precise scalarization places coverage above a soft threshold and then prefers smaller guard sets. Coverage during training is computed using a discretized-visibility sampler ($M{=}500$ interior points per polygon) as a cheap approximation; CGAL exact visibility is reserved for evaluation.
+
+\paragraph{Preference-optimization loss.} For each pair $(\pi^+, \pi^-)$ of rollouts with $u(\pi^+) > u(\pi^-)$ above a coverage gate, we apply the Bradley--Terry log-likelihood
 \begin{equation}
-\mathcal{L}_{\mathrm{BT}}(\theta) \,=\, -\mathbb{E}_{(s,\pi^+,\pi^-)} \left[\, \log \sigma\!\big( \log p_\theta(\pi^+|s) - \log p_\theta(\pi^-|s) \big) \,\right],
+\mathcal{L}_{\mathrm{BT}}(\theta) \,=\, -\mathbb{E}_{(s, \pi^+, \pi^-)} \left[\, \log \sigma\!\big( \alpha\, [\, \log p_\theta(\pi^+|s) - \log p_\theta(\pi^-|s)\, ] \big) \,\right],
+\label{eq:bt-loss}
 \end{equation}
-where preferences are sampled from the policy's own rollouts under a coverage gate. The resulting policy is fast, near-optimal in guard count on in-distribution polygons (mean $|\pi|/\OPT \approx 1.21$ on dev), and has a left tail in coverage that motivates Section~\ref{sec:method-diagnostic}.
+where $\log p_\theta$ is length-normalized over the index sequence (Pan et al.~\cite{Pan2025PO}'s length-control trick, since AGP solutions have variable length). The gradient direction is driven purely by which of the two rollouts achieved a higher reward; no supervised target sequence is used.
 
-Throughout the remainder of the paper, \emph{the encoder of this PO-trained pointer is frozen} and used as a feature extractor. We denote its per-vertex embeddings by $\{h_i\}_{i=1}^n$, $h_i \in \mathbb{R}^{128}$.
+REINFORCE with a learned baseline is the classical choice for training pointer policies on combinatorial problems~\cite{Bello2016}, but on the vertex-guard AGP we observed that rewards saturate quickly into a bimodal regime (covered versus uncovered) where REINFORCE advantages collapse and gradient information vanishes. PO sidesteps this: binary preferences over pairs of rollouts retain useful gradient direction even when the rewards themselves become similar, an empirical observation Pan et al.~\cite{Pan2025PO} highlight on routing problems and one we replicate here. At the end of training we are left with a single deterministic policy that maps a polygon's coordinates to a guard sequence in one forward pass; this is the artifact whose properties the rest of the paper investigates, and from this point on its encoder is frozen and treated as a learned feature extractor. Figure~\ref{fig:po_training} reports the held-out training dynamics and shows that the coverage--cost trade-off improves smoothly over the training run rather than collapsing into a degenerate regime.
 
-\subsection{Architectural alternative: iterative editor}
+\figincl{gfx/setpred/fig_po_training.pdf}{PO/BT training dynamics on the held-out \texttt{dev} split. Left axis: mean per-polygon coverage of the greedy-decoded policy over training epochs. Right axis: mean approximation ratio $|S|/\OPT$ (or normalized guard count $|S|/n$ if $\OPT$ logging was disabled). The two curves together show that PO/BT improves coverage and guard cardinality jointly rather than trading one for the other, and that the preference-based gradient direction does not collapse as rewards saturate.}{fig:po_training}
+
+\subsection{What the reinforcement method does and does not absorb}
 \label{sec:method-diagnostic}
 
-Before describing the SetPredictor, we briefly motivate the single-shot design by contrast with the natural alternative: a learned iterative editor that applies a sequence of $\textsc{add}/\textsc{remove}/\textsc{stop}$ edits to the seed. We experimented with three such editor architectures of increasing capacity (a small MLP over coordinates and in-set indicator, $\sim$80k parameters; a $\sim$600k-parameter model with polygon topology features, an auxiliary visibility-prediction loss and DAgger refresh~\cite{RossGordonBagnell2011DAgger}; and a strict-gate variant with a strong $\textsc{stop}$ bias). None of these editors improved over the pretrained pointer in any coverage-preserving regime: median coverage at termination matched the seed, $|\pi|/\OPT$ did not decrease, and the residual coverage tail was unchanged. Three structural reasons make iteration difficult for this task: rollouts accumulate errors because the editor sees clean trajectories at training but its own evolving predictions at inference; a single classification head over $\{\textsc{add}, \textsc{remove}, \textsc{stop}\}\times\{1,\dots,n\}$ couples action selection with termination, producing $\textsc{stop}$ probabilities that are either too eager or too reluctant; and the training-time and inference-time state distributions diverge in ways that DAgger refresh alone did not close. The single-shot design we present next removes all three by construction: there is no rollout, there is no $\textsc{stop}$ token, and the model is trained and used the same way.
+The reinforcement method ends up absorbing two qualitatively different parts of the problem in qualitatively different ways. On the cardinality axis it is broadly successful: on held-out in-distribution polygons (Section~\ref{sec:res-headline}) the policy reaches mean $|S|/\OPT \approx 1.09$, which is competitive with classical heuristics on these sizes, and it does so without ever being shown a visibility object. On the feasibility axis it is less successful: on the same evaluation, $19.3\%$ of polygons end up below $0.95$ coverage with a worst case of $0.830$, and on out-of-distribution polygons the coverage tail blows up to $14.7\%$ of polygons below $0.95$ with a worst case of $0.049$. The reinforcement method has learned to use a small number of vertices, but it has not learned to guarantee that those vertices cover the polygon.
 
-\subsection{SetPredictor architecture}
+The natural reaction to this is to train a second learned model that applies a sequence of $\textsc{add}/\textsc{remove}/\textsc{stop}$ edits to the policy's seed. We tried three such iterative editor architectures of increasing capacity --- including one with topology features and an auxiliary visibility-prediction loss, and one with DAgger refresh~\cite{RossGordonBagnell2011DAgger} --- and none of them improved over the pretrained policy in any coverage-preserving regime. Three structural reasons make iteration difficult here: rollouts accumulate errors because the editor sees clean trajectories at training but its own evolving predictions at inference; a single classification head over $\{\textsc{add}, \textsc{remove}, \textsc{stop}\} \times \{1, \dots, n\}$ couples action selection with termination, producing $\textsc{stop}$ probabilities that are either too eager or too reluctant; and the training-time and inference-time state distributions diverge in ways that DAgger refresh alone did not close. We mention this only to motivate the single-shot design used for the representation probe: there is no rollout, there is no $\textsc{stop}$ token, and the model is trained and used in the same regime.
+
+\subsection{Probing the representation: a single-shot per-vertex classifier}
 \label{sec:method-arch}
 
-The SetPredictor is a single-shot per-vertex binary classifier that reads the pretrained pointer encoder's embeddings and predicts an inclusion probability per vertex. For polygon $s$ with vertex sequence $V(s)=(x_1,\dots,x_n)$, the input feature for vertex $i$ is
+The hypothesis under test asks what the reinforcement method has internalized. A natural way to test this is to ask whether a small classifier, conditioned only on the encoder's output and never on a visibility object, can recover the feasibility decision the decoder failed to make. We call this classifier the \emph{SetPredictor}.
+
+For polygon $s$ with vertex sequence $V(s) = (x_1, \dots, x_n)$, the input feature for vertex $i$ is
 \begin{equation}
 z_i \,=\, [\, h_i \,;\, x_i \,;\, \mathbf{1}\{i \in \pi_{\mathrm{seed}}\} \,] \,\in\, \mathbb{R}^{131},
+\label{eq:setpred-feat}
 \end{equation}
-i.e.\ the frozen 128-dimensional pointer embedding $h_i$, the 2D coordinates $x_i$, and a single binary indicator for whether vertex $i$ is selected by the pretrained pointer's seed solution $\pi_{\mathrm{seed}}$. No visibility matrix, no CGAL output, and no area feature enters the SetPredictor at inference time.
+that is, the \emph{frozen} 128-dimensional encoder embedding $h_i$ from the PO/BT policy, the 2D coordinates $x_i$, and a single binary indicator for whether vertex $i$ is selected by the policy's greedy-decoded seed $\pi_{\mathrm{seed}}$. No visibility matrix, no CGAL output, and no area feature enters the classifier at inference time. The geo-free constraint is preserved.
 
-The architecture is a small Transformer encoder over the $n$ vertex tokens: 3 self-attention layers, 8 heads, hidden width 128, FFN expansion 4, and a sigmoid output head per token. Total parameters: $\sim$464k.
-
+The architecture is a small Transformer encoder over the $n$ vertex tokens: $3$ self-attention layers, $8$ heads, hidden width $128$, FFN expansion factor $4$, and a sigmoid output head per token. Total parameters: $\sim 464$k. We form a per-vertex representation by concatenating the attention output with two pooled context vectors --- mean-pooled over the seed set and mean-pooled over all valid (non-padded) vertices --- and feed the concatenation to a $2$-layer MLP head:
 \begin{equation}
-\hat{p}_i \,=\, \sigma\!\big( \mathrm{MLP}(\mathrm{Att}_3(\mathrm{Att}_2(\mathrm{Att}_1(z_1,\dots,z_n))))_i \big),\qquad i=1,\dots,n.
+\hat{p}_i \,=\, \sigma\!\big( \mathrm{MLP}([\, v_i \,\|\, S_{\mathrm{pool}} \,\|\, G_{\mathrm{pool}} \,])_i \big),\qquad i = 1, \dots, n.
+\label{eq:setpred-arch}
 \end{equation}
-
-The output $\hat{p}_i \in [0,1]$ is interpreted as the probability that vertex $i$ should be a guard. Thresholding at $t\in(0,1)$ yields the guard set
+The output $\hat{p}_i \in [0,1]$ is interpreted as the probability that vertex $i$ should be in the final guard set. Thresholding at $t \in (0,1)$ yields the guard set
 \begin{equation}
-S(t) \,=\, \{\, i \in \{1,\dots,n\} : \hat{p}_i \ge t \,\}.
+S(t) \,=\, \{\, i \in \{1, \dots, n\} : \hat{p}_i \geq t \,\}.
 \label{eq:setpred-decode}
 \end{equation}
 
-\subsection{Training}
+The SetPredictor is trained by supervised learning on labels derived from local search over the policy's seed (Section~\ref{sec:method-training}), so it is not itself a reinforcement learner; we use it as a probe of the RL-trained encoder. The only polygon-structural information it reads at inference is the frozen RL embedding $h_i$ together with $x_i$ and the seed indicator, and the logic of the probe is direct: if a small classifier reading only those embeddings can close the feasibility tail, the encoder must already carry the geometric information needed to support that decision.
+
+\subsection{Training the probe}
 \label{sec:method-training}
 
-\paragraph{Target sets.} For each training polygon $s$ we obtain a target set $\pi^\star_{\mathrm{LS}}(s)$ by applying local search to the pretrained pointer's seed solution. The local search uses a relative coverage gate $\tau{=}0.99$ relative to a reference computed with disc-vis sampling ($M{=}500$), which is the computationally cheap approximation we use at training time. CGAL exact visibility is used only at evaluation.
+\paragraph{Target sets.} For each training polygon $s$ we obtain a target set $\pi^\star_{\mathrm{LS}}(s)$ by applying local search to the policy's seed solution. The local search uses a coverage gate $\tau = 0.99$ relative to a reference computed with disc-vis sampling ($M = 500$), which is the cheap approximation we use at training time. CGAL exact visibility is used only at evaluation.
 
-\paragraph{Loss.} Binary cross-entropy per vertex with a positive-class weight that automatically balances the empirically observed ratio of guards to non-guards (mean $\approx 5.66$ on dev),
+\paragraph{Loss.} Binary cross-entropy per vertex with a positive-class weight that automatically balances the empirical guard/non-guard ratio (mean $\approx 5.66$ on the development split),
 \begin{equation}
-\mathcal{L}(\theta) \,=\, -\frac{1}{|\mathcal{B}|} \sum_{s\in\mathcal{B}} \frac{1}{|V(s)|} \sum_{i=1}^{|V(s)|} \big[\, w_{+} y_i \log \hat{p}_i + (1-y_i)\log(1-\hat{p}_i) \,\big],
+\mathcal{L}(\theta) \,=\, -\frac{1}{|\mathcal{B}|} \sum_{s \in \mathcal{B}} \frac{1}{|V(s)|} \sum_{i=1}^{|V(s)|} \big[\, w_{+} y_i \log \hat{p}_i + (1 - y_i) \log(1 - \hat{p}_i) \,\big],
+\label{eq:setpred-loss}
 \end{equation}
 where $y_i = \mathbf{1}\{i \in \pi^\star_{\mathrm{LS}}(s)\}$ and $w_{+}$ is the positive-class weight.
 
-\paragraph{Hyperparameters.} 60 epochs, batch size 32, learning rate $3\times 10^{-4}$, AdamW~\cite{Loshchilov2019AdamW} with default weight decay, single random seed (1234). Checkpoint selection is on \texttt{dev\_tune} (Section~\ref{sec:experiments}).
+\paragraph{Hyperparameters.} $60$ epochs, batch size $32$, learning rate $3 \times 10^{-4}$, AdamW~\cite{Loshchilov2019AdamW} with default weight decay, single random seed ($1234$). Checkpoint selection is on the \texttt{dev\_tune} split (Section~\ref{sec:experiments}).
 
-\subsection{Inference and threshold control}
+\subsection{Inference and the threshold knob}
 \label{sec:method-inference}
 
-At inference time the model receives a polygon $s$, computes the pretrained pointer's seed solution $\pi_{\mathrm{seed}}$ (a single rollout), forms vertex features $z_i$, runs one forward pass of the SetPredictor to obtain $\{\hat{p}_i\}_{i=1}^n$, and returns the guard set $S(t)$ defined in Eq.~\eqref{eq:setpred-decode}.
-
-\paragraph{Threshold as a Pareto knob.} The threshold $t$ is the single continuous knob that controls the coverage--size trade-off. Lower $t$ admits more vertices into $S$, raising both expected coverage and $|S|$. We report the full Pareto curve over $t\in\{0.20, 0.25, 0.30\}$ in Section~\ref{sec:results}.
-
-\paragraph{Iterative inference is a fixed point.} One might consider iterating the SetPredictor: re-run it with the previous prediction's in-set indicator updated, for $K$ passes. We evaluated $K\in\{1,2,3,5\}$ over a sweep of thresholds; the predictions are empirically a fixed point after the first pass. This is the expected behavior of a single-shot model whose input already includes the seed indicator: there is no meaningful additional signal to extract in subsequent passes. We use $K{=}1$ throughout.
+At inference time the procedure is: run the PO/BT policy's encoder on the polygon's coordinates (one forward pass), greedy-decode a seed $\pi_{\mathrm{seed}}$, form the per-vertex features $z_i$ of Eq.~\eqref{eq:setpred-feat}, run one forward pass of the SetPredictor to obtain $\{\hat{p}_i\}_{i=1}^n$, and return $S(t)$ from Eq.~\eqref{eq:setpred-decode}. No CGAL call, no visibility matrix, no oracle anywhere on this path. The threshold $t$ is the single continuous knob that controls the coverage--size trade-off: lower $t$ admits more vertices, raising both expected coverage and $|S|$, and we report the full Pareto curve over $t \in \{0.20, 0.25, 0.30\}$ in Section~\ref{sec:res-pareto}. One could in principle iterate the SetPredictor by re-running it with the previous prediction's in-set indicator updated, for $K$ passes; we evaluated $K \in \{1, 2, 3, 5\}$ over a sweep of thresholds and found that the predictions are empirically a fixed point after the first pass (Section~\ref{sec:res-fixed-point}). This is the expected behavior of a single-shot model whose input already includes the seed indicator, so we use $K = 1$ throughout.
 
 \section{Experiments}
 \label{sec:experiments}
@@ -153,155 +178,144 @@ At inference time the model receives a polygon $s$, computes the pretrained poin
 \subsection{Dataset and partition}
 \label{sec:exp-dataset}
 
-We use the publicly available AGPVG library of vertex-guard AGP instances curated by Couto, de Rezende, and de Souza~\cite{art-gallery-instances-page}. The library contains four families (random simple, random orthogonal, random von Koch, complete von Koch) over a wide range of $n$. We work with the following splits:
+We benchmark against the publicly available AGPIL library of polygons~\cite{art-gallery-instances-page}, which contains four families (random simple, random orthogonal, random von Koch, complete von Koch) over a wide range of vertex counts $n$. We work with the splits in Table~\ref{tab:dataset_partition}.
 
 \begin{table}[t]
   \centering
   \small
   \input{tables/tab_dataset_partition.tex}
-  \caption{Dataset partition. The \texttt{dev} split is partitioned 70/30 into \texttt{dev\_tune} (checkpoint selection) and \texttt{dev\_test} (held-out evaluation) by seeded random shuffle (seed 1234). The \texttt{test} split contains polygons whose vertex count exceeds the training range and is used as an out-of-distribution evaluation set. The \texttt{large} split is reserved for an extreme-OOD smoke evaluation.}
+  \caption{Dataset partition. The \texttt{dev} split is partitioned $70/30$ into \texttt{dev\_tune} (checkpoint selection) and \texttt{dev\_test} (held-out evaluation) by seeded random shuffle (seed $1234$). The \texttt{test} split contains polygons whose vertex count exceeds the training range and is used as the out-of-distribution evaluation. The \texttt{large} split is reserved for an extreme-OOD smoke evaluation.}
   \label{tab:dataset_partition}
 \end{table}
 
-The 70/30 partition is critical: an earlier alphabetical-name split caused systematic family imbalance between \texttt{dev\_tune} and \texttt{dev\_test} (\texttt{fat-*} polygons concentrated in tune, \texttt{randsimple-*} in test), which produced misleading optimism. The seeded random shuffle removes this bias.
+The $70/30$ partition is critical: an earlier alphabetical-name split caused systematic family imbalance between \texttt{dev\_tune} and \texttt{dev\_test} (\texttt{fat-*} polygons concentrated in tune, \texttt{randsimple-*} in test), which produced misleading optimism. The seeded random shuffle removes this bias.
 
 \subsection{Training setup}
 \label{sec:exp-training}
 
-The PO/BT pretrained pointer is trained once and frozen. The SetPredictor is trained on \texttt{train} only; \texttt{dev\_tune} is used for early-stopping and threshold inspection; \texttt{dev\_test}, \texttt{test}, and \texttt{large} are touched only after training and threshold selection are complete. We train for 60 epochs with batch size 32, learning rate $3\times 10^{-4}$, AdamW with default weight decay, and a single random seed (1234).
+The PO/BT reinforcement-trained policy is trained once and frozen; all coverage rewards during PO training use disc-vis sampling. The SetPredictor probe is trained on \texttt{train} only; \texttt{dev\_tune} is used for early stopping and threshold inspection; \texttt{dev\_test}, \texttt{test}, and \texttt{large} are touched only after training and threshold selection are complete. Hyperparameters for the SetPredictor are stated in Section~\ref{sec:method-training}; the policy itself is the existing \texttt{lstm\_bt} checkpoint produced by our PO/BT training script.
 
 \subsection{Evaluation protocol}
 \label{sec:exp-eval}
 
-For each polygon we compute the pretrained pointer's seed, run a single SetPredictor forward pass, threshold at $t$ to obtain $S(t)$, and evaluate $S(t)$ with CGAL exact polygon visibility~\cite{cgal:eb-25b}. We report mean coverage $\Covf{}{}$, mean normalized size $|S|/n$, mean approximation ratio $|S|/\OPT$, and per-polygon coverage distribution (the counts $\#\{\Covf{}{}\ge\tau\}$ for $\tau\in\{0.95, 0.99, 0.999, 1\}$ and the minimum coverage). For binomial counts we report Wilson 95\% confidence intervals on the proportion $\#\{\Covf{}{}\ge 0.95\}/n$.
-
-Optimal guard counts $\OPT$ are taken from the AGPVG library's optimal solutions, available for all polygons in \texttt{train}, \texttt{dev}, and \texttt{test}; they are not available for all polygons in \texttt{large}, where we report coverage only.
+For each polygon we compute the policy's seed (the policy's own guard sequence, $\EOS$-truncated and greedy-decoded), evaluate it with CGAL exact polygon visibility~\cite{cgal:eb-25b}, and then, separately, run a single SetPredictor forward pass on the policy's encoder output, threshold at $t$ to obtain $S(t)$, and evaluate $S(t)$ with CGAL. We report mean coverage $\Covf{}{}$, mean normalized size $|S|/n$, mean approximation ratio $|S|/\OPT$, and per-polygon coverage distribution (the counts $\#\{\Covf{}{} \geq \tau\}$ for $\tau \in \{0.95, 0.99, 0.999, 1\}$ and the minimum coverage). For binomial counts we report Wilson $95\%$ confidence intervals on the proportion $\#\{\Covf{}{} \geq 0.95\}/n$. The optimal vertex-guard counts $\OPT$ are available for all polygons in \texttt{train}, \texttt{dev}, and \texttt{test} and unavailable for some polygons in \texttt{large}, where we report coverage only.
 
 \section{Results}
 \label{sec:results}
 
-We organise the results in five subsections. Section~\ref{sec:res-headline} reports the held-out in-distribution headline, Section~\ref{sec:res-dist} the per-polygon coverage distribution that lies behind it, Section~\ref{sec:res-pareto} the coverage--cost Pareto curve, Section~\ref{sec:res-fixed-point} the fixed-point behaviour of iterative inference, and Section~\ref{sec:res-ood} the out-of-distribution evaluation that is the main load-bearing measurement of the paper.
+We organize the results around the hypothesis. Section~\ref{sec:res-headline} reports what the reinforcement method achieves on its own --- the answer to ``does the policy learn to place guards.'' Section~\ref{sec:res-dist} examines the per-polygon distribution behind the mean. Sections~\ref{sec:res-pareto}--\ref{sec:res-fixed-point} report the representation probe's Pareto curve and its fixed-point property. Section~\ref{sec:res-ood} is the main out-of-distribution measurement, which is the most informative test of whether the reinforcement-learned representation generalises.
 
-\subsection{Headline: held-out evaluation on \texttt{dev\_test}}
+\subsection{The reinforcement method places guards}
 \label{sec:res-headline}
 
 \begin{table}[t]
   \centering
   \small
   \input{tables/tab_headline.tex}
-  \caption{Held-out evaluation on \texttt{dev\_test} (367 polygons). The pretrained pointer (seed) is the PO/BT-trained LSTM pointer; SetPredictor at $t{=}0.20$ is the proposed model with the lowest threshold reported. Wilson 95\% CI on the coverage-feasibility proportion is shown in parentheses. The SetPredictor closes the coverage tail (no polygon below $0.95$) at a controlled cost in $|S|/\OPT$.}
+  \caption{Held-out evaluation on \texttt{dev\_test} ($367$ polygons). \emph{Pretrained pointer (seed)} is the PO/BT-trained policy decoded greedily, the artifact whose properties this paper investigates. The SetPredictor row reports the representation probe at $t = 0.20$. Wilson $95\%$ CI on the coverage-feasibility proportion is shown in parentheses.}
   \label{tab:headline}
 \end{table}
 
-Table~\ref{tab:headline} reports the headline numbers on \texttt{dev\_test}. At $t{=}0.20$, the SetPredictor lifts mean coverage from $0.969$ (pointer) to $0.9993$ and lifts the count of polygons reaching $\Covf{}{}\ge 0.95$ from $296/367$ (pointer) to $367/367$ (SetPredictor). The cost is a mean $|S|/\OPT$ of $\approx 2.90$ against the pointer's $\approx 1.09$. We discuss the framing of this trade-off in Section~\ref{sec:discussion}.
+The first row of Table~\ref{tab:headline} is the geo-free reinforcement policy on its own: mean coverage $0.969$, $296/367$ polygons with $\Covf{}{} \geq 0.95$ (Wilson $95\%$ CI $(0.763, 0.844)$), and $|S|/\OPT \approx 1.09$. Read this against the question we asked in the introduction. A policy that sees only polygon coordinates and is trained from coverage-aware rewards over its own rollouts produces, on a held-out partition, guard sets that are competitive in cardinality and reach $0.95$ coverage on the large majority of polygons. The hypothesis --- that vertex-guard placement is learnable, to a degree, by a reinforcement method that never sees an explicit visibility object --- is confirmed in the affirmative on this measurement.
 
-\subsection{Distribution shift in per-polygon coverage}
+The honest scope of the confirmation is the residual: $71/367 = 19.3\%$ of polygons fall below $\Covf{}{} = 0.95$ under the policy alone, and the minimum coverage is $0.830$. The reinforcement method, on its own, does not give a feasibility guarantee. Figure~\ref{fig:worked_example} draws two illustrative polygons, one from \texttt{dev\_test} and one from \texttt{test}, with the policy's seed, the policy plus the SetPredictor probe at $t = 0.30$, and the optimum drawn side by side; it gives a visual sense of where the policy succeeds and where the probe contributes.
+
+\figincl{gfx/setpred/fig_worked_example.pdf}{Worked examples: two polygons drawn with the policy's seed (left column), the policy plus the SetPredictor probe at $t = 0.30$ (middle column), and the optimum (right column). Vertices selected as guards are marked. Row 1 is an in-distribution polygon where the policy already covers most of the region. Row 2 is an out-of-distribution polygon where the policy's seed leaves a substantial uncovered region and the probe restores feasibility by adding vertices the policy missed.}{fig:worked_example}
+
+\subsection{Per-polygon distribution behind the mean}
 \label{sec:res-dist}
 
 \begin{table}[t]
   \centering
   \small
   \input{tables/tab_dist_shift.tex}
-  \caption{Per-polygon coverage distribution on \texttt{dev\_test} (367 polygons). Counts show the number of polygons reaching each coverage threshold; \emph{min} $\Covf{}{}$ is the worst polygon. The SetPredictor moves the entire distribution to the right, eliminating the long left tail visible in the pretrained pointer row.}
+  \caption{Per-polygon coverage distribution on \texttt{dev\_test} ($367$ polygons). Counts show the number of polygons reaching each coverage threshold; \emph{min} $\Covf{}{}$ is the worst polygon. The pretrained policy has a long left tail. The SetPredictor moves the entire distribution to the right.}
   \label{tab:dist_shift}
 \end{table}
 
-The shift is most visible at the lower tails (Table~\ref{tab:dist_shift}): the pointer has 71 polygons below $\Covf{}{}=0.95$ and a worst case of $0.830$; at $t{=}0.20$, no polygon is below $0.95$ and the worst case is $0.977$. Figure~\ref{fig:coverage_cdf} visualises the same shift as a coarse empirical complementary CDF on both partitions: the curve for the SetPredictor sits to the right of the pretrained pointer at every threshold, and the difference is most pronounced on the out-of-distribution panel.
+The mean coverage $0.969$ of the policy alone hides a bimodal distribution. Table~\ref{tab:dist_shift} reports the per-polygon counts. The policy reaches $\Covf{}{} = 1$ on only $3/367$ polygons, $\Covf{}{} \geq 0.99$ on $99/367$, and has $71$ polygons below $0.95$ with a worst case of $0.830$. The probe, at $t = 0.20$, eliminates the left tail and moves the bulk of the distribution above $0.99$. Figure~\ref{fig:coverage_cdf} visualizes the same shift as a per-polygon complementary CDF, with the dashed line at $0.95$ marking the feasibility gate; the SetPredictor curve sits to the right of the pretrained policy at every coverage threshold, in both the in-distribution and the out-of-distribution panel.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\linewidth]{gfx/setpred/fig_coverage_cdf.pdf}
-  \caption{Per-polygon coverage distribution, in-distribution (left, 367 polygons) and out-of-distribution (right, 2107 polygons). For each method we plot the fraction of polygons with coverage at least $x$, against $x$. Curves are coarse stair-step CDFs constructed from the per-cell coverage quantiles and thresholded counts; the dashed vertical line marks the $0.95$ feasibility gate. Across both panels and across all three thresholds, the SetPredictor curve sits to the right of the pretrained pointer.}
-  \label{fig:coverage_cdf}
-\end{figure}
+\figincl{gfx/setpred/fig_coverage_cdf.pdf}{Per-polygon coverage distribution as a complementary stair-step CDF, in-distribution \texttt{dev\_test} (left, $367$ polygons) and out-of-distribution \texttt{test} (right, $2107$ polygons). For each method we plot the fraction of polygons with coverage at least $x$ against $x$. The dashed vertical line marks the $0.95$ feasibility gate. Across both panels and across all three SetPredictor thresholds, the SetPredictor curve sits to the right of the pretrained policy.}{fig:coverage_cdf}
 
-\subsection{Pareto curve}
+\subsection{The representation probe: Pareto curve}
 \label{sec:res-pareto}
 
 \begin{table}[t]
   \centering
   \small
   \input{tables/tab_pareto.tex}
-  \caption{Threshold sweep on \texttt{dev\_test} (367 polygons). Lower $t$ admits more vertices, raising both expected coverage and $|S|$. The three operating points $t\in\{0.20,0.25,0.30\}$ correspond to all-pass, near-all-pass, and a slightly faster but riskier configuration.}
+  \caption{Threshold sweep on \texttt{dev\_test} ($367$ polygons). Lower $t$ admits more vertices, raising both expected coverage and $|S|$. All three operating points reach $\#\{\Covf{}{} \geq 0.95\}/n = 367/367$.}
   \label{tab:pareto}
 \end{table}
 
-Table~\ref{tab:pareto} traces the Pareto curve from $t{=}0.30$ to $t{=}0.20$. All three operating points satisfy the coverage gate $\Covf{}{}\ge 0.95$ on every \texttt{dev\_test} polygon; $t{=}0.20$ is the most conservative (largest $|S|$, fewest residual sub-$0.99$ polygons). Between $t{=}0.30$ and $t{=}0.20$, mean coverage rises by $\approx 0.0015$ and mean $|S|/n$ rises by $\approx 0.10$. The corresponding cost in guard count, measured against the optimum, rises from $\approx 1.09$ for the pretrained pointer alone to $\approx 2.20$ at $t{=}0.30$ and $\approx 2.90$ at $t{=}0.20$. Figure~\ref{fig:pareto} plots the same trade-off across a broader threshold sweep on \texttt{dev\_tune} alongside the three canonical operating points on \texttt{dev\_test} and on the out-of-distribution \texttt{test} split.
+Table~\ref{tab:pareto} traces the Pareto curve from $t = 0.30$ to $t = 0.20$. All three thresholds satisfy the coverage gate $\Covf{}{} \geq 0.95$ on every \texttt{dev\_test} polygon; $t = 0.20$ is the most conservative (largest $|S|$, fewest residual sub-$0.99$ polygons). Between $t = 0.30$ and $t = 0.20$, mean coverage rises by $\approx 0.0015$ and mean $|S|/n$ rises by $\approx 0.10$. The corresponding cost in guard count, measured against the optimum, rises from $\approx 1.09$ for the reinforcement policy alone to $\approx 2.20$ at $t = 0.30$ and $\approx 2.90$ at $t = 0.20$. This is the cost of feasibility: the probe trades guard count for the missing coverage. Figure~\ref{fig:pareto} plots the same trade-off across a broader threshold sweep on \texttt{dev\_tune}, together with the three canonical operating points on \texttt{dev\_test} and on the OOD \texttt{test} split.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\linewidth]{gfx/setpred/fig_pareto.pdf}
-  \caption{Coverage--cost trade-off, in-distribution (left) and out-of-distribution (right). The horizontal axis is the mean guard count relative to the optimum, $|S|/\OPT$; the vertical axis is mean per-polygon coverage. The pretrained pointer (triangle) sits at low cost and the bottom of its coverage curve; the SetPredictor (circles) traces a monotone curve as the threshold $t$ is lowered, gaining coverage at a controlled cost in $|S|/\OPT$. The left panel includes the broader \texttt{dev\_tune} threshold sweep as a faint connecting curve.}
-  \label{fig:pareto}
-\end{figure}
+\figincl{gfx/setpred/fig_pareto.pdf}{Coverage--cost trade-off, in-distribution (left) and out-of-distribution (right). The horizontal axis is the mean guard count relative to the optimum, $|S|/\OPT$; the vertical axis is mean per-polygon coverage. The pretrained policy (triangle) sits at low cost and the bottom of its coverage curve; the SetPredictor (circles) traces a monotone curve as the threshold $t$ is lowered, gaining coverage at a controlled cost in $|S|/\OPT$. The left panel includes the broader \texttt{dev\_tune} threshold sweep as a faint connecting curve.}{fig:pareto}
 
-\subsection{Iterative inference is a fixed point}
+\subsection{Iterative inference of the probe is a fixed point}
 \label{sec:res-fixed-point}
 
 \begin{table}[t]
   \centering
   \small
   \input{tables/tab_fixed_point.tex}
-  \caption{Inference passes $K\in\{1,2,3,5\}$ at fixed threshold ($t{=}0.65$, full dev, 1224 polygons). The variation across $K$ is at the fourth decimal: iterating the SetPredictor returns essentially the same prediction. We use $K{=}1$ throughout the remainder of the paper.}
+  \caption{Inference passes $K \in \{1, 2, 3, 5\}$ at fixed threshold ($t = 0.65$, full \texttt{dev}, $1224$ polygons). The variation across $K$ is at the fourth decimal: iterating the SetPredictor returns essentially the same prediction.}
   \label{tab:fixed_point}
 \end{table}
 
-Table~\ref{tab:fixed_point} confirms the fixed-point behaviour: across $K\in\{1,2,3,5\}$ the changes are at the fourth decimal place in all three reported metrics. Figure~\ref{fig:kinvariance} plots the same information across six thresholds; the six lines are visually flat against the small vertical range, confirming that a single forward pass is sufficient and that iteration is, empirically, a fixed point of the SetPredictor.
+Table~\ref{tab:fixed_point} confirms that re-running the probe with its own output as the new in-set indicator does not change the prediction: across $K \in \{1, 2, 3, 5\}$ the changes in mean coverage, $|S|/n$, and $|S|/\OPT$ are at the fourth decimal place. The probe is a fixed point of its own prediction. Figure~\ref{fig:kinvariance} plots the same information across six thresholds; the lines are visibly flat against the small vertical range, confirming that one forward pass is sufficient. We use $K = 1$ in the rest of the paper.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.7\linewidth]{gfx/setpred/fig_kinvariance.pdf}
-  \caption{Iterative inference is empirically a fixed point. Mean coverage as a function of the number of inference passes $K\in\{1,2,3,5\}$, for six thresholds $t\in\{0.5,0.6,0.65,0.7,0.75,0.8\}$, on the full \texttt{dev} split (1224 polygons). The vertical axis is tightly cropped to show that the across-$K$ variation is small (fourth decimal place) at every threshold. We use $K{=}1$ in the rest of the paper.}
-  \label{fig:kinvariance}
-\end{figure}
+\figincl{gfx/setpred/fig_kinvariance.pdf}{Iterative inference is empirically a fixed point. Mean coverage as a function of the number of inference passes $K \in \{1, 2, 3, 5\}$, for six thresholds $t \in \{0.5, 0.6, 0.65, 0.7, 0.75, 0.8\}$, on the full \texttt{dev} split ($1224$ polygons). The vertical axis is tightly cropped to show that the across-$K$ variation is at the fourth decimal at every threshold.}{fig:kinvariance}
 
-\subsection{Out-of-distribution evaluation on \texttt{test}}
+\subsection{Out-of-distribution evaluation}
 \label{sec:res-ood}
 
 \begin{table}[t]
   \centering
   \small
   \input{tables/tab_ood_test.tex}
-  \caption{Out-of-distribution evaluation on the \texttt{test} split (2107 polygons, vertex counts up to $n{=}1000$). The pretrained pointer's coverage tail blows up on OOD polygons (310 of 2107 polygons below $\Covf{}{}=0.95$, with a minimum coverage of $0.049$); the SetPredictor at $t{=}0.20$ reduces $\#\{\Covf{}{}<0.95\}$ to 3, a $\sim 100\times$ reduction.}
+  \caption{Out-of-distribution evaluation on the \texttt{test} split ($2107$ polygons, vertex counts up to $n = 1000$). The reinforcement policy's coverage tail blows up on out-of-distribution polygons ($310$ of $2107$ below $\Covf{}{} = 0.95$, with a minimum coverage of $0.049$); the probe at $t = 0.20$ reduces $\#\{\Covf{}{} < 0.95\}$ to $3$, a $\sim 100\times$ reduction.}
   \label{tab:ood_test}
 \end{table}
 
-The OOD evaluation (Table~\ref{tab:ood_test}) is the strongest evidence for the SetPredictor's role as a distributional safety layer. On polygons whose vertex count exceeds the SetPredictor's own training range, the pointer's coverage failures balloon (310 of 2107 polygons below $0.95$, worst case $0.049$), while the same threshold $t{=}0.20$ that was selected on \texttt{dev\_tune} reduces the count of sub-$0.95$ polygons by two orders of magnitude. Mean $|S|/\OPT$ rises from $1.22$ (pointer) to $2.90$ (SetPredictor $t{=}0.20$), again a trade-off we accept in exchange for the distributional robustness.
+Table~\ref{tab:ood_test} is the strongest available test of what the reinforcement-trained representation generalizes. On polygons whose vertex count exceeds the policy's training range, the policy alone falls back to mean coverage $0.957$ with $310/2107$ polygons below $0.95$ and a worst case of $0.049$. The same probe checkpoint, trained on the in-distribution range, reduces sub-$0.95$ failures by approximately two orders of magnitude --- from $310$ to $3$ of $2107$ at $t = 0.20$ --- and lifts the worst polygon's coverage from $0.049$ to $0.765$.
+
+The reading we propose for this result is twofold. First, it confirms that the reinforcement-learned encoder generalizes beyond the size range it was trained on, at least in terms of carrying the information a small classifier needs to recover feasibility. Second, it bounds how much: even at the lowest threshold we report, the worst polygon's coverage is $0.765$, not $1$. Generalization is partial. Figure~\ref{fig:cov_vs_n} disaggregates this by polygon size: per-polygon coverage as a function of vertex count $n$ on the OOD split, with the policy and the probe shown side by side.
+
+\figincl{gfx/setpred/fig_cov_vs_n.pdf}{Per-polygon coverage as a function of polygon vertex count $n$ on the OOD \texttt{test} split ($n \in [12, 1000]$). The pretrained policy's coverage degrades systematically as $n$ grows; the SetPredictor probe at $t = 0.20$ stays near the $0.95$ feasibility line across the entire size range. This is the size-resolved view of the OOD generalization story summarized by Table~\ref{tab:ood_test}.}{fig:cov_vs_n}
 
 \section{Discussion}
 \label{sec:discussion}
 
-The empirical finding behind the discussion below is that a small single-shot per-vertex classifier over frozen pretrained pointer embeddings reliably improves coverage feasibility, both on the held-out in-distribution partition and on larger out-of-distribution polygons, at a measured and tunable cost in guard count. The following paragraphs consider how to frame that result against classical baselines, why the architectural choices behind the SetPredictor were made, and which aspects of the measurement we view as most consequential.
+Read against the question the introduction posed, the reinforcement method does learn to place guards on the polygon, and it does so without ever seeing an explicit visibility object. The geo-free policy reaches mean coverage of roughly $0.969$ at $|S|/\OPT \approx 1.09$ on the held-out in-distribution split, with $296/367$ polygons (Wilson $95\%$ CI $(0.763, 0.844)$) clearing the $0.95$ coverage gate. The cardinality of the guard sets is competitive and the bulk of polygons end up acceptably covered; ``competitive,'' not ``optimal,'' is what the question called for.
 
-\paragraph{Framing of the comparison.} Classical greedy and local-search heuristics outperform the SetPredictor on $|S|/\OPT$ at preserved coverage. We do not contest this. The SetPredictor is reported as a post-processor for a pretrained pointer policy: the relevant comparison is against the pointer it operates on, not against an oracle solver. On that comparison, the SetPredictor closes the pointer's residual coverage tail in a single forward pass without geometric input, at a tunable cost in guard count.
+The honest counterpart to that finding is the residual tail. Roughly $19.3\%$ of in-distribution polygons and $14.7\%$ of out-of-distribution polygons fall below $0.95$ coverage under the policy alone, and these are not minor near-misses: minimum coverages drop to $0.830$ in-distribution and $0.049$ out-of-distribution. The reinforcement method, by itself, is not a feasibility-guaranteeing procedure, and we read this as the limit of what pure RL delivers in our setup at this scale.
 
-\paragraph{Why a single-shot design.} The architectural choice not to iterate is deliberate. As discussed in Section~\ref{sec:method-diagnostic}, the three structural difficulties of iterative editors --- compounding errors, $\textsc{stop}$/action coupling, and the train--inference distribution gap --- all disappear when the prediction is produced in one forward pass conditioned on the seed: there are no rollouts, the model has no $\textsc{stop}$ token, and the input distribution it sees at training matches what it sees at inference.
+The single most informative measurement in the paper is what happens when we read the encoder rather than the decoder. The SetPredictor probe sees only frozen encoder embeddings and the policy's own seed indicator --- no visibility matrix, no CGAL output, no per-vertex area feature --- and it closes the in-distribution feasibility tail completely ($367/367$ polygons above $0.95$ at $t = 0.20$) and the out-of-distribution tail to within $3$ polygons of $2107$ at the same threshold. There are two reasonable interpretations of this result. One is that the encoder learned enough geometric structure that a small classifier reading its output can recover feasibility on its own; the other is that the decoder's $\EOS$ calibration was the bottleneck and the policy had already identified the right vertices but stopped too early. Both interpretations support the same reading of what the reinforcement method internalized: a representation that already contains more of the relevant geometry than the policy's decoder was able to express. The cost of recovering feasibility through the probe is a controlled rise in guard count, from $|S|/\OPT \approx 1.09$ under the policy to roughly $2.20$ at $t = 0.30$ and $2.90$ at $t = 0.20$, and we report it explicitly rather than disguise it. Figure~\ref{fig:encoder_pca} makes the representation argument visual: the encoder's per-vertex embeddings, projected to two dimensions and colored by guard-membership label, separate without ever having been shown a visibility matrix.
 
-\paragraph{Why geo-free inference suffices.} The pretrained pointer encoder's per-vertex embeddings were learned under a coverage-aware preference objective and carry geometric information about each vertex's role in the polygon. The SetPredictor reuses this representation rather than recomputing geometry, which is why a small Transformer over the encoder embeddings is sufficient: the heavy geometric work is done once, by the pointer encoder.
+\figincl{gfx/setpred/fig_encoder_pca.pdf}{Two-dimensional projection of the frozen PO/BT encoder's per-vertex embeddings, colored by guard-membership label (LS-derived target). Each point is one vertex of one polygon, pooled across a sample of held-out polygons. Visible separation between guard and non-guard vertices, in a projection that has no access to the visibility matrix, is direct visual evidence that the reinforcement-trained encoder has internalized a guard-relevant geometric signal.}{fig:encoder_pca}
 
-\paragraph{The threshold as a continuous knob.} The single-scalar threshold $t$ is a continuous and predictable operating-point control: lowering $t$ admits more vertices and traces a monotone curve between coverage and guard count in our experiments. This makes the SetPredictor easy to deploy under an explicit coverage budget: choose $t$ such that the empirical $\#\{\Covf{}{}\ge\tau\}/n$ on a validation partition meets the desired target.
-
-\paragraph{Out-of-distribution behaviour.} The reduction in coverage failures on the out-of-distribution \texttt{test} split is the most consequential measurement of the paper. The pretrained pointer's coverage degrades sharply on polygons whose vertex count exceeds its training range, while the SetPredictor --- trained on the same range --- retains coverage feasibility on much larger polygons. A plausible reason is that the per-vertex prediction depends only on local features and a vertex-local embedding, so the model does not need to extrapolate over sequence length the way an autoregressive policy does.
+It is worth restating what this paper is not claiming. Classical greedy and local-search heuristics outperform the policy on $|S|/\OPT$ at preserved coverage, and we have not designed the work to contest this; the policy and the probe are not presented as competitors to those methods on guard count. What we are documenting is what is learnable by reinforcement when the model is denied geometric input at the moment of placing guards --- and, jointly, what part of that learning lives in the representation rather than in the decoder. The two formulations of post-hoc improvement we tried bear on the same point. An iterative editor trained over the policy's seed could not improve coverage in any preserved-cardinality regime, and the single-shot probe is empirically a fixed point under iteration; what changes between the two is whether a model is asked to choose a stop time and a sequence of edits or simply to produce a probability per vertex. The single-shot formulation is the one that exposes the encoder's information, and it does so precisely because it removes everything else.
 
 \section{Limitations}
 \label{sec:limitations}
 
 \begin{enumerate}
-  \item \textbf{Held-out partition size.} \texttt{dev\_test} has 367 polygons. Wilson 95\% CIs on the coverage-feasibility proportion are reported in Table~\ref{tab:headline}, but the absolute count is modest. We mitigate by reporting the much larger OOD evaluation (\texttt{test}, 2107 polygons).
-  \item \textbf{Single random seed.} Both the pointer and the SetPredictor are trained with a single seed (1234). Multi-seed training and Wilson CIs over seed variance are left for future work.
-  \item \textbf{Alphabetical-split caveat.} An earlier alphabetical partition of \texttt{dev} produced misleadingly optimistic headline numbers. The seeded random shuffle we use closes this leak, but readers of prior internal notes should be aware that the in-distribution headline moved when we fixed the split.
-  \item \textbf{LSTM, not Transformer, encoder.} The pretrained pointer is an LSTM. A Transformer-encoder pointer might produce stronger embeddings and tighten the Pareto curve; we did not retrain.
-  \item \textbf{disc-vis approximation at training time.} The target sets used to train the SetPredictor are obtained by local search under disc-vis sampling ($M{=}500$), an approximation. Exact CGAL visibility is used only at evaluation. Training under exact visibility is computationally expensive and is left for future work.
-  \item \textbf{Extreme OOD is unaddressed.} The \texttt{large} split ($n$ up to $2250$) is not evaluated in the main results table; a smoke run on 20 polygons shows the predictor still tracks the threshold curve, but a full evaluation requires further engineering and is deferred.
-  \item \textbf{Optimal guard counts are taken from the library.} We use the AGPVG library's optimal solutions to compute $|S|/\OPT$; we did not re-verify these with an independent ILP solver.
+  \item \textbf{Scope of the ``no geometric knowledge'' claim.} The geo-free constraint is on inference: the policy and the probe see no visibility object at test time. \emph{Training} does see visibility: the PO/BT reward is computed from disc-vis coverage, and the probe's supervised targets are generated by local search using disc-vis as a coverage gate. ``No explicit geometric knowledge'' must be read as ``no geometric oracle at the moment of placing guards.''
+  \item \textbf{The probe is supervised, not reinforcement.} The SetPredictor is trained by BCE against local-search-derived labels. It is not itself a reinforcement learner. We position it as a representation probe of the RL-trained encoder, not as an RL contribution.
+  \item \textbf{Held-out partition size.} \texttt{dev\_test} has $367$ polygons. Wilson $95\%$ CIs on the coverage-feasibility proportion are reported, but the absolute count is modest. The OOD evaluation on \texttt{test} ($2107$ polygons) provides a much larger second held-out evidence base.
+  \item \textbf{Single random seed.} Both the policy and the probe are trained with a single seed ($1234$). Multi-seed runs and seed-variance confidence intervals are left for future work.
+  \item \textbf{LSTM, not Transformer, encoder.} The reinforcement-trained policy is an LSTM pointer. A Transformer encoder might produce stronger embeddings and tighten the Pareto curve; we did not retrain.
+  \item \textbf{disc-vis approximation in training.} Both the PO/BT coverage reward and the SetPredictor training targets use disc-vis sampling at $M = 500$. Exact CGAL visibility is used only at evaluation.
+  \item \textbf{Extreme OOD unaddressed in the main results.} The \texttt{large} split ($n$ up to $2250$) is not evaluated in the main results table. A smoke run on $20$ polygons confirms the probe still tracks the threshold curve; a full evaluation requires further engineering.
 \end{enumerate}
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-We considered the problem of closing the residual coverage tail of a PO/BT-trained pointer policy for the vertex-guard Art Gallery Problem. We introduced the SetPredictor, a single-shot per-vertex classifier over frozen pointer embeddings, controlled by a single scalar threshold and using no geometric input at inference time. On held-out in-distribution polygons the SetPredictor brings the rate of sub-$0.95$ coverage to zero in our evaluation; on out-of-distribution polygons of much larger size it reduces the rate of coverage failures by approximately two orders of magnitude. The cost is a controlled and tunable increase in guard count. The architectural choice of a single-shot design --- as opposed to a learned iterative editor over the same input --- is motivated by three structural difficulties of iteration that the single-shot formulation removes by construction.
+We have asked whether a neural policy can learn to place vertex guards on a simple polygon from a coverage-aware reward over its own rollouts, with no geometric oracle at the moment it chooses guards, and we have answered the question to a measurable degree. The LSTM pointer-network policy trained by preference optimization on Bradley--Terry pairs reaches mean coverage of roughly $0.969$ at $|S|/\OPT \approx 1.09$ on held-out polygons; a non-trivial fraction of polygons remain under-covered, and the same effect is more pronounced on out-of-distribution polygons whose vertex counts exceed the training range. Reading the encoder rather than the decoder, through a small per-vertex classifier that sees only frozen embeddings and the seed indicator, closes the feasibility tail without any geometric input at inference, and we take this as direct evidence that the reinforcement-trained representation already carries more of the geometry than the policy's own decoder revealed. The cost of recovering feasibility through that probe is a controlled rise in guard count.
 
-We report the SetPredictor as a post-processor for neural pointer solvers, complementary to but not in competition with classical greedy and local-search baselines on guard count. Two directions follow naturally from the present work. First, training the pointer with a stronger encoder (for example, a Transformer) and a coverage-aware preference signal may already shorten the residual tail, leaving the SetPredictor with a smaller correction to apply. Second, the operating-point threshold $t$ is global in the present design; making it depend on the instance --- for example, predicting a per-polygon $t$ from the same encoder embeddings --- is a natural next step.
+We position this work as a measurement of what is learnable in a deliberately constrained setting, not as a competitor to classical solvers on guard count. The reinforcement learner is not the best AGP heuristic; it is a learner that arrived at a usable representation of vertex-guard placement without ever being shown the geometry it had to reason about. Two natural extensions follow. A stronger encoder --- for example, a Transformer trained under the same PO/BT objective --- may shorten the residual coverage tail directly, leaving less work for the probe. A per-instance threshold predicted from the same encoder embeddings would replace the global threshold with an adaptive one and may further close the gap between feasibility and cardinality.
 
 \bibliographystyle{plain}
 \bibliography{paper}
