@@ -46,7 +46,6 @@ dataset/
 *.aux
 *.out
 *.toc
-*.pdf
 *.bbl
 *.blg
 *.lof
