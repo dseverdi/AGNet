@@ -60,11 +60,9 @@ The paper uses Wilson 95% CIs on the coverage-feasibility proportion (good, and 
 
 Without this, the residual differences between thresholds in Tables 2–3 are not reliably attributable to method changes versus seed noise. Item 4 of the Limitations section concedes this, but the right move is to do the multi-seed run rather than admit it.
 
-### M4. The "PO/BT training dynamics" figure (Figure 1) is a placeholder.
+### M4. The "PO/BT training dynamics" figure (Figure 1). [RESOLVED in this revision]
 
-The current `paper.tex` uses a `\figincl` macro that produces a "Figure pending" box when the underlying PDF is absent. Figure 1 (`fig_po_training`) is in this state at the time of review. For a methods paper whose central artefact is the trained policy, a training curve is not optional; it is the figure that demonstrates the optimisation problem is being solved, not memorised. Submission cannot proceed without this.
-
-Practically: `po_agp.py`'s `epoch_eval` already returns per-epoch metrics (the BUILD\_INFO.md notes this); the script should be modified to write these to JSON during training, or the existing stdout-only metrics should be parsed.
+At the time of the first read of this manuscript Figure 1 was a "Figure pending" placeholder, which would have blocked submission. The authors have since reconstructed a coarse 4-point curve from four saved checkpoints (epochs 110, 114-best, 160, 200) evaluated on a 100-polygon dev_test sample, written by `paper/scripts/build_po_training_curve.py`. This is acceptable as a *post-hoc* reconstruction, but the figure caption should now state honestly that the curve was reconstructed after the fact from saved checkpoints rather than logged during training, and that the four points are restricted to the late-training regime (epochs 110--200). A complete training curve over all 200 epochs would still be preferable; if a future training run is available the authors should preserve per-epoch metrics in a sidecar JSON.
 
 ---
 
@@ -178,7 +176,7 @@ Tight and accurate. The two future-work directions (stronger encoder, per-instan
 1. **(M1)** Add the coordinate-only / untrained-encoder ablations of the SetPredictor. Without these, the representation claim is not supported.
 2. **(M2)** Either run the REINFORCE-collapses experiment or soften the language in §4.1 paragraph 4 to a hypothesis.
 3. **(M3)** Multi-seed runs (≥3 seeds) for both the PO/BT policy and the SetPredictor, with mean ± SD or bootstrap CIs in Tables 1, 3, 6.
-4. **(M4)** Generate `fig_po_training` and `fig_cov_vs_n` (currently placeholders).
+4. **(M4)** [RESOLVED in this revision] Both `fig_po_training` and `fig_cov_vs_n` are now generated. Tighten Figure 1's caption to disclose that the curve was reconstructed post-hoc from saved checkpoints (epochs 110, 114, 160, 200) rather than logged during training.
 
 **Should address:**
 
