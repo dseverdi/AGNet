@@ -9,8 +9,8 @@
 \usepackage[section]{placeins} % keep floats within sections
 % Notation helpers
 \newcommand{\sinst}{s}
-\newcommand{\Vis}[2]{\mathrm{Vis}(#1 \mid #2)}
-\newcommand{\Covf}[2]{\mathrm{Cov}(#1 \mid #2)}
+\newcommand{\Vis}[1]{\mathrm{Vis}(#1)}
+\newcommand{\Covf}[1]{\mathrm{Cov}(#1)}
 \newcommand{\Area}[1]{\mathrm{Area}(#1)}
 \newcommand{\EOS}{\mathrm{EOS}}
 \newcommand{\eps}{\varepsilon}
@@ -65,25 +65,35 @@ The remainder of the paper is organized as follows. Section~\ref{sec:problem} fi
 \section{Problem and Notation}
 \label{sec:problem}
 
-Let $s \subset \mathbb{R}^2$ denote a simple polygonal region (the closed set consisting of its interior and boundary), specified by an ordered vertex sequence $V(s) = (x_1, \dots, x_n)$ with $x_i \in \mathbb{R}^2$. A \emph{guard} is any point $g \in s$ with unobstructed $360^\circ$ visibility inside $s$. For any finite guard set $G \subseteq s$, define the visibility region and coverage
+\subsection{Polygons and visibility}
+\label{sec:problem-polygon}
+
+Let $s \subset \mathbb{R}^2$ denote a simple polygonal region (the closed set consisting of its interior and boundary), with $n$ vertices at coordinates $x_1, \dots, x_n \in \mathbb{R}^2$ and vertex index set $V(s) = \{1, \dots, n\}$. A \emph{guard} is any point $g \in s$ with unobstructed $360^\circ$ visibility inside $s$. For a finite guard set $G \subseteq s$, the visibility region and area-normalized coverage are
 \begin{equation}
-\Vis{G}{s} \,=\, \{\, q \in s : \exists g \in G,\ \overline{gq} \subseteq s \,\},
+\Vis{G} \,=\, \{\, q \in s : \exists g \in G,\ \overline{gq} \subseteq s \,\},
 \qquad
-\Covf{G}{s} \,=\, \frac{\Area{\Vis{G}{s}}}{\Area{s}} \in [0,1].
+\mathrm{Cov}(G \mid s) \,=\, \frac{\Area{\Vis{G}}}{\Area{s}} \in [0,1].
 \label{eq:vis-cov-general}
 \end{equation}
-The (point-guard) \emph{Art Gallery Problem (AGP)} asks for a minimum-cardinality guard set $G^* \subseteq s$ such that $\Covf{G^*}{s} = 1$. We denote $\OPT = |G^*|$.
+We write $\Covf{G}$ throughout when $s$ is clear from context.
 
-In this paper we focus on the \emph{vertex-guard} variant, where guards must be chosen from the polygon's vertex set $V(s) = \{x_1, \dots, x_n\}$. We encode a solution by an index set $\pi \subseteq \{1, \dots, n\}$, corresponding to the guard set $G(\pi) = \{x_i : i \in \pi\}$. The visibility and coverage in~\eqref{eq:vis-cov-general} specialize to
+\subsection{The vertex-guard variant}
+\label{sec:problem-vertex}
+
+In the \emph{vertex-guard Art Gallery Problem (AGP)} guards are restricted to the polygon's vertices: $S \subseteq V(s)$, with physical positions $\{x_i : i \in S\}$. The coverage of $S$ is $\Covf{S}$, with visibility region $\Vis{S} = \{q \in s : \exists i \in S,\ \overline{x_i q} \subseteq s\}$. We define the \emph{vertex-guard optimum} directly:
 \begin{equation}
-\Vis{\pi}{s} \,=\, \{\, q \in s : \exists i \in \pi,\ \overline{x_i q} \subseteq s \,\},
-\qquad
-\Covf{\pi}{s} \,=\, \frac{\Area{\Vis{\pi}{s}}}{\Area{s}} \in [0,1].
-\label{eq:vis-cov}
+\OPT(s) \,=\, \min\bigl\{|S| : S \subseteq V(s),\ \Covf{S} = 1\bigr\}.
+\label{eq:opt}
 \end{equation}
-Let $\pi^\star$ be an optimal index set for the vertex-guard AGP and note that $|\pi^\star| \geq \OPT$. We report the approximation ratio $\rho = |\pi|/\OPT$, the normalized size $|\pi|/n$, and per-polygon coverage statistics ($\min$, $p_{01}$, $p_{05}$, and the counts $\#\{\Covf{}{} \geq \tau\}$ for $\tau \in \{0.95, 0.99, 0.999, 1\}$).
+Restricting guards to $V(s)$ reduces placement to a finite discrete choice over $n$ vertices --- the natural action space for a pointer-network policy~\cite{Vinyals2015,Bello2016,Kool2019Attention,Kwon2020POMO} --- while retaining the full NP-hardness and non-uniform visibility structure of the problem. The public instance library provides \emph{point-guard} solutions (guards anywhere in $s$); these are not the vertex-guard optimum and are not used as $\OPT$ here (see Section~\ref{sec:exp-dataset}).
 
-The general (point-guard) AGP permits guards anywhere in $s$; the vertex-guard variant we work with restricts $G$ to $V(s)$ and so reduces guard placement to a finite discrete choice over the polygon's $n$ vertices --- the natural action space for a pointer-network policy~\cite{Vinyals2015,Bello2016,Kool2019Attention,Kwon2020POMO}, and a setting in which the combinatorial-geometric difficulty of the problem (NP-hardness, non-uniform visibility regions) remains fully present without conflating it with the separate question of continuous optimization in the interior of $s$. Extending to point-guard would require either an action-discretization step or a different policy architecture, and is outside the scope of this paper.
+\subsection{Evaluation metrics}
+\label{sec:problem-metrics}
+
+Let $N$ denote the cardinality of the evaluation partition under discussion. Mean coverage $\frac{1}{N}\sum \Covf{S}$ summarizes overall performance, but the per-polygon distribution behind the mean is at least as informative: we report the counts $\#\{\Covf{S} \geq c\}$ for threshold values $c \in \{0.95, 0.99, 0.999, 1\}$, and the worst-case polygon coverage $\min_s \Covf{S}$. Note that $c$ is distinct from the training-time coverage gate $\tau = 0.99$ used to label local-search targets (Section~\ref{sec:method-training}). Solution compactness is measured by two ratios: the normalized guard count $|S|/n$, which is the guard set size relative to the polygon's vertex count, and the approximation ratio $|S|/\OPT$, relative to the vertex-guard optimum. For binomial count proportions we report Wilson $95\%$ confidence intervals on $\#\{\Covf{S} \geq c\}/N$.
+
+\subsection{Geo-free inference}
+\label{sec:problem-geofree}
 
 We will say that an inference procedure is \emph{geo-free} if its inputs at test time are limited to the polygon's vertex coordinates and learned features derived from them --- no polygon visibility matrix, no CGAL-computed visibility regions, no per-vertex area or visibility-fraction feature. Geo-free inference does not preclude using exact visibility during evaluation (to report coverage after the fact) or during training (to compute rewards, gate trajectories, or build supervised targets); it restricts what the model reads at the moment it places guards. A solver allowed to query a visibility oracle at every decision step can in principle simulate greedy or local search, and a measurement of what such a solver has learned would be conflated with a measurement of what its oracle can compute. The geo-free constraint isolates the first question from the second, which is what makes ``no explicit geometric knowledge'' a measurable property and not just a rhetorical one.
 
@@ -106,9 +116,9 @@ We describe the reinforcement method (Section~\ref{sec:method-pointer}), the dia
 \subsection{The reinforcement method: PO/BT pointer policy}
 \label{sec:method-pointer}
 
-\paragraph{Architecture.} The policy is an LSTM-encoder pointer network with attention-based decoder, of roughly $364$k parameters. A polygon $s$ with vertex sequence $V(s) = (x_1, \dots, x_n)$ is consumed coordinate-wise (no visibility input). The encoder produces per-vertex embeddings $\{h_i\}_{i=1}^n$, $h_i \in \mathbb{R}^{128}$. The decoder attends over the encoder at each step, emits a vertex index or an $\EOS$ token, and stops at $\EOS$ or when the maximum length is reached. Solutions are index sequences $\pi = (\pi_1, \dots, \pi_T)$ over the vertex set $\{1, \dots, n\}$. We collapse $\pi$ to its underlying set when reporting guard counts.
+\paragraph{Architecture.} The policy is an LSTM-encoder pointer network with attention-based decoder, of roughly $364$k parameters. A polygon $s$ with vertex sequence $V(s) = (x_1, \dots, x_n)$ is consumed coordinate-wise (no visibility input). The encoder produces per-vertex embeddings $\{h_i\}_{i=1}^n$, $h_i \in \mathbb{R}^{128}$. The decoder attends over the encoder at each step, emits a vertex index or an $\EOS$ token, and stops at $\EOS$ or when the maximum length is reached. The decoder outputs a sequence $\pi = (\pi_1, \dots, \pi_T)$; the resulting guard set is $S(\pi) = \{\pi_t : \pi_t \ne \EOS\}$, and all metrics (coverage, $|S|/n$, $|S|/\OPT$) are computed on $S(\pi)$.
 
-\paragraph{Reward and rollouts.} For each polygon $s$, we sample $K$ rollouts from the policy and score each rollout by a scalar utility $u(\pi \mid s)$ that combines coverage and guard usage; the precise scalarization places coverage above a soft threshold and then prefers smaller guard sets. Coverage during training is computed using a discretized-visibility sampler ($M{=}500$ interior points per polygon) as a cheap approximation; CGAL exact visibility is reserved for evaluation.
+\paragraph{Reward and rollouts.} For each polygon $s$, we sample $R$ rollouts from the policy and score each rollout by a scalar utility $u(\pi \mid s)$ that combines coverage and guard usage; the precise scalarization places coverage above a soft threshold and then prefers smaller guard sets. Coverage during training is computed using a discretized-visibility sampler ($M{=}500$ interior points per polygon) as a cheap approximation; CGAL exact visibility is reserved for evaluation.
 
 \paragraph{Preference-optimization loss.} For each pair $(\pi^+, \pi^-)$ of rollouts with $u(\pi^+) > u(\pi^-)$ above a coverage gate, we apply the Bradley--Terry log-likelihood
 \begin{equation}
@@ -198,7 +208,7 @@ The PO/BT reinforcement-trained policy is trained once and frozen; all coverage 
 \subsection{Evaluation protocol}
 \label{sec:exp-eval}
 
-For each polygon we compute the policy's seed (the policy's own guard sequence, $\EOS$-truncated and greedy-decoded), evaluate it with CGAL exact polygon visibility~\cite{cgal:eb-25b}, and then, separately, run a single SetPredictor forward pass on the policy's encoder output, threshold at $t$ to obtain $S(t)$, and evaluate $S(t)$ with CGAL. We report mean coverage $\Covf{}{}$, mean normalized size $|S|/n$, mean approximation ratio $|S|/\OPT$, and per-polygon coverage distribution (the counts $\#\{\Covf{}{} \geq \tau\}$ for $\tau \in \{0.95, 0.99, 0.999, 1\}$ and the minimum coverage). For binomial counts we report Wilson $95\%$ confidence intervals on the proportion $\#\{\Covf{}{} \geq 0.95\}/n$.
+For each polygon we compute the policy's seed (the policy's own guard sequence, $\EOS$-truncated and greedy-decoded), evaluate it with CGAL exact polygon visibility~\cite{cgal:eb-25b}, and then, separately, run a single SetPredictor forward pass on the policy's encoder output, threshold at $t$ to obtain $S(t)$, and evaluate $S(t)$ with CGAL. We report the metrics defined in Section~\ref{sec:problem-metrics}: mean coverage $\Covf{S}$, mean normalized size $|S|/n$, mean approximation ratio $|S|/\OPT$, and the per-polygon coverage counts $\#\{\Covf{S} \geq c\}$ for $c \in \{0.95, 0.99, 0.999, 1\}$, plus the minimum coverage. Wilson $95\%$ confidence intervals are reported on the proportion $\#\{\Covf{S} \geq 0.95\}/N$.
 
 As noted in Section~\ref{sec:exp-dataset}, vertex-guard optima $\OPT$ are not provided by the public library (which distributes point-guard solutions) and are computed by us via integer programming. Our $\OPT$ values are available for all polygons in \texttt{train}, \texttt{dev}, and \texttt{test}, and unavailable for some polygons in \texttt{large} (where the ILP was too slow to terminate within our compute budget); we report coverage only on those.
 
@@ -218,9 +228,9 @@ We organize the results around the hypothesis. Section~\ref{sec:res-headline} re
   \label{tab:headline}
 \end{table}
 
-The first row of Table~\ref{tab:headline} is the geo-free reinforcement policy on its own: mean coverage $0.969$, $296/367$ polygons with $\Covf{}{} \geq 0.95$ (Wilson $95\%$ CI $(0.763, 0.844)$), and $|S|/\OPT \approx 1.09$. Read this against the question we asked in the introduction. A policy that sees only polygon coordinates and is trained from coverage-aware rewards over its own rollouts produces, on a held-out partition, guard sets that are competitive in cardinality and reach $0.95$ coverage on the large majority of polygons. The hypothesis --- that vertex-guard placement is learnable, to a degree, by a reinforcement method that never sees an explicit visibility object --- is confirmed in the affirmative on this measurement.
+The first row of Table~\ref{tab:headline} is the geo-free reinforcement policy on its own: mean coverage $0.969$, $296/367$ polygons with $\Covf{S} \geq 0.95$ (Wilson $95\%$ CI $(0.763, 0.844)$), and $|S|/\OPT \approx 1.09$. Read this against the question we asked in the introduction. A policy that sees only polygon coordinates and is trained from coverage-aware rewards over its own rollouts produces, on a held-out partition, guard sets that are competitive in cardinality and reach $0.95$ coverage on the large majority of polygons. The hypothesis --- that vertex-guard placement is learnable, to a degree, by a reinforcement method that never sees an explicit visibility object --- is confirmed in the affirmative on this measurement.
 
-The honest scope of the confirmation is the residual: $71/367 = 19.3\%$ of polygons fall below $\Covf{}{} = 0.95$ under the policy alone, and the minimum coverage is $0.830$. The reinforcement method, on its own, does not give a feasibility guarantee. Figure~\ref{fig:worked_example} draws two illustrative polygons, one from \texttt{dev\_test} and one from \texttt{test}, with the policy's seed, the policy plus the SetPredictor probe at $t = 0.30$, and the optimum drawn side by side; it gives a visual sense of where the policy succeeds and where the probe contributes.
+The honest scope of the confirmation is the residual: $71/367 = 19.3\%$ of polygons fall below $\Covf{S} = 0.95$ under the policy alone, and the minimum coverage is $0.830$. The reinforcement method, on its own, does not give a feasibility guarantee. Figure~\ref{fig:worked_example} draws two illustrative polygons, one from \texttt{dev\_test} and one from \texttt{test}, with the policy's seed, the policy plus the SetPredictor probe at $t = 0.30$, and the optimum drawn side by side; it gives a visual sense of where the policy succeeds and where the probe contributes.
 
 \figincl{gfx/setpred/fig_worked_example.pdf}{Worked examples: two polygons drawn with the policy's seed (left column), the policy plus the SetPredictor probe at $t = 0.30$ (middle column), and the optimum (right column). Vertices selected as guards are marked. Row 1 is an in-distribution polygon where the policy already covers most of the region. Row 2 is an out-of-distribution polygon where the policy's seed leaves a substantial uncovered region and the probe restores feasibility by adding vertices the policy missed.}{fig:worked_example}
 
@@ -231,11 +241,11 @@ The honest scope of the confirmation is the residual: $71/367 = 19.3\%$ of polyg
   \centering
   \small
   \input{tables/tab_dist_shift.tex}
-  \caption{Per-polygon coverage distribution on \texttt{dev\_test} ($367$ polygons). Counts show the number of polygons reaching each coverage threshold; \emph{min} $\Covf{}{}$ is the worst polygon. The pretrained policy has a long left tail. The SetPredictor moves the entire distribution to the right.}
+  \caption{Per-polygon coverage distribution on \texttt{dev\_test} ($367$ polygons). Counts show the number of polygons reaching each coverage threshold; \emph{min} $\Covf{S}$ is the worst polygon. The pretrained policy has a long left tail. The SetPredictor moves the entire distribution to the right.}
   \label{tab:dist_shift}
 \end{table}
 
-The mean coverage $0.969$ of the policy alone hides a bimodal distribution. Table~\ref{tab:dist_shift} reports the per-polygon counts. The policy reaches $\Covf{}{} = 1$ on only $3/367$ polygons, $\Covf{}{} \geq 0.99$ on $99/367$, and has $71$ polygons below $0.95$ with a worst case of $0.830$. The probe, at $t = 0.20$, eliminates the left tail and moves the bulk of the distribution above $0.99$. Figure~\ref{fig:coverage_cdf} visualizes the same shift as a per-polygon complementary CDF, with the dashed line at $0.95$ marking the feasibility gate; the SetPredictor curve sits to the right of the pretrained policy at every coverage threshold, in both the in-distribution and the out-of-distribution panel.
+The mean coverage $0.969$ of the policy alone hides a bimodal distribution. Table~\ref{tab:dist_shift} reports the per-polygon counts. The policy reaches $\Covf{S} = 1$ on only $3/367$ polygons, $\Covf{S} \geq 0.99$ on $99/367$, and has $71$ polygons below $0.95$ with a worst case of $0.830$. The probe, at $t = 0.20$, eliminates the left tail and moves the bulk of the distribution above $0.99$. Figure~\ref{fig:coverage_cdf} visualizes the same shift as a per-polygon complementary CDF, with the dashed line at $0.95$ marking the feasibility gate; the SetPredictor curve sits to the right of the pretrained policy at every coverage threshold, in both the in-distribution and the out-of-distribution panel.
 
 \figincl{gfx/setpred/fig_coverage_cdf.pdf}{Per-polygon coverage distribution as a complementary stair-step CDF, in-distribution \texttt{dev\_test} (left, $367$ polygons) and out-of-distribution \texttt{test} (right, $2107$ polygons). For each method we plot the fraction of polygons with coverage at least $x$ against $x$. The dashed vertical line marks the $0.95$ feasibility gate. Across both panels and across all three SetPredictor thresholds, the SetPredictor curve sits to the right of the pretrained policy.}{fig:coverage_cdf}
 
@@ -246,11 +256,11 @@ The mean coverage $0.969$ of the policy alone hides a bimodal distribution. Tabl
   \centering
   \small
   \input{tables/tab_pareto.tex}
-  \caption{Threshold sweep on \texttt{dev\_test} ($367$ polygons). Lower $t$ admits more vertices, raising both expected coverage and $|S|$. All three operating points reach $\#\{\Covf{}{} \geq 0.95\}/n = 367/367$.}
+  \caption{Threshold sweep on \texttt{dev\_test} ($367$ polygons). Lower $t$ admits more vertices, raising both expected coverage and $|S|$. All three operating points reach $\#\{\Covf{S} \geq 0.95\}/N = 367/367$.}
   \label{tab:pareto}
 \end{table}
 
-Table~\ref{tab:pareto} traces the Pareto curve from $t = 0.30$ to $t = 0.20$. All three thresholds satisfy the coverage gate $\Covf{}{} \geq 0.95$ on every \texttt{dev\_test} polygon; $t = 0.20$ is the most conservative (largest $|S|$, fewest residual sub-$0.99$ polygons). Between $t = 0.30$ and $t = 0.20$, mean coverage rises by $\approx 0.0015$ and mean $|S|/n$ rises by $\approx 0.10$. The corresponding cost in guard count, measured against the optimum, rises from $\approx 1.09$ for the reinforcement policy alone to $\approx 2.20$ at $t = 0.30$ and $\approx 2.90$ at $t = 0.20$. This is the cost of feasibility: the probe trades guard count for the missing coverage. Figure~\ref{fig:pareto} plots the same trade-off across a broader threshold sweep on \texttt{dev\_tune}, together with the three canonical operating points on \texttt{dev\_test} and on the OOD \texttt{test} split.
+Table~\ref{tab:pareto} traces the Pareto curve from $t = 0.30$ to $t = 0.20$. All three thresholds satisfy the coverage gate $\Covf{S} \geq 0.95$ on every \texttt{dev\_test} polygon; $t = 0.20$ is the most conservative (largest $|S|$, fewest residual sub-$0.99$ polygons). Between $t = 0.30$ and $t = 0.20$, mean coverage rises by $\approx 0.0015$ and mean $|S|/n$ rises by $\approx 0.10$. The corresponding cost in guard count, measured against the optimum, rises from $\approx 1.09$ for the reinforcement policy alone to $\approx 2.20$ at $t = 0.30$ and $\approx 2.90$ at $t = 0.20$. This is the cost of feasibility: the probe trades guard count for the missing coverage. Figure~\ref{fig:pareto} plots the same trade-off across a broader threshold sweep on \texttt{dev\_tune}, together with the three canonical operating points on \texttt{dev\_test} and on the OOD \texttt{test} split.
 
 \figincl{gfx/setpred/fig_pareto.pdf}{Coverage--cost trade-off, in-distribution (left) and out-of-distribution (right). The horizontal axis is the mean guard count relative to the optimum, $|S|/\OPT$; the vertical axis is mean per-polygon coverage. The pretrained policy (triangle) sits at low cost and the bottom of its coverage curve; the SetPredictor (circles) traces a monotone curve as the threshold $t$ is lowered, gaining coverage at a controlled cost in $|S|/\OPT$. The left panel includes the broader \texttt{dev\_tune} threshold sweep as a faint connecting curve.}{fig:pareto}
 
@@ -276,7 +286,7 @@ Table~\ref{tab:fixed_point} confirms that re-running the probe with its own outp
   \centering
   \small
   \input{tables/tab_ood_test.tex}
-  \caption{Out-of-distribution evaluation on the \texttt{test} split ($2107$ polygons, vertex counts up to $n = 1000$). The reinforcement policy's coverage tail blows up on out-of-distribution polygons ($310$ of $2107$ below $\Covf{}{} = 0.95$, with a minimum coverage of $0.049$); the probe at $t = 0.20$ reduces $\#\{\Covf{}{} < 0.95\}$ to $3$, a $\sim 100\times$ reduction.}
+  \caption{Out-of-distribution evaluation on the \texttt{test} split ($2107$ polygons, vertex counts up to $n = 1000$). The reinforcement policy's coverage tail blows up on out-of-distribution polygons ($310$ of $2107$ below $\Covf{S} = 0.95$, with a minimum coverage of $0.049$); the probe at $t = 0.20$ reduces $\#\{\Covf{S} < 0.95\}$ to $3$, a $\sim 100\times$ reduction.}
   \label{tab:ood_test}
 \end{table}
 
