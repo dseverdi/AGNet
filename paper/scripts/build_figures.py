@@ -3,10 +3,16 @@
 Run: python paper/scripts/build_figures.py
 Output: paper/gfx/setpred/fig_*.pdf
 
-Figures:
-- fig_coverage_cdf.pdf   : stair-step CDF of per-polygon coverage, two panels (in-dist + OOD)
-- fig_pareto.pdf         : Pareto curve (mean cov vs mean |S|/OPT), two panels (in-dist + OOD)
-- fig_kinvariance.pdf    : K-invariance of iterative inference (mean cov vs K, one line per t)
+Figures in the current paper layout (5):
+- fig_po_training.pdf    : PO/BT training dynamics (held-out dev)
+- fig_worked_example.pdf : two polygons, seed vs probe vs optimum
+- fig_distributions.pdf  : 2x3 grid, {dev_test, OOD} x {coverage CCDF, |S|/n, |S|/OPT}
+- fig_cov_vs_n.pdf       : per-polygon OOD coverage vs polygon size n
+- fig_mechanism.pdf      : (a) K-invariance fixed point, (b) encoder PCA separation
+
+Deprecated single-panel builders (fig_coverage_cdf, fig_pareto, fig_kinvariance,
+fig_encoder_pca) remain defined for reproducibility but are not dispatched; their
+content now lives in fig_distributions and fig_mechanism.
 """
 import json
 from pathlib import Path
@@ -478,7 +484,187 @@ def fig_cov_vs_n() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Grouped figures (current paper layout): fig_distributions, fig_mechanism
+# ──────────────────────────────────────────────────────────────────────
+
+def _ccdf_xy(cov):
+    """Exact complementary CDF (fraction with coverage >= x) as a step curve."""
+    import numpy as np
+    cov_sorted = np.sort(np.asarray(cov, dtype=float))
+    n = len(cov_sorted)
+    if n == 0:
+        return [], []
+    ys = (n - np.arange(n)) / n          # fraction with cov >= cov_sorted[i]
+    xs_plot = np.concatenate([[cov_sorted[0]], cov_sorted])
+    ys_plot = np.concatenate([[1.0], ys])
+    return xs_plot, ys_plot
+
+
+def fig_distributions() -> None:
+    """2x3 grid: rows = {dev_test, OOD test}, cols = {coverage CCDF, |S|/n, |S|/OPT}.
+
+    Reads paper/data/dist_dev_test.json and dist_test_OOD.json. Per-polygon schema:
+        {"name", "n", "OPT",
+         "seed":       {"S_size", "cov"},
+         "probe_t020": {"S_size", "cov"},
+         "probe_t025": {"S_size", "cov"},
+         "probe_t030": {"S_size", "cov"}}
+    """
+    d_in = _maybe_load("dist_dev_test.json")
+    d_ood = _maybe_load("dist_test_OOD.json")
+    if d_in is None or d_ood is None:
+        print("skip fig_distributions: dist_dev_test.json / dist_test_OOD.json not found")
+        return
+
+    import numpy as np
+
+    # methods in display order: policy seed, then conservative -> aggressive
+    methods = [("seed", "seed", "Seed"),
+               ("probe_t030", "t030", "$t{=}0.30$"),
+               ("probe_t025", "t025", "$t{=}0.25$"),
+               ("probe_t020", "t020", "$t{=}0.20$")]
+    box_colors = [COLORS[c] for _, c, _ in methods]
+    box_labels = [lab for _, _, lab in methods]
+
+    def cov_arr(polys, mkey):
+        return [p[mkey]["cov"] for p in polys if mkey in p]
+
+    def ratio_arr(polys, mkey, denom):
+        out = []
+        for p in polys:
+            if mkey not in p:
+                continue
+            d = p["n"] if denom == "n" else p.get("OPT")
+            if not d:
+                continue
+            out.append(p[mkey]["S_size"] / d)
+        return out
+
+    def style_box(ax, bp):
+        for patch, col in zip(bp["boxes"], box_colors):
+            patch.set_facecolor(col)
+            patch.set_alpha(0.65)
+        for med in bp["medians"]:
+            med.set_color("black")
+
+    fig, axes = plt.subplots(2, 3, figsize=(11, 6))
+    rows = [("In-distribution (dev$\\_$test, 367 polygons)", d_in["polygons"], axes[0]),
+            ("Out-of-distribution (test, 2107 polygons)", d_ood["polygons"], axes[1])]
+
+    for title, polys, axrow in rows:
+        # col 0: coverage complementary CDF
+        ax = axrow[0]
+        for mkey, ckey, lab in methods:
+            xs, ys = _ccdf_xy(cov_arr(polys, mkey))
+            ax.step(xs, ys, where="post", color=COLORS[ckey], linewidth=1.5,
+                    label=("Seed" if mkey == "seed" else f"SetPredictor {lab}"))
+        ax.axvline(0.95, color="gray", linestyle=":", linewidth=0.8)
+        ax.set_xlim(0.6, 1.005)
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_xlabel("Per-polygon coverage $x$")
+        ax.set_ylabel("Fraction with $\\mathrm{Cov}\\geq x$")
+        ax.grid(alpha=0.3, linewidth=0.5)
+
+        # col 1: |S|/n box plot
+        ax = axrow[1]
+        data = [ratio_arr(polys, mkey, "n") for mkey, _, _ in methods]
+        bp = ax.boxplot(data, patch_artist=True, showmeans=True, showfliers=True,
+                        widths=0.6,
+                        flierprops=dict(marker=".", markersize=2, alpha=0.3))
+        style_box(ax, bp)
+        ax.set_xticklabels(box_labels)
+        ax.set_ylabel("$|S|/n$")
+        ax.set_title(title)
+        ax.grid(alpha=0.3, linewidth=0.5, axis="y")
+
+        # col 2: |S|/OPT box plot (robust y-limit so outliers don't dominate)
+        ax = axrow[2]
+        data = [ratio_arr(polys, mkey, "OPT") for mkey, _, _ in methods]
+        bp = ax.boxplot(data, patch_artist=True, showmeans=True, showfliers=True,
+                        widths=0.6,
+                        flierprops=dict(marker=".", markersize=2, alpha=0.3))
+        style_box(ax, bp)
+        ax.axhline(1.0, color="gray", linestyle=":", linewidth=0.8)
+        ax.set_xticklabels(box_labels)
+        ax.set_ylabel("$|S|/\\mathrm{OPT}$")
+        ax.grid(alpha=0.3, linewidth=0.5, axis="y")
+        all_vals = [v for di in data for v in di]
+        if all_vals:
+            ax.set_ylim(0, float(np.percentile(all_vals, 99)) * 1.1)
+
+    axes[0][0].legend(loc="lower left", frameon=False, fontsize=7)
+    plt.tight_layout()
+    save(fig, "fig_distributions.pdf")
+
+
+def fig_mechanism() -> None:
+    """1x2: (a) K-invariance fixed point, (b) encoder PCA embedding separation.
+
+    Reuses paper/data/setpred_iter_sweep.json and encoder_pca.json.
+    """
+    d_iter = _maybe_load("setpred_iter_sweep.json")
+    d_pca = _maybe_load("encoder_pca.json")
+    if d_iter is None and d_pca is None:
+        print("skip fig_mechanism: neither setpred_iter_sweep.json nor encoder_pca.json found")
+        return
+
+    import numpy as np
+    fig, (axa, axb) = plt.subplots(1, 2, figsize=(9.5, 3.8))
+
+    # panel (a): K-invariance
+    if d_iter is not None:
+        cells = d_iter["cells"]
+        thresholds = ["0.5", "0.6", "0.65", "0.7", "0.75", "0.8"]
+        Ks = [1, 2, 3, 5]
+        palette = ["#577590", "#43aa8b", "#90be6d", "#f9c74f", "#f8961e", "#f3722c"]
+        for t, col in zip(thresholds, palette):
+            covs = [cells[f"t={t}|K={K}"]["cov"] if f"t={t}|K={K}" in cells else None
+                    for K in Ks]
+            axa.plot(Ks, covs, "o-", color=col, label=f"$t={t}$",
+                     linewidth=1.5, markersize=5)
+        axa.set_xlabel("Number of inference passes $K$")
+        axa.set_ylabel("Mean coverage $\\mathrm{Cov}$")
+        axa.set_title("(a) Iterative inference is a fixed point")
+        axa.set_xticks(Ks)
+        axa.grid(alpha=0.3, linewidth=0.5)
+        axa.legend(loc="lower right", frameon=False, ncol=2, title="Threshold",
+                   fontsize=7)
+        all_covs = [cells[f"t={t}|K={K}"]["cov"] for t in thresholds for K in Ks
+                    if f"t={t}|K={K}" in cells]
+        if all_covs:
+            axa.set_ylim(min(all_covs) - 0.003, max(all_covs) + 0.003)
+    else:
+        axa.axis("off")
+
+    # panel (b): encoder PCA
+    xy = np.asarray((d_pca or {}).get("points_2d") or [], dtype=float)
+    labels = np.asarray((d_pca or {}).get("labels") or [], dtype=int)
+    if xy.size and labels.size == len(xy):
+        ev = d_pca.get("explained_variance")
+        non_guard = labels == 0
+        guard = labels == 1
+        axb.scatter(xy[non_guard, 0], xy[non_guard, 1], s=8,
+                    color=COLORS["seed"], alpha=0.35, label="non-guard")
+        axb.scatter(xy[guard, 0], xy[guard, 1], s=10,
+                    color=COLORS["t020"], alpha=0.75, label="guard (LS target)")
+        if ev and len(ev) >= 2:
+            axb.set_xlabel(f"PC1 ({ev[0]*100:.1f}\\% var)")
+            axb.set_ylabel(f"PC2 ({ev[1]*100:.1f}\\% var)")
+        axb.set_title("(b) Frozen encoder embeddings")
+        axb.legend(loc="best", frameon=False, fontsize=7)
+        axb.grid(alpha=0.3, linewidth=0.5)
+    else:
+        axb.axis("off")
+
+    plt.tight_layout()
+    save(fig, "fig_mechanism.pdf")
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Dispatcher: attempts every figure, reports skips/failures cleanly.
+#  fig_coverage_cdf / fig_pareto / fig_kinvariance / fig_encoder_pca are
+#  retained above as deprecated helpers (their content now lives in
+#  fig_distributions and fig_mechanism); they are not dispatched.
 # ──────────────────────────────────────────────────────────────────────
 
 def _run(fn, name: str) -> None:
@@ -491,10 +677,8 @@ def _run(fn, name: str) -> None:
 
 
 if __name__ == "__main__":
-    _run(fig_coverage_cdf, "fig_coverage_cdf")
-    _run(fig_pareto,       "fig_pareto")
-    _run(fig_kinvariance,  "fig_kinvariance")
-    _run(fig_po_training,  "fig_po_training")
+    _run(fig_po_training,    "fig_po_training")
     _run(fig_worked_example, "fig_worked_example")
-    _run(fig_encoder_pca,  "fig_encoder_pca")
-    _run(fig_cov_vs_n,     "fig_cov_vs_n")
+    _run(fig_distributions,  "fig_distributions")
+    _run(fig_cov_vs_n,       "fig_cov_vs_n")
+    _run(fig_mechanism,      "fig_mechanism")

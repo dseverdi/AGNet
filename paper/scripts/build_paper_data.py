@@ -288,6 +288,95 @@ def build_per_polygon_ood(device: str, threshold: float = 0.20,
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  dist_dev_test.json + dist_test_OOD.json (per-polygon, for box plots)
+# ──────────────────────────────────────────────────────────────────────
+def build_per_polygon_all(device: str, batch_size: int = 32) -> None:
+    """For every polygon in dev_test and test, record name, n, OPT, and
+    (S_size, cov) for the policy seed and for the probe at three thresholds.
+    Single shared inference pass per polygon; thresholding is local.
+    """
+    print(f"[per_polygon_all] starting (batch_size={batch_size})")
+    t0 = time.perf_counter()
+    pointer = _load_pointer(device)
+    setpred = _load_setpredictor(device)
+
+    DATASET_PATH = os.getenv("DATASET_PATH")
+    if not DATASET_PATH:
+        print("  warn: DATASET_PATH unset; OPT will be null")
+
+    thresholds = [0.20, 0.25, 0.30]
+    splits = [
+        ("dev_test", DEV_TEST_TRAJ, "dev", "dist_dev_test.json"),
+        ("test_OOD", TEST_TRAJ, "test", "dist_test_OOD.json"),
+    ]
+
+    from collections import defaultdict
+
+    for split_name, traj_path, sol_subdir, out_name in splits:
+        sol_dir = os.path.join(DATASET_PATH, sol_subdir) if DATASET_PATH else None
+        print(f"  split={split_name}: traj={traj_path.name}, sol_dir={sol_dir}")
+        ds = SetPredDataset(str(traj_path))
+        n_total = len(ds.records)
+
+        buckets = defaultdict(list)
+        for i in range(n_total):
+            buckets[ds.records[i]["n"]].append(i)
+
+        out_rows = []
+        n_done = 0
+        with torch.no_grad():
+            for poly_n, ids in buckets.items():
+                for start in range(0, len(ids), batch_size):
+                    chunk = ids[start: start + batch_size]
+                    ptr_emb, pts, in_S_init, pad, _, names, _ = make_batch(
+                        ds, chunk, pointer, device,
+                    )
+                    logits = setpred(ptr_emb, pts, in_S_init, pad)
+                    probs = torch.sigmoid(logits)
+
+                    for b, idx in enumerate(chunk):
+                        rec = ds.records[idx]
+                        n_v = rec["n"]
+                        pts_np = pts[b].cpu().numpy()[:n_v]
+
+                        opt_sol = (_read_opt_solution(sol_dir, rec["name"])
+                                   if sol_dir else None)
+                        opt_size = len(opt_sol) if opt_sol else None
+
+                        seed_idxs = [int(i) for i in rec["seed"] if 0 <= int(i) < n_v]
+                        row = {
+                            "name": rec["name"],
+                            "n": int(n_v),
+                            "OPT": opt_size,
+                            "seed": {
+                                "S_size": len(seed_idxs),
+                                "cov": float(rec.get("seed_cov", 0.0)),
+                            },
+                        }
+
+                        for t in thresholds:
+                            keep = (probs[b] >= t) & (~pad[b])
+                            keep_idxs = keep[:n_v].nonzero(as_tuple=True)[0].cpu().tolist()
+                            cov = _coverage_exact(pts_np, keep_idxs, rec["name"])
+                            row[f"probe_t{int(round(t * 100)):03d}"] = {
+                                "S_size": len(keep_idxs),
+                                "cov": cov,
+                            }
+
+                        out_rows.append(row)
+                        n_done += 1
+                        if n_done % 100 == 0:
+                            dt = time.perf_counter() - t0
+                            print(f"    {n_done}/{n_total} polygons, {dt:.1f}s elapsed")
+
+        out_path = PAPER_DATA / out_name
+        out_path.write_text(json.dumps({"polygons": out_rows}))
+        print(f"  wrote {out_path} ({len(out_rows)} polygons)")
+
+    print(f"  total: {time.perf_counter() - t0:.1f}s")
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Dispatcher
 # ──────────────────────────────────────────────────────────────────────
 def _run(fn, name: str, *args, **kwargs) -> None:
@@ -300,14 +389,24 @@ def _run(fn, name: str, *args, **kwargs) -> None:
 
 
 if __name__ == "__main__":
+    import sys as _sys
     device = _device()
     print(f"device: {device}")
     print(f"pointer ckpt: {PTR_CKPT}")
     print(f"setpred ckpt: {SETPRED_CKPT}")
     print()
-    _run(build_encoder_pca, "encoder_pca", device, n_polygons=80)
-    print()
-    _run(build_worked_examples, "worked_examples", device)
-    print()
-    _run(build_per_polygon_ood, "per_polygon_ood", device, threshold=0.20,
-         batch_size=32, limit=None)
+    steps = _sys.argv[1:] or [
+        "encoder_pca", "worked_examples", "per_polygon_ood", "per_polygon_all",
+    ]
+    if "encoder_pca" in steps:
+        _run(build_encoder_pca, "encoder_pca", device, n_polygons=80)
+        print()
+    if "worked_examples" in steps:
+        _run(build_worked_examples, "worked_examples", device)
+        print()
+    if "per_polygon_ood" in steps:
+        _run(build_per_polygon_ood, "per_polygon_ood", device, threshold=0.20,
+             batch_size=32, limit=None)
+        print()
+    if "per_polygon_all" in steps:
+        _run(build_per_polygon_all, "per_polygon_all", device, batch_size=32)

@@ -190,7 +190,8 @@ def tab_dataset_partition() -> None:
 if __name__ == "__main__":
     tab_headline()
     tab_dist_shift()
-    tab_pareto()
     tab_fixed_point()
-    tab_ood_test()
     tab_dataset_partition()
+    # tab_pareto() and tab_ood_test() are deprecated: their content now lives
+    # in the |S|/OPT box-plot column and the OOD row of fig:distributions.
+    # The function bodies are retained above for reproducibility.
