@@ -67,9 +67,14 @@ def _agg_per_poly(records: list[dict], method_key: str | None = None) -> dict:
 
 def _row(name: str, agg: dict, n_total: int, *,
          bold_cov: bool = False, sopt_dagger: bool = False) -> str:
-    """Render one row of the headline table from an _agg_per_poly dict."""
+    """Render one row of the headline table from an _agg_per_poly dict.
+
+    Feasibility proportion is reported as count/N. Wilson CI is shown only
+    when n_below_095 > 0 (i.e. the proportion is not at the upper degenerate
+    boundary); for deterministic rows that reach N/N the CI collapses to
+    (.990, 1.000) and adds no information.
+    """
     n_ok = n_total - agg["n_below_095"]
-    lo, hi = wilson_ci(n_ok, n_total)
     cov_s = f"{agg['mean_cov']:.4f}"
     if bold_cov:
         cov_s = f"\\textbf{{{cov_s}}}"
@@ -80,9 +85,12 @@ def _row(name: str, agg: dict, n_total: int, *,
         sopt_s = f"{agg['mean_S_opt']:.4f}"
         if sopt_dagger:
             sopt_s += "$^{\\dagger}$"
-    return (f"  {name} & {cov_s} & "
-            f"{n_ok}/{n_total}\\,({lo:.3f},{hi:.3f}) & "
-            f"{sn_s} & {sopt_s} \\\\")
+    if agg["n_below_095"] > 0:
+        lo, hi = wilson_ci(n_ok, n_total)
+        feas_s = f"{n_ok}/{n_total}\\,({lo:.3f},{hi:.3f})"
+    else:
+        feas_s = f"{n_ok}/{n_total}"
+    return f"  {name} & {cov_s} & {feas_s} & {sn_s} & {sopt_s} \\\\"
 
 
 # ---------- tab_headline: dev_test consolidated comparison ----------
