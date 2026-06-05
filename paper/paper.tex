@@ -1,7 +1,6 @@
 \documentclass{article}
 \usepackage[utf8]{inputenc}
 \usepackage{graphicx}
-\usepackage{subfigure}
 \usepackage{booktabs}
 \usepackage{amsmath}
 \usepackage{amssymb}
@@ -16,19 +15,13 @@
 \newcommand{\eps}{\varepsilon}
 \newcommand{\OPT}{\mathrm{OPT}}
 
-% Conditional figure include: renders the figure if its PDF is on disk,
-% otherwise renders a small placeholder. Keeps the label defined so body
-% \ref{} statements resolve in both cases. Comment the placeholder branch
-% out at submission time. Optional first arg sets the image width
-% (default \linewidth).
+% Figure include wrapper. Optional first arg sets the image width
+% (default \linewidth). A missing PDF will fail the build loudly --- the
+% earlier IfFileExists placeholder branch was removed at submission time.
 \newcommand{\figincl}[4][\linewidth]{%
   \begin{figure}[t]
     \centering
-    \IfFileExists{#2}{%
-      \includegraphics[width=#1]{#2}%
-    }{%
-      \fbox{\parbox{0.7\linewidth}{\centering\small\itshape Figure pending. Generate via \texttt{python paper/scripts/build\_figures.py} after regenerating \texttt{paper/data/}.}}%
-    }%
+    \includegraphics[width=#1]{#2}%
     \caption{#3}
     \label{#4}
   \end{figure}%
@@ -231,8 +224,8 @@ We organize the results around the hypothesis. Section~\ref{sec:res-headline} re
 \begin{table}[t]
   \centering
   \small
-  \input{tables/tab_headline.tex}
-  \caption{Held-out evaluation on \texttt{dev\_test} ($367$ polygons). Classical greedy and local search are the standard non-learned anchors (greedy guard set from~\cite{ORourke1987AGT}-style farthest-coverage; LS is the trajectory used to generate SetPredictor targets). The \emph{seed} row is the PO/BT-trained policy decoded greedily. \emph{SetPredictor full} is the headline representation probe; numbers are mean $\pm$ std across four probe seeds $\{1234, 11, 22, 33\}$ at fixed threshold $t = 0.20$. \emph{No-encoder ablation} has the same architecture and parameter count with the frozen encoder masked to zeros (single-seed contrast, Section~\ref{sec:res-headline-ablation}). Wilson $95\%$ CI is shown for the policy seed only, where the feasibility proportion is informative; rows that reach $367/367$ omit the degenerate CI.\\
+  \resizebox{\textwidth}{!}{\input{tables/tab_headline.tex}}
+  \caption{Held-out evaluation on \texttt{dev\_test} ($367$ polygons). Classical greedy and local search are the standard non-learned anchors (greedy guard set from~\cite{ORourke1987AGT}-style farthest-coverage; LS is the trajectory used to generate SetPredictor targets). The \emph{seed} row is the PO/BT-trained policy decoded greedily. \emph{SetPredictor full} is the headline representation probe; numbers are mean $\pm$ std across four probe seeds $\{1234, 11, 22, 33\}$ at fixed threshold $t = 0.20$. \emph{SetPredictor, no-encoder} has the same architecture and parameter count with the frozen encoder masked to zeros (single-seed contrast, Section~\ref{sec:res-headline-ablation}). Wilson $95\%$ CI is shown for the policy seed only, where the feasibility proportion is informative; rows that reach $367/367$ omit the degenerate CI.\\
   $^{\dagger}$Local search reports $|S|/\OPT < 1$ because the OPT reference is a time-limited B\&B lower bound, not a verified optimum (Section~\ref{sec:experiments}); $|S|/n$ is the cardinality metric without this caveat.}
   \label{tab:headline}
 \end{table}
@@ -256,7 +249,7 @@ On \texttt{dev\_test} at $t = 0.20$ the no-encoder probe achieves mean coverage 
 \begin{table}[t]
   \centering
   \small
-  \input{tables/tab_dist_shift.tex}
+  \resizebox{\textwidth}{!}{\input{tables/tab_dist_shift.tex}}
   \caption{Per-polygon coverage distribution on \texttt{dev\_test} ($367$ polygons). Counts show the number of polygons reaching each coverage threshold; \emph{min} $\Covf{S}$ is the worst polygon. The pretrained policy has a long left tail; the SetPredictor moves the entire distribution to the right. SetPredictor rows show the displayed seed ($1234$); Table~\ref{tab:headline} reports the four-seed mean$\pm$std on the same split at $t=0.20$.}
   \label{tab:dist_shift}
 \end{table}
