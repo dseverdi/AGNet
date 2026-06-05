@@ -208,6 +208,61 @@ Note: a single SetPredictor row carries the multi-seed std; the seed and no-enco
 
 **Phase C is complete.** Revision pass closes: M1 (multi-seed ✓), M2 (coordinate-only ablation ✓), M3 (REINFORCE softened to citation ✓), M4 (classical anchors ✓), M5 (geo-free language audit ✓), m1 (training-curve caption ✓), m2 (linear-probe AUC ✓), m3 (OOD failure analysis ✓), mi3 (diagnostic framing ✓), mi4 (worked-example t=0.20 ✓).
 
+## Phase D — optional polish (2026-06-05)
+
+After Phase C compiled clean at 20 pages, an adversarial reviewer reread surfaced 30 findings. Commit `63dd220` closed the must-fix and high-value items; this Phase D commit closes the remaining substantive ones.
+
+### Substantive finding: cross-seed OOD failure pattern (most important)
+
+Verified directly from per-seed JSONs that the "small polygons dominate the OOD failures" claim is **specific to the displayed seed (1234)**. Across the other three seeds, failures concentrate at **large** n:
+
+| seed | #fail | failure-n median | n ≤ 20 | n ≥ 300 |
+|---|---|---|---|---|
+| 1234 | 3 | 20 | **3/3** | 0 |
+| 11 | 34 | 425 | 1/34 | 32/34 |
+| 22 | 25 | 50 | 6/25 | 11/25 |
+| 33 | 8 | 425 | 0/8 | 7/8 |
+
+Mean probe coverage at $n \in [401, 500]$:
+- seed 1234: 0.994
+- seed 11: 0.972
+- seed 22: 0.986
+- seed 33: 0.987
+
+The aggregate result (mean coverage 0.97–0.99 at n≥400 across seeds, four-seed mean 17.5 ± 12.5 OOD failures) stands; what varies seed-to-seed is *where* the residual failures concentrate along the n-axis. §6.3 OOD failure-analysis paragraph rewritten to disclose this honestly. The C2 claim (one-order-of-magnitude reduction) stays; the failure-mechanism interpretation now correctly distinguishes between displayed-seed (small-polygon failures) and other seeds (scale-end failures).
+
+### Other Phase D edits
+
+- **§4.2** "broadly successful / less successful": anchored to Table~\ref{tab:headline} numbers (mean $|S|/n = 0.166$ for policy vs $0.152$ greedy vs $0.137$ LS; 71/367 dev_test sub-0.95 polygons; 310/2107 OOD).
+- **§4.3 iterative-editors claim** ("none improved in any coverage-preserving regime"): now backed by a single concrete number from `results/eval_editor_smoke.json` — the best editor variant on 30 polygons lost $0.005$ mean coverage despite reducing $|S|$ by $\sim 24\%$, and recovered only $0.27$ of the LS-target improvement.
+- **§6.5 + fig:mechanism caption**: corrected a wrong claim I introduced earlier ("including the headline operating points"). The K-invariance was empirically verified at $t \in \{0.5, 0.6, 0.65, 0.7, 0.75, 0.8\}$ only; the headline operating range $\{0.20, 0.25, 0.30\}$ was NOT in fig:mechanism(a)'s sweep. Caption now scopes the empirical claim accurately and argues structurally that the fixed-point property should be most stringently tested near the decision boundary (where the high-t sweep lies).
+- **tab_fixed_point caption**: explains the $t=0.65$ choice and the empirical range.
+
+### Compile + final state
+
+- 21 pages (up from 20; +1 page of polish prose). Still ≤22 target.
+- 0 errors, 0 undefined references.
+- Anti-repetition counts unchanged: 0.969 ×1, 1.09 ×2, 0.957 ×1, 0.830 ×1, 0.049 ×1, 2.20 ×1, 2.90 ×1.
+
+### Not done (truly defer-to-submission)
+
+- **#26–28** page-budget trims — at 21/22, fine.
+- **#29** `subfigure` → `subcaption` deprecation — submission cleanup.
+- **#30** `\figincl` placeholder branch removal — submission cleanup.
+- Multi-seed visual envelope in `fig:distributions` — would add visual reinforcement but the numerical evidence in tab_headline and §6.3 is already complete.
+
+### Status snapshot (2026-06-05, end of Phase D)
+
+| Artifact | State |
+|---|---|
+| `paper/paper.tex` | ✅ Phase D polish applied |
+| `paper.pdf` | ✅ 21 pages, clean compile |
+| `paper/tables/tab_headline.tex` | ✅ Wilson CI scoped, multi-seed ±std on full probe |
+| `paper/paper.md` | ✅ Phase D record added |
+| All compute artifacts | gitignored (regenerable via `run_revisions.sh`) |
+
+**Phase D closes.** The paper is in a defensible Q1 submission state. Remaining work is submission logistics (cover letter, deprecation cleanups, optional visual envelope) rather than scientific content.
+
 ---
 
 ## Open issues / decisions deferred
