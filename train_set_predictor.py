@@ -79,6 +79,11 @@ def parse_args() -> argparse.Namespace:
                    help="BCE pos_weight. Auto-derived from training data "
                         "(ratio of kept/removed vertices) if not set.")
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--disable-ptr-emb", action="store_true",
+                   help="Coordinate-only ablation: mask the frozen pointer "
+                        "embedding to zeros so the SetPredictor sees only "
+                        "(xy, in_S). Architecture and parameter count are "
+                        "unchanged.")
 
     # Eval during training: per-epoch threshold sweep on dev.
     p.add_argument("--eval-thresholds", nargs="+", type=float,
@@ -311,7 +316,10 @@ def main() -> None:
         hidden=args.predictor_hidden,
         n_attn_layers=args.predictor_attn_layers,
         heads=args.predictor_heads,
+        disable_ptr_emb=args.disable_ptr_emb,
     ).to(device)
+    if args.disable_ptr_emb:
+        print("[setpred] coordinate-only ablation: ptr_emb masked to zeros")
     print(f"[setpred] params = {model.num_params():,}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 

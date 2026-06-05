@@ -91,10 +91,17 @@ class SetPredictor(nn.Module):
     """
 
     def __init__(self, ptr_emb_dim: int = 128, hidden: int = 128,
-                 n_attn_layers: int = 3, heads: int = 8):
+                 n_attn_layers: int = 3, heads: int = 8,
+                 disable_ptr_emb: bool = False):
         super().__init__()
         self._ptr_emb_dim = ptr_emb_dim
         self._hidden = hidden
+        # When True, the frozen pointer embedding is masked to zeros at every
+        # forward pass — the architecture and parameter count are unchanged
+        # but the encoder carries no information. Used for the coordinate-only
+        # ablation that isolates representation signal from raw-coordinate
+        # signal (paper §6, C1 ablation).
+        self._disable_ptr_emb = bool(disable_ptr_emb)
 
         # Per-vertex input is (ptr_emb || xy || in_S) ∈ ℝ^{H_ptr + 3}.
         d_in = ptr_emb_dim + 3
@@ -136,6 +143,8 @@ class SetPredictor(nn.Module):
             pad = torch.zeros(B, L, dtype=torch.bool, device=ptr_emb.device)
 
         in_S_f = in_S.float().unsqueeze(-1)
+        if self._disable_ptr_emb:
+            ptr_emb = torch.zeros_like(ptr_emb)
         feats = torch.cat([ptr_emb, xy, in_S_f], dim=-1)      # (B, L, H_ptr+3)
         h = self.embed(feats)
         for blk in self.attn_blocks:

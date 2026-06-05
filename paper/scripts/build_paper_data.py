@@ -61,16 +61,24 @@ def _load_pointer(device: str):
     return pointer
 
 
-def _load_setpredictor(device: str) -> SetPredictor:
-    ckpt = torch.load(SETPRED_CKPT, map_location=device, weights_only=False)
-    cfg = ckpt.get("config") or {}
-    H = cfg.get("hidden", 128)
-    L = cfg.get("n_attn_layers", 3)
-    HD = cfg.get("heads", 8)
-    H_ptr = cfg.get("ptr_emb_dim", 128)
-    model = SetPredictor(ptr_emb_dim=H_ptr, hidden=H, n_attn_layers=L, heads=HD).to(device)
+def _load_setpredictor(device: str, ckpt_path: Path | str | None = None) -> SetPredictor:
+    """Load a SetPredictor checkpoint. Defaults to the standard probe; pass an
+    alternate path for ablation/multi-seed checkpoints.
+    """
+    path = Path(ckpt_path) if ckpt_path is not None else SETPRED_CKPT
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    cfg = ckpt.get("config") or ckpt.get("args") or {}
+    H = cfg.get("hidden", cfg.get("predictor_hidden", 128))
+    L = cfg.get("n_attn_layers", cfg.get("predictor_attn_layers", 3))
+    HD = cfg.get("heads", cfg.get("predictor_heads", 8))
+    H_ptr = cfg.get("ptr_emb_dim", cfg.get("hidden_size", 128))
+    disable_ptr_emb = bool(cfg.get("disable_ptr_emb", False))
+    model = SetPredictor(ptr_emb_dim=H_ptr, hidden=H, n_attn_layers=L, heads=HD,
+                         disable_ptr_emb=disable_ptr_emb).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
+    if disable_ptr_emb:
+        print(f"  [setpred] loaded with disable_ptr_emb=True from {path.name}")
     return model
 
 
@@ -177,7 +185,7 @@ def build_worked_examples(device: str) -> None:
     in_pick = _pick(in_records, 0.85, 0.95)
     ood_pick = _pick(ood_records, 0.55, 0.85)
 
-    threshold = 0.30
+    threshold = 0.20  # matches tab_headline's headline operating point
 
     def _probe_indices(rec) -> tuple[list[int], float]:
         pts = torch.tensor(np.asarray(rec["points"], dtype=np.float32),
@@ -290,15 +298,21 @@ def build_per_polygon_ood(device: str, threshold: float = 0.20,
 # ──────────────────────────────────────────────────────────────────────
 #  dist_dev_test.json + dist_test_OOD.json (per-polygon, for box plots)
 # ──────────────────────────────────────────────────────────────────────
-def build_per_polygon_all(device: str, batch_size: int = 32) -> None:
+def build_per_polygon_all(device: str, batch_size: int = 32,
+                          ckpt_path: str | None = None,
+                          out_suffix: str = "") -> None:
     """For every polygon in dev_test and test, record name, n, OPT, and
     (S_size, cov) for the policy seed and for the probe at three thresholds.
     Single shared inference pass per polygon; thresholding is local.
+
+    ckpt_path: alternate SetPredictor checkpoint (ablation / multi-seed runs).
+    out_suffix: appended to the output JSON stem, e.g. '_noenc' or '_seed11'.
     """
-    print(f"[per_polygon_all] starting (batch_size={batch_size})")
+    print(f"[per_polygon_all] starting (batch_size={batch_size}, "
+          f"ckpt={ckpt_path or 'default'}, suffix='{out_suffix}')")
     t0 = time.perf_counter()
     pointer = _load_pointer(device)
-    setpred = _load_setpredictor(device)
+    setpred = _load_setpredictor(device, ckpt_path)
 
     DATASET_PATH = os.getenv("DATASET_PATH")
     if not DATASET_PATH:
@@ -306,8 +320,10 @@ def build_per_polygon_all(device: str, batch_size: int = 32) -> None:
 
     thresholds = [0.20, 0.25, 0.30]
     splits = [
-        ("dev_test", DEV_TEST_TRAJ, "dev", "dist_dev_test.json"),
-        ("test_OOD", TEST_TRAJ, "test", "dist_test_OOD.json"),
+        ("dev_test", DEV_TEST_TRAJ, "dev",
+         f"dist_dev_test{out_suffix}.json"),
+        ("test_OOD", TEST_TRAJ, "test",
+         f"dist_test_OOD{out_suffix}.json"),
     ]
 
     from collections import defaultdict
@@ -377,6 +393,283 @@ def build_per_polygon_all(device: str, batch_size: int = 32) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  classical_baselines.json  (greedy + LS context for tab_headline)
+# ──────────────────────────────────────────────────────────────────────
+def build_classical_baselines(device: str | None = None) -> None:
+    """Aggregate classical greedy and local-search baselines on dev_test and
+    OOD test, using CGAL exact coverage uniformly so the numbers are directly
+    comparable to the policy/probe rows in tab_headline.
+
+    Greedy solutions are sourced from precomputed files:
+      - dev_test (367): results/v3/greedy_prune/greedy_solutions.json
+                       (reported as CGAL exact in greedy_prune_report.json)
+      - OOD test (2107): data/greedy_baseline_test.pkl  (we recompute CGAL)
+
+    LS solutions live in rec["final"] of data/ls_trajectories_*.pkl
+    (cached coverage there is disc-vis-500; we recompute CGAL).
+
+    Output: paper/data/baseline_classical.json
+    """
+    print("[classical_baselines] starting")
+    t0 = time.perf_counter()
+
+    DATASET_PATH = os.getenv("DATASET_PATH")
+    if not DATASET_PATH:
+        print("  warn: DATASET_PATH unset; OPT will be null")
+
+    # Load greedy solutions for both splits (different sources).
+    greedy_dev_path = REPO_ROOT / "results/v3/greedy_prune/greedy_solutions.json"
+    greedy_dev = json.loads(greedy_dev_path.read_text()) if greedy_dev_path.exists() else {}
+    print(f"  greedy_dev: {len(greedy_dev)} solutions from {greedy_dev_path.name}")
+
+    import pickle
+    greedy_ood_path = REPO_ROOT / "data/greedy_baseline_test.pkl"
+    with open(greedy_ood_path, "rb") as f:
+        greedy_ood = pickle.load(f)
+    print(f"  greedy_ood: {len(greedy_ood)} solutions from {greedy_ood_path.name}")
+
+    def _greedy_lookup(split: str, name: str) -> list[int] | None:
+        if split == "dev_test":
+            entry = greedy_dev.get(name) or {}
+            return entry.get("guards") or entry.get("solution") or entry.get("vertices")
+        elif split == "test_OOD":
+            # greedy_solutions.json covers ~40 OOD polygons; pkl covers ~10
+            entry = greedy_dev.get(name) or greedy_ood.get(name) or {}
+            return entry.get("guards")
+        return None
+
+    splits = [
+        ("dev_test", DEV_TEST_TRAJ, "dev", "dist_dev_test"),
+        ("test_OOD", TEST_TRAJ, "test", "dist_test_OOD"),
+    ]
+
+    out = {"splits": {}, "schema_version": 1,
+           "notes": "CGAL exact coverage used uniformly. dev_test greedy reuses "
+                    "cached CGAL coverage from greedy_prune_report (all 367 polygons). "
+                    "OOD greedy is partial: only polygons present in greedy_solutions.json "
+                    "or greedy_baseline_test.pkl are included (~40-50/2107). "
+                    "LS coverage recomputed from rec['final'] for all polygons."}
+
+    for split_name, traj_path, sol_subdir, _ in splits:
+        sol_dir = os.path.join(DATASET_PATH, sol_subdir) if DATASET_PATH else None
+        with open(traj_path, "rb") as f:
+            records = pickle.load(f)["records"]
+        print(f"  split={split_name}: {len(records)} polygons")
+
+        rows = {"greedy": [], "ls": []}
+        n_missing_greedy = 0
+        for i, rec in enumerate(records):
+            pts_np = np.asarray(rec["points"], dtype=np.float32)
+            n_v = rec["n"]
+            opt_sol = _read_opt_solution(sol_dir, rec["name"]) if sol_dir else None
+            opt_size = len(opt_sol) if opt_sol else None
+
+            # LS solution: recompute CGAL coverage on rec["final"].
+            ls_idxs = [int(j) for j in rec["final"] if 0 <= int(j) < n_v]
+            ls_cov = _coverage_exact(pts_np, ls_idxs, rec["name"])
+            rows["ls"].append({"name": rec["name"], "n": int(n_v), "OPT": opt_size,
+                                "S_size": len(ls_idxs), "cov": float(ls_cov)})
+
+            # Greedy: lookup precomputed guard set, recompute CGAL.
+            g_idxs = _greedy_lookup(split_name, rec["name"])
+            if g_idxs is None:
+                n_missing_greedy += 1
+                continue
+            g_idxs = [int(j) for j in g_idxs if 0 <= int(j) < n_v]
+            # greedy_solutions.json has CGAL-exact coverage; reuse if present.
+            # For OOD entries only in pkl, recompute CGAL.
+            cached = greedy_dev.get(rec["name"], {}).get("coverage")
+            g_cov = float(cached) if cached is not None else _coverage_exact(
+                pts_np, g_idxs, rec["name"])
+            rows["greedy"].append({"name": rec["name"], "n": int(n_v), "OPT": opt_size,
+                                    "S_size": len(g_idxs), "cov": float(g_cov)})
+
+            if (i + 1) % 200 == 0:
+                dt = time.perf_counter() - t0
+                print(f"    {i+1}/{len(records)} polygons, {dt:.1f}s elapsed")
+
+        if n_missing_greedy:
+            print(f"  warn: {n_missing_greedy} polygons missing from greedy source")
+
+        def _agg(rs: list[dict]) -> dict:
+            if not rs:
+                return {}
+            covs = [r["cov"] for r in rs]
+            sn = [r["S_size"] / r["n"] for r in rs]
+            sopt = [r["S_size"] / r["OPT"] for r in rs if r.get("OPT")]
+            return {
+                "n_polygons": len(rs),
+                "mean_cov": float(np.mean(covs)),
+                "min_cov": float(np.min(covs)),
+                "mean_S_over_n": float(np.mean(sn)),
+                "mean_S_over_OPT": float(np.mean(sopt)) if sopt else None,
+                "n_below_095": int(sum(1 for c in covs if c < 0.95)),
+            }
+
+        out["splits"][split_name] = {
+            "greedy": _agg(rows["greedy"]),
+            "ls": _agg(rows["ls"]),
+            "per_polygon": rows,
+        }
+
+    out_path = PAPER_DATA / "baseline_classical.json"
+    out_path.write_text(json.dumps(out, indent=2))
+    dt = time.perf_counter() - t0
+    print(f"  wrote {out_path} ({dt:.1f}s)")
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  encoder_linear_probe.json  (quantitative C1 evidence)
+# ──────────────────────────────────────────────────────────────────────
+def build_encoder_linear_probe(device: str, n_polygons: int = 200) -> None:
+    """Train logistic regression over frozen encoder embeddings to predict
+    LS-target membership. Reports cross-validated ROC-AUC and PR-AUC with
+    polygon-level grouping (no vertex leakage across folds).
+
+    This replaces the soft "visible separation" claim in §7 with a number.
+    """
+    print(f"[encoder_linear_probe] starting (n_polygons={n_polygons})")
+    t0 = time.perf_counter()
+    pointer = _load_pointer(device)
+
+    with open(DEV_TEST_TRAJ, "rb") as f:
+        records = pickle.load(f)["records"]
+    sample = records[:n_polygons]
+
+    all_X, all_y, groups = [], [], []
+    for poly_idx, rec in enumerate(sample):
+        pts = torch.tensor(np.asarray(rec["points"], dtype=np.float32),
+                           device=device).unsqueeze(0)
+        lengths = torch.tensor([rec["n"]], device=device)
+        with torch.no_grad():
+            emb = extract_pointer_embeddings(pointer, pts, lengths)[0]  # (n, 128)
+        emb_np = emb.cpu().numpy()
+        labels = np.zeros(rec["n"], dtype=np.int32)
+        for j in rec.get("final", []):
+            if 0 <= int(j) < rec["n"]:
+                labels[int(j)] = 1
+        all_X.append(emb_np)
+        all_y.append(labels)
+        groups.append(np.full(rec["n"], poly_idx, dtype=np.int64))
+
+    X = np.concatenate(all_X, axis=0)
+    y = np.concatenate(all_y, axis=0)
+    g = np.concatenate(groups, axis=0)
+    print(f"  collected {X.shape[0]} per-vertex embeddings "
+          f"({int(y.sum())} positive / {int((1-y).sum())} negative) "
+          f"from {len(sample)} polygons")
+
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import GroupKFold
+    from sklearn.metrics import roc_auc_score, average_precision_score
+    from sklearn.preprocessing import StandardScaler
+
+    n_splits = 5
+    gkf = GroupKFold(n_splits=n_splits)
+    roc_aucs, pr_aucs = [], []
+    for fold, (tr, te) in enumerate(gkf.split(X, y, g)):
+        scaler = StandardScaler().fit(X[tr])
+        Xtr = scaler.transform(X[tr])
+        Xte = scaler.transform(X[te])
+        clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+        clf.fit(Xtr, y[tr])
+        scores = clf.predict_proba(Xte)[:, 1]
+        roc = roc_auc_score(y[te], scores)
+        prc = average_precision_score(y[te], scores)
+        roc_aucs.append(float(roc)); pr_aucs.append(float(prc))
+        print(f"  fold {fold+1}/{n_splits}: ROC-AUC={roc:.4f}  PR-AUC={prc:.4f}  "
+              f"(test polygons={len(np.unique(g[te]))})")
+
+    out = {
+        "n_polygons": int(len(sample)),
+        "n_vertices": int(X.shape[0]),
+        "n_positive": int(y.sum()),
+        "n_splits": n_splits,
+        "split_strategy": "GroupKFold on polygon",
+        "classifier": "LogisticRegression(C=1.0, class_weight=balanced)",
+        "roc_auc_mean": float(np.mean(roc_aucs)),
+        "roc_auc_std": float(np.std(roc_aucs)),
+        "pr_auc_mean": float(np.mean(pr_aucs)),
+        "pr_auc_std": float(np.std(pr_aucs)),
+        "roc_auc_per_fold": roc_aucs,
+        "pr_auc_per_fold": pr_aucs,
+    }
+    out_path = PAPER_DATA / "encoder_linear_probe.json"
+    out_path.write_text(json.dumps(out, indent=2))
+    print(f"  ROC-AUC = {out['roc_auc_mean']:.4f} ± {out['roc_auc_std']:.4f}  "
+          f"PR-AUC = {out['pr_auc_mean']:.4f} ± {out['pr_auc_std']:.4f}")
+    print(f"  wrote {out_path} ({time.perf_counter() - t0:.1f}s)")
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  multi_seed_summary.json  (M1: probe-seed-variance error bars)
+# ──────────────────────────────────────────────────────────────────────
+def build_multi_seed_summary(device: str) -> None:
+    """Aggregate multi-seed probe results from dist_*_seed{seed}.json files
+    produced by re-running `per_polygon_all` with different SP_CKPT, AND the
+    original single-seed run that lives in dist_{dev_test,test_OOD}.json
+    (treated here as 'seed1234' since the standard checkpoint was trained
+    with that seed). Yields mean ± std over all available seeds per split.
+    """
+    print("[multi_seed_summary] starting")
+    t0 = time.perf_counter()
+    out = {"splits": {}, "schema_version": 2,
+           "notes": "Seed 1234 corresponds to the standard checkpoint "
+                    "(dist_dev_test.json / dist_test_OOD.json); the rest "
+                    "come from seed{11,22,33} probe retrainings."}
+
+    for split, base_name, glob_stem in [
+        ("dev_test", "dist_dev_test.json", "dist_dev_test_seed"),
+        ("test_OOD", "dist_test_OOD.json", "dist_test_OOD_seed"),
+    ]:
+        files = sorted(PAPER_DATA.glob(f"{glob_stem}*.json"))
+        # Prepend the standard (seed=1234) file so it participates in the agg.
+        base_path = PAPER_DATA / base_name
+        if base_path.exists():
+            files = [base_path] + list(files)
+        if not files:
+            print(f"  {split}: no files matching {glob_stem}*.json — skipping")
+            continue
+        per_seed = []
+        for fp in files:
+            d = json.loads(fp.read_text())["polygons"]
+            agg = {}
+            for m in ("seed", "probe_t020", "probe_t025", "probe_t030"):
+                covs = [r[m]["cov"] for r in d]
+                sn = [r[m]["S_size"] / r["n"] for r in d]
+                sopt = [r[m]["S_size"] / r["OPT"] for r in d if r.get("OPT")]
+                agg[m] = {
+                    "mean_cov": float(np.mean(covs)),
+                    "mean_S_over_n": float(np.mean(sn)),
+                    "mean_S_over_OPT": float(np.mean(sopt)) if sopt else None,
+                    "n_below_095": int(sum(1 for c in covs if c < 0.95)),
+                }
+            per_seed.append({"file": fp.name, "agg": agg})
+            print(f"  {split}: loaded {fp.name}")
+
+        def _mean_std(method: str, key: str) -> tuple[float, float] | tuple[None, None]:
+            vals = [s["agg"][method][key] for s in per_seed
+                    if s["agg"][method][key] is not None]
+            if not vals:
+                return (None, None)
+            return (float(np.mean(vals)), float(np.std(vals)))
+
+        summary = {}
+        for m in ("seed", "probe_t020", "probe_t025", "probe_t030"):
+            summary[m] = {}
+            for key in ("mean_cov", "mean_S_over_n", "mean_S_over_OPT", "n_below_095"):
+                mu, sd = _mean_std(m, key)
+                summary[m][f"{key}_mean"] = mu
+                summary[m][f"{key}_std"] = sd
+        out["splits"][split] = {"per_seed": per_seed, "summary": summary,
+                                 "n_seeds": len(per_seed)}
+
+    out_path = PAPER_DATA / "multi_seed_summary.json"
+    out_path.write_text(json.dumps(out, indent=2))
+    print(f"  wrote {out_path} ({time.perf_counter() - t0:.1f}s)")
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Dispatcher
 # ──────────────────────────────────────────────────────────────────────
 def _run(fn, name: str, *args, **kwargs) -> None:
@@ -409,4 +702,20 @@ if __name__ == "__main__":
              batch_size=32, limit=None)
         print()
     if "per_polygon_all" in steps:
-        _run(build_per_polygon_all, "per_polygon_all", device, batch_size=32)
+        # Optional env vars to evaluate alternate checkpoints (no-encoder
+        # ablation or multi-seed probes) and tag the outputs.
+        ckpt = os.getenv("SP_CKPT")  # absolute or repo-relative path
+        suffix = os.getenv("SP_SUFFIX", "")
+        _run(build_per_polygon_all, "per_polygon_all", device,
+             batch_size=32, ckpt_path=ckpt, out_suffix=suffix)
+        print()
+    if "classical_baselines" in steps:
+        _run(build_classical_baselines, "classical_baselines", device)
+        print()
+    if "encoder_linear_probe" in steps:
+        n = int(os.getenv("LP_N_POLYGONS", "200"))
+        _run(build_encoder_linear_probe, "encoder_linear_probe", device,
+             n_polygons=n)
+        print()
+    if "multi_seed_summary" in steps:
+        _run(build_multi_seed_summary, "multi_seed_summary", device)
