@@ -14,6 +14,8 @@ Deprecated single-panel builders (fig_coverage_cdf, fig_pareto, fig_kinvariance,
 fig_encoder_pca) remain defined for reproducibility but are not dispatched; their
 content now lives in fig_distributions and fig_mechanism.
 """
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
@@ -353,7 +355,7 @@ def fig_worked_example() -> None:
 
     panel_specs = [
         (0, "seed_idxs",  "seed_coverage",  "Pretrained policy"),
-        (1, "probe_idxs", "probe_coverage", "Policy + probe ($t{=}0.30$)"),
+        (1, "probe_idxs", "probe_coverage", "Policy + probe ($t{=}0.20$)"),
         (2, "opt_idxs",   "opt_coverage",   "Optimum"),
     ]
 
@@ -428,8 +430,8 @@ def fig_encoder_pca() -> None:
                color=COLORS["t020"], alpha=0.75, label="guard (LS target)")
 
     if method == "PCA" and ev and len(ev) >= 2:
-        ax.set_xlabel(f"PC1 ({ev[0]*100:.1f}\\% var)")
-        ax.set_ylabel(f"PC2 ({ev[1]*100:.1f}\\% var)")
+        ax.set_xlabel(f"PC1 ({ev[0]*100:.1f}% var)")
+        ax.set_ylabel(f"PC2 ({ev[1]*100:.1f}% var)")
     else:
         ax.set_xlabel(f"{method} dim 1")
         ax.set_ylabel(f"{method} dim 2")
@@ -648,8 +650,8 @@ def fig_mechanism() -> None:
         axb.scatter(xy[guard, 0], xy[guard, 1], s=10,
                     color=COLORS["t020"], alpha=0.75, label="guard (LS target)")
         if ev and len(ev) >= 2:
-            axb.set_xlabel(f"PC1 ({ev[0]*100:.1f}\\% var)")
-            axb.set_ylabel(f"PC2 ({ev[1]*100:.1f}\\% var)")
+            axb.set_xlabel(f"PC1 ({ev[0]*100:.1f}% var)")
+            axb.set_ylabel(f"PC2 ({ev[1]*100:.1f}% var)")
         axb.set_title("(b) Frozen encoder embeddings")
         axb.legend(loc="best", frameon=False, fontsize=7)
         axb.grid(alpha=0.3, linewidth=0.5)
