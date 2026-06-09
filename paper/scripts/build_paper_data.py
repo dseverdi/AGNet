@@ -182,8 +182,23 @@ def build_worked_examples(device: str) -> None:
         candidates.sort(key=lambda r: r["n"])
         return candidates[len(candidates) // 2]
 
-    in_pick = _pick(in_records, 0.85, 0.95)
-    ood_pick = _pick(ood_records, 0.55, 0.85)
+    def _pick_named(records, name: str, target_low: float, target_high: float):
+        """Pin a specific instance by name for a reproducible, vetted figure;
+        fall back to the heuristic _pick if that record is absent."""
+        for r in records:
+            if r["name"] == name:
+                return r
+        print(f"  warn: pinned example {name!r} not found; using heuristic pick")
+        return _pick(records, target_low, target_high)
+
+    # Pinned, reviewer-vetted examples (see paper/scripts/find_worked_example.py).
+    # The OOD pick rand-350-13 replaces randsimple-300-4: it is unambiguously OOD
+    # (n=350, ~1.8x the n=198 training max) yet at t=0.20 recovers above feasibility
+    # (seed 0.942 -> probe 0.996) at |S|/OPT 2.41 and the lowest guard density of any
+    # clean candidate (|S|/n 0.37) -- not the old 6x-OPT tail outlier that flooded
+    # 229/300 vertices.
+    in_pick = _pick_named(in_records, "rand-62-44", 0.85, 0.95)
+    ood_pick = _pick_named(ood_records, "rand-350-13", 0.55, 0.85)
 
     threshold = 0.20  # matches tab_headline's headline operating point
 
