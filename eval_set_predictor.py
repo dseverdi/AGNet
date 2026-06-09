@@ -83,6 +83,10 @@ def parse_args() -> argparse.Namespace:
                    help="Number of dev polygons (-1 = all).")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--out", type=str, default="results/set_predictor_eval.json")
+    p.add_argument("--sol-dir", type=str, default=None,
+                   help="Directory containing .solution files for |S|/OPT. "
+                        "Overrides the default DATASET_PATH/dev path. "
+                        "Pass the directory directly (e.g. DATASET_PATH/large).")
     return p.parse_args()
 
 
@@ -277,9 +281,11 @@ def main() -> None:
     L = saved_args.get("predictor_attn_layers", 3)
     HD = saved_args.get("predictor_heads", 8)
     H_ptr = saved_args.get("hidden_size", args.hidden_size)
-    print(f"[eval-setpred] architecture: hidden={H} layers={L} heads={HD} ptr_emb_dim={H_ptr}")
+    no_enc = saved_args.get("disable_ptr_emb", False)
+    print(f"[eval-setpred] architecture: hidden={H} layers={L} heads={HD} ptr_emb_dim={H_ptr} disable_ptr_emb={no_enc}")
 
-    model = SetPredictor(ptr_emb_dim=H_ptr, hidden=H, n_attn_layers=L, heads=HD).to(device)
+    model = SetPredictor(ptr_emb_dim=H_ptr, hidden=H, n_attn_layers=L, heads=HD,
+                         disable_ptr_emb=no_enc).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     print(f"[eval-setpred] params = {model.num_params():,}")
@@ -302,9 +308,12 @@ def main() -> None:
     # Dataset.
     ds = SetPredDataset(args.val_traj)
 
-    # dev sol_dir for |S|/OPT.
-    DATASET_PATH = os.getenv("DATASET_PATH")
-    dev_sol_dir = os.path.join(DATASET_PATH, "dev") if DATASET_PATH else None
+    # Solution directory for |S|/OPT.
+    if args.sol_dir:
+        dev_sol_dir = args.sol_dir
+    else:
+        DATASET_PATH = os.getenv("DATASET_PATH")
+        dev_sol_dir = os.path.join(DATASET_PATH, "dev") if DATASET_PATH else None
 
     summary = sweep_thresholds_x_iters(
         model, ds, pointer, device, args,
