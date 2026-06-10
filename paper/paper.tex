@@ -1,13 +1,11 @@
-\documentclass{article}
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage{lmodern}
+\documentclass[preprint,12pt]{elsarticle}
+% inputenc/fontenc/lmodern not needed -- elsarticle loads them internally
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath}
 \usepackage{amssymb}
-\usepackage[hidelinks]{hyperref}
 \usepackage[section]{placeins} % keep floats within sections
+\usepackage{hyperref} % clickable refs/citations and \url (load late)
 % Notation helpers
 \newcommand{\sinst}{s}
 \newcommand{\Vis}[1]{\mathrm{Vis}(#1)}
@@ -34,22 +32,33 @@
 \title{Learning to Place Guards by Reinforcement:\\
 A Geo-Free Neural Policy for the Vertex-Guard\\
 Art Gallery Problem}
-% TODO(user): fill real affiliations and the corresponding-author email before submission.
-\author{Domagoj Ševerdija\thanks{AFFILIATION-1-TODO. Corresponding author: \texttt{EMAIL-TODO}.}
-  \and Jurica Maltar\thanks{AFFILIATION-2-TODO}
-  \and Nathan Chappel\thanks{AFFILIATION-3-TODO}
-  \and Domagoj Matijević\thanks{AFFILIATION-4-TODO}}
-\date{}
+
+\author[osijek]{Domagoj Ševerdija\corref{cor1}}
+\ead{dseverdi@mathos.hr}
+\author[osijek]{Jurica Maltar}
+\ead{jmaltar@mathos.hr}
+\author[]{Nathan Chappel}
+\ead{nathan.s.chappel@gmail.com}
+\author[osijek]{Domagoj Matijević}
+\ead{domagoj@mathos.hr}
+
+\cortext[cor1]{Corresponding author}
+\address[osijek]{School of Applied Mathematics and Informatics,
+  University J.~J.~Strossmayer of Osijek, Croatia}
 
 \begin{document}
 
-\maketitle
+\begin{frontmatter}
 
 \begin{abstract}
-Neural combinatorial optimization has shown that policies trained by reinforcement can construct strong solutions to NP-hard problems directly from raw instances; what such a policy actually learns about a problem's structure, as opposed to what its decoder expresses, remains much less clear. We study this distinction on the vertex-guard Art Gallery Problem, the NP-hard task of choosing polygon vertices from which to observe an entire region. A pointer-network policy is trained from a coverage-aware reward over its own rollouts under a constraint we call \emph{geo-free} test-time inference: the model sees only the polygon's vertex coordinates, with no visibility computation and no geometric oracle. The policy places guards economically but leaves a tail of under-covered polygons that widens on instances far larger than any seen in training. To locate the cause --- a limit of what the policy has \emph{learned}, or only of what its decoder \emph{expresses} --- we freeze the trained encoder and read its embeddings with a small single-shot classifier, still geo-free at inference. The classifier closes most of the feasibility gap, in and out of distribution and at vertex counts reaching roughly five times the training range, cutting under-covered polygons by about an order of magnitude at an explicitly reported cost in guard count --- the coverage--cost trade-off that geo-free inference imposes. We read this as evidence that the reinforcement-trained representation already encodes much of the geometry a feasibility decision requires, and that the residual failures reflect decoder calibration rather than missing knowledge. Probing a frozen encoder thus carries over from representation analysis to neural combinatorial solvers as a practical way to ask what they have internalized.
+Neural combinatorial optimization has shown that policies trained by reinforcement can construct strong solutions to NP-hard problems directly from raw instances; what such a policy actually \emph{learns}, as opposed to what its decoder \emph{expresses}, remains much less clear. We study this distinction on the vertex-guard Art Gallery Problem, the NP-hard task of choosing polygon vertices from which to observe an entire region. A pointer-network policy is trained from a coverage-aware reward over its own rollouts under the constraint we call \emph{geo-free} inference: at test time it sees only vertex coordinates, with no visibility computation and no geometric oracle. The policy places guards economically but leaves a tail of under-covered polygons that widens far beyond the training range. To locate the cause, we freeze the trained encoder and read its embeddings with a small single-shot classifier, still geo-free at inference. The classifier closes most of the feasibility gap, in and out of distribution and at up to roughly five times the training range, cutting under-covered polygons by about an order of magnitude at an explicitly reported cost in guard count. We read this as evidence that the reinforcement-trained representation already encodes the geometry a feasibility decision requires, and that the residual failures reflect decoder calibration, not missing knowledge. Probing a frozen encoder thus offers a practical way to ask what a neural combinatorial solver has internalized.
 \end{abstract}
 
-\paragraph*{Keywords.} Art Gallery Problem; neural combinatorial optimization; reinforcement learning; pointer networks; representation probing; out-of-distribution generalization.
+\begin{keyword}
+Art Gallery Problem \sep neural combinatorial optimization \sep reinforcement learning \sep pointer networks \sep representation probing 
+\end{keyword}
+
+\end{frontmatter}
 
 \section{Introduction}
 \label{sec:intro}
@@ -365,6 +374,6 @@ The AGPVG instance library is publicly available~\cite{art-gallery-instances-pag
 
 The authors declare no competing interests.
 
-\bibliographystyle{plain}
+\bibliographystyle{elsarticle-num}
 \bibliography{paper}
 \end{document}
