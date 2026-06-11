@@ -1,3 +1,74 @@
-logs/
-.ipynb_checkpoints/
+# Python
 __pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Environment
+.env
+.env.*
+
+# Results, logs, and outputs
+#results/
+log/
+logs/
+*.npy
+*.png
+*.json
+*.txt~
+*.pt
+*.ckpt
+*.h5
+*.csv
+*.out
+*.log
+
+# Dataset and model folders
+models/
+dataset/
+
+# Drawio and LaTeX
+*.drawio
+*.aux
+*.out
+*.toc
+*.bbl
+*.blg
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.log
+
+# Misc
+.DS_Store
+Thumbs.db
+DEADJOE
+
+# Ignore example env
+.env.example
+# Ignore Python cache folders
+__pycache__/
+checkpoints/
+gfx/
+tsplib_cache/
+data/disc_vis_cache.pkl
+data/value_net_training_data.pkl
