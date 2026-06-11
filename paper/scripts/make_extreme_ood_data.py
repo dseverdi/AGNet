@@ -29,11 +29,18 @@ RESULTS = REPO / "results" / "v3"
 OUT = Path(__file__).resolve().parents[1] / "data" / "extreme_ood.json"
 
 SEEDS = ["seed1234", "seed11", "seed22", "seed33"]
+# No-encoder ablation seeds: "no_encoder" is the seed-1234 run; the rest are
+# the no_encoder_seed{11,22,33} retrainings (only those present are aggregated).
+NE_SEEDS = ["no_encoder", "no_encoder_seed11", "no_encoder_seed22", "no_encoder_seed33"]
 T_KEY = "t=0.2|K=1"
 
 
 def _load(variant: str) -> dict:
     return json.loads((RESULTS / f"setpred_extreme_ood_{variant}.json").read_text())
+
+
+def _exists(variant: str) -> bool:
+    return (RESULTS / f"setpred_extreme_ood_{variant}.json").exists()
 
 
 def main() -> None:
@@ -50,7 +57,17 @@ def main() -> None:
         mins.append(c["dist"]["cov_min"])
         belows.append(c["dist"]["not_covered_ge_095"])
 
-    ne = _load("no_encoder")["cells"][T_KEY]
+    # No-encoder ablation: aggregate over whatever seeds are present (mean±std),
+    # mirroring the full-probe row. Falls back to a single value if only the
+    # seed-1234 run exists.
+    ne_present = [v for v in NE_SEEDS if _exists(v)]
+    ne_covs, ne_sns, ne_mins, ne_belows = [], [], [], []
+    for v in ne_present:
+        c = _load(v)["cells"][T_KEY]
+        ne_covs.append(c["cov"])
+        ne_sns.append(c["chv"])
+        ne_mins.append(c["dist"]["cov_min"])
+        ne_belows.append(c["dist"]["not_covered_ge_095"])
 
     out = {
         "note": (
@@ -61,7 +78,8 @@ def main() -> None:
             "largest lack one), per the paper's policy of reporting coverage only "
             "on `large`. Probe rows are the four seeds {1234,11,22,33} as mean+/-std; "
             "the probe min-Cov is the mean+/-std of the four per-seed worst-polygon "
-            "coverages. No-encoder is a single run. "
+            "coverages. The no-encoder ablation is aggregated the same way over "
+            "whatever no_encoder seeds are present. "
             "Sources: results/v3/setpred_extreme_ood_*.json."
         ),
         "n_polygons": n_total,
@@ -86,10 +104,17 @@ def main() -> None:
             "per_seed_cov_min": dict(zip(SEEDS, [float(m) for m in mins])),
         },
         "no_encoder_t020": {
-            "cov": ne["cov"],
-            "S_n": ne["chv"],
-            "cov_min": ne["dist"]["cov_min"],
-            "n_below_095": ne["dist"]["not_covered_ge_095"],
+            "n_seeds": len(ne_present),
+            "cov_mean": float(np.mean(ne_covs)),
+            "cov_std": float(np.std(ne_covs)),
+            "S_n_mean": float(np.mean(ne_sns)),
+            "S_n_std": float(np.std(ne_sns)),
+            "cov_min_mean": float(np.mean(ne_mins)),
+            "cov_min_std": float(np.std(ne_mins)),
+            "n_below_095_mean": float(np.mean(ne_belows)),
+            "n_below_095_std": float(np.std(ne_belows)),
+            "per_seed_n_below_095": dict(zip(ne_present, ne_belows)),
+            "per_seed_cov_min": dict(zip(ne_present, [float(m) for m in ne_mins])),
         },
     }
 
@@ -102,7 +127,9 @@ def main() -> None:
           f"min={p['cov_min_mean']:.4f}±{p['cov_min_std']:.4f} "
           f"below={p['n_below_095_mean']:.1f}±{p['n_below_095_std']:.1f}")
     q = out["no_encoder_t020"]
-    print(f"  no-encoder: cov={q['cov']:.4f} min={q['cov_min']:.4f} below={q['n_below_095']}/{n_total}")
+    print(f"  no-enc({q['n_seeds']}sd): cov={q['cov_mean']:.4f}±{q['cov_std']:.4f} "
+          f"min={q['cov_min_mean']:.4f}±{q['cov_min_std']:.4f} "
+          f"below={q['n_below_095_mean']:.1f}±{q['n_below_095_std']:.1f}/{n_total}")
 
 
 if __name__ == "__main__":

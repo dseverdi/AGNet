@@ -9,8 +9,12 @@ seed at t=0.20:
     both methods are evaluated on the SAME 2107 polygons),
   * Wilson 95% CI for each feasibility proportion.
 
+It also computes the in-distribution dev_test paired comparison (policy seed vs the
+full probe at t=0.20, displayed seed 1234) under the "dev_test" key, so both held-out
+splits report the same paired McNemar test.
+
 Writes paper/data/significance_ood.json. Every number in the paper's significance
-sentence must come from this file.
+sentences must come from this file.
 
 Run: /home/dseverdi/.conda/envs/MLAG/bin/python paper/scripts/compute_significance.py
 """
@@ -51,8 +55,44 @@ def mcnemar_exact(b: int, c: int) -> float:
     return binomtest(min(b, c), n, 0.5, alternative="two-sided").pvalue
 
 
+def paired_feasibility(polys: list[dict], a_key: str, b_key: str) -> dict:
+    """Paired policy-vs-probe feasibility comparison on one split (one column
+    each). Returns failure counts, the two McNemar discordant cells, the exact
+    McNemar p-value, and Wilson 95% CIs for both feasibility proportions."""
+    n = len(polys)
+    a_fail = [p[a_key]["cov"] < GATE for p in polys]
+    b_fail = [p[b_key]["cov"] < GATE for p in polys]
+    n_a_fail = sum(a_fail)
+    n_b_fail = sum(b_fail)
+    b = sum(1 for s, t in zip(a_fail, b_fail) if s and not t)   # a fails, b passes
+    c = sum(1 for s, t in zip(a_fail, b_fail) if not s and t)   # a passes, b fails
+    lo_a, hi_a = proportion_confint(n - n_a_fail, n)
+    lo_b, hi_b = proportion_confint(n - n_b_fail, n)
+    return {
+        "n": n,
+        "policy_failures": n_a_fail,
+        "probe_failures": n_b_fail,
+        "discordant_policy_only": b,
+        "discordant_probe_only": c,
+        "mcnemar_exact_p": mcnemar_exact(b, c),
+        "policy_feasible_wilson95": [lo_a, hi_a],
+        "probe_feasible_wilson95": [lo_b, hi_b],
+    }
+
+
 def main() -> None:
     out = {"gate": GATE, "threshold": "t=0.20", "per_seed": {}}
+
+    # --- dev_test: in-distribution paired comparison, displayed seed (1234) ---
+    # The OOD test is reported per-probe-seed below; dev_test reports the
+    # displayed seed to match Tables tab:headline / tab:dist_shift.
+    dev = json.loads((PAPER_DATA / "dist_dev_test.json").read_text())["polygons"]
+    out["dev_test"] = paired_feasibility(dev, "seed", "probe_t020")
+    d = out["dev_test"]
+    print(f"dev_test (seed 1234): policy {d['policy_failures']}/{d['n']} vs "
+          f"probe {d['probe_failures']}/{d['n']} "
+          f"(b={d['discordant_policy_only']}, c={d['discordant_probe_only']}) "
+          f"McNemar exact p={d['mcnemar_exact_p']:.3e}")
     for seed, fname in SEED_FILES.items():
         polys = json.loads((PAPER_DATA / fname).read_text())["polygons"]
         n = len(polys)

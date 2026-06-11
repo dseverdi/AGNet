@@ -619,65 +619,93 @@ def build_encoder_linear_probe(device: str, n_polygons: int = 200) -> None:
 # ──────────────────────────────────────────────────────────────────────
 #  multi_seed_summary.json  (M1: probe-seed-variance error bars)
 # ──────────────────────────────────────────────────────────────────────
+def _aggregate_seed_files(files: list, label: str) -> tuple[list, dict]:
+    """Aggregate a list of per-polygon dist_*.json files into (per_seed, summary)
+    where summary holds mean/std across seeds for each metric. Shared by the full
+    probe and the no-encoder ablation."""
+    per_seed = []
+    for fp in files:
+        d = json.loads(fp.read_text())["polygons"]
+        agg = {}
+        for m in ("seed", "probe_t020", "probe_t025", "probe_t030"):
+            covs = [r[m]["cov"] for r in d]
+            sn = [r[m]["S_size"] / r["n"] for r in d]
+            sopt = [r[m]["S_size"] / r["OPT"] for r in d if r.get("OPT")]
+            agg[m] = {
+                "mean_cov": float(np.mean(covs)),
+                "mean_S_over_n": float(np.mean(sn)),
+                "mean_S_over_OPT": float(np.mean(sopt)) if sopt else None,
+                "n_below_095": int(sum(1 for c in covs if c < 0.95)),
+            }
+        per_seed.append({"file": fp.name, "agg": agg})
+        print(f"  {label}: loaded {fp.name}")
+
+    def _mean_std(method: str, key: str):
+        vals = [s["agg"][method][key] for s in per_seed
+                if s["agg"][method][key] is not None]
+        if not vals:
+            return (None, None)
+        return (float(np.mean(vals)), float(np.std(vals)))
+
+    summary = {}
+    for m in ("seed", "probe_t020", "probe_t025", "probe_t030"):
+        summary[m] = {}
+        for key in ("mean_cov", "mean_S_over_n", "mean_S_over_OPT", "n_below_095"):
+            mu, sd = _mean_std(m, key)
+            summary[m][f"{key}_mean"] = mu
+            summary[m][f"{key}_std"] = sd
+    return per_seed, summary
+
+
+def _collect_seed_files(base_name: str, glob_stem: str) -> list:
+    """Files for one variant: the seed-1234 base (no suffix) followed by the
+    seed{11,22,33} retrainings. Returns [] if none exist."""
+    files = sorted(PAPER_DATA.glob(f"{glob_stem}*.json"))
+    base_path = PAPER_DATA / base_name
+    if base_path.exists():
+        files = [base_path] + list(files)
+    return files
+
+
 def build_multi_seed_summary(device: str) -> None:
-    """Aggregate multi-seed probe results from dist_*_seed{seed}.json files
-    produced by re-running `per_polygon_all` with different SP_CKPT, AND the
-    original single-seed run that lives in dist_{dev_test,test_OOD}.json
-    (treated here as 'seed1234' since the standard checkpoint was trained
-    with that seed). Yields mean ± std over all available seeds per split.
+    """Aggregate multi-seed results from dist_*_seed{seed}.json files produced
+    by re-running `per_polygon_all` with different SP_CKPT, AND the original
+    single-seed runs in dist_{dev_test,test_OOD}{,_noenc}.json (treated as
+    'seed1234', the standard/no_encoder checkpoint seed). Yields mean ± std over
+    all available seeds per split, for BOTH the full probe (`summary`) and the
+    no-encoder ablation (`no_encoder_summary`).
     """
     print("[multi_seed_summary] starting")
     t0 = time.perf_counter()
-    out = {"splits": {}, "schema_version": 2,
-           "notes": "Seed 1234 corresponds to the standard checkpoint "
-                    "(dist_dev_test.json / dist_test_OOD.json); the rest "
-                    "come from seed{11,22,33} probe retrainings."}
+    out = {"splits": {}, "schema_version": 3,
+           "notes": "Seed 1234 corresponds to the standard / no_encoder "
+                    "checkpoints (dist_*{,_noenc}.json); the rest come from "
+                    "seed{11,22,33} retrainings. `summary` is the full probe, "
+                    "`no_encoder_summary` the matched-capacity ablation."}
 
-    for split, base_name, glob_stem in [
-        ("dev_test", "dist_dev_test.json", "dist_dev_test_seed"),
-        ("test_OOD", "dist_test_OOD.json", "dist_test_OOD_seed"),
+    for split, base, glob_stem, ne_base, ne_glob in [
+        ("dev_test", "dist_dev_test.json", "dist_dev_test_seed",
+         "dist_dev_test_noenc.json", "dist_dev_test_noenc_seed"),
+        ("test_OOD", "dist_test_OOD.json", "dist_test_OOD_seed",
+         "dist_test_OOD_noenc.json", "dist_test_OOD_noenc_seed"),
     ]:
-        files = sorted(PAPER_DATA.glob(f"{glob_stem}*.json"))
-        # Prepend the standard (seed=1234) file so it participates in the agg.
-        base_path = PAPER_DATA / base_name
-        if base_path.exists():
-            files = [base_path] + list(files)
+        files = _collect_seed_files(base, glob_stem)
         if not files:
             print(f"  {split}: no files matching {glob_stem}*.json — skipping")
             continue
-        per_seed = []
-        for fp in files:
-            d = json.loads(fp.read_text())["polygons"]
-            agg = {}
-            for m in ("seed", "probe_t020", "probe_t025", "probe_t030"):
-                covs = [r[m]["cov"] for r in d]
-                sn = [r[m]["S_size"] / r["n"] for r in d]
-                sopt = [r[m]["S_size"] / r["OPT"] for r in d if r.get("OPT")]
-                agg[m] = {
-                    "mean_cov": float(np.mean(covs)),
-                    "mean_S_over_n": float(np.mean(sn)),
-                    "mean_S_over_OPT": float(np.mean(sopt)) if sopt else None,
-                    "n_below_095": int(sum(1 for c in covs if c < 0.95)),
-                }
-            per_seed.append({"file": fp.name, "agg": agg})
-            print(f"  {split}: loaded {fp.name}")
+        per_seed, summary = _aggregate_seed_files(files, split)
+        split_out = {"per_seed": per_seed, "summary": summary,
+                     "n_seeds": len(per_seed)}
 
-        def _mean_std(method: str, key: str) -> tuple[float, float] | tuple[None, None]:
-            vals = [s["agg"][method][key] for s in per_seed
-                    if s["agg"][method][key] is not None]
-            if not vals:
-                return (None, None)
-            return (float(np.mean(vals)), float(np.std(vals)))
+        # No-encoder ablation (same structure, separate seed set).
+        ne_files = _collect_seed_files(ne_base, ne_glob)
+        if ne_files:
+            ne_per_seed, ne_summary = _aggregate_seed_files(ne_files, f"{split}/noenc")
+            split_out["no_encoder_per_seed"] = ne_per_seed
+            split_out["no_encoder_summary"] = ne_summary
+            split_out["n_seeds_no_encoder"] = len(ne_per_seed)
 
-        summary = {}
-        for m in ("seed", "probe_t020", "probe_t025", "probe_t030"):
-            summary[m] = {}
-            for key in ("mean_cov", "mean_S_over_n", "mean_S_over_OPT", "n_below_095"):
-                mu, sd = _mean_std(m, key)
-                summary[m][f"{key}_mean"] = mu
-                summary[m][f"{key}_std"] = sd
-        out["splits"][split] = {"per_seed": per_seed, "summary": summary,
-                                 "n_seeds": len(per_seed)}
+        out["splits"][split] = split_out
 
     out_path = PAPER_DATA / "multi_seed_summary.json"
     out_path.write_text(json.dumps(out, indent=2))
