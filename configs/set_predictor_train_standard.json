@@ -1,0 +1,27 @@
+{
+  "_comment": "SetPredictor training on STANDARD τ=0.99 LS trajectories. LS final sets here are smaller (|S|/n ≈ 0.145) than the strict τ=0.995 variant (|S|/n ≈ 0.16), so the model is supervised toward more aggressive |S| reduction at cov ≈ 0.97.",
+
+  "train_traj": "data/ls_trajectories_train.pkl",
+  "val_traj":   "data/ls_trajectories_dev.pkl",
+
+  "pointer_checkpoint": "checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt",
+  "embedding_size": 128,
+  "hidden_size": 128,
+  "n_glimpses": 1,
+  "tanh_exploration": 10.0,
+
+  "predictor_hidden": 128,
+  "predictor_attn_layers": 3,
+  "predictor_heads": 8,
+
+  "epochs": 60,
+  "batch_size": 32,
+  "lr": 3e-4,
+  "pos_weight": null,
+  "seed": 1234,
+
+  "eval_thresholds": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+  "rollout_eval_k": 200,
+
+  "out_dir": "checkpoints/set_predictor/standard"
+}

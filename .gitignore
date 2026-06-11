@@ -15,8 +15,9 @@ build/
 # Jupyter Notebooks
 .ipynb_checkpoints/
 
-# VS Code
+# VS Code / IDE
 .vscode/
+.idea/
 
 # Environment
 .env
