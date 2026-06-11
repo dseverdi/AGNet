@@ -21,6 +21,7 @@ build/
 # Environment
 .env
 .env.*
+!.env.example
 
 # Results, logs, and outputs
 #results/
@@ -63,8 +64,13 @@ dataset/
 Thumbs.db
 DEADJOE
 
-# Ignore example env
-.env.example
+# Public release: exclude paper source, archive, and dev artefacts
+paper/
+archive/
+.claude/
+.venv/
+plan.md
+paper.md
 # Ignore Python cache folders
 __pycache__/
 checkpoints/

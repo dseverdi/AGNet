@@ -1,0 +1,9 @@
+torch>=2.0
+numpy
+matplotlib
+scipy
+python-dotenv
+# scikit-geometry (skgeom) provides the CGAL Python bindings used for exact
+# visibility computation at evaluation time.  Install via conda:
+#   conda install -c conda-forge scikit-geometry
+# or build from source: https://github.com/scikit-geometry/scikit-geometry
