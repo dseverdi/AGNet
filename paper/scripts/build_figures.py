@@ -389,7 +389,7 @@ def fig_worked_example() -> None:
         axes[row, 0].text(-0.06, 0.5, ex.get("name", ""),
                           transform=axes[row, 0].transAxes,
                           rotation=90, va="center", ha="right",
-                          fontsize=8, family="monospace")
+                          fontsize=8)
 
     plt.tight_layout()
     save(fig, "fig_worked_example.pdf")
@@ -594,7 +594,7 @@ def fig_distributions() -> None:
         if all_vals:
             ax.set_ylim(0, float(np.percentile(all_vals, 99)) * 1.1)
 
-    axes[0][0].legend(loc="lower left", frameon=False, fontsize=7)
+    axes[0][0].legend(loc="lower left", frameon=False)
     plt.tight_layout()
     save(fig, "fig_distributions.pdf")
 
@@ -629,8 +629,7 @@ def fig_mechanism() -> None:
         axa.set_title("(a) Iterative inference is a fixed point")
         axa.set_xticks(Ks)
         axa.grid(alpha=0.3, linewidth=0.5)
-        axa.legend(loc="lower right", frameon=False, ncol=2, title="Threshold",
-                   fontsize=7)
+        axa.legend(loc="lower right", frameon=False, ncol=2, title="Threshold")
         all_covs = [cells[f"t={t}|K={K}"]["cov"] for t in thresholds for K in Ks
                     if f"t={t}|K={K}" in cells]
         if all_covs:
@@ -653,7 +652,7 @@ def fig_mechanism() -> None:
             axb.set_xlabel(f"PC1 ({ev[0]*100:.1f}% var)")
             axb.set_ylabel(f"PC2 ({ev[1]*100:.1f}% var)")
         axb.set_title("(b) Frozen encoder embeddings")
-        axb.legend(loc="best", frameon=False, fontsize=7)
+        axb.legend(loc="best", frameon=False)
         axb.grid(alpha=0.3, linewidth=0.5)
     else:
         axb.axis("off")
