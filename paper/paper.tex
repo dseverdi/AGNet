@@ -10,8 +10,8 @@
 % notation helpers
 \usepackage{easyReview}
 % Notation helpers
-\newcommand{\Vis}[1]{\mathrm{Vis}(#1)}
-\newcommand{\Covf}[1]{\mathrm{Cov}(#1)}
+\newcommand{\Vis}[1]{\mathrm{Vis}_P(#1)}
+\newcommand{\Covf}[1]{\mathrm{Cov}_P(#1)}
 \newcommand{\Area}[1]{\mathrm{Area}(#1)}
 \newcommand{\EOS}{\mathrm{EOS}}
 \newcommand{\OPT}{\mathrm{OPT}}
@@ -149,14 +149,14 @@ We describe the reinforcement method (Section~\ref{sec:method-pointer}) and the 
 \comment{}{Ovo od "This pre-empts" do kraja paragrafa također ne razumijem.}
 This pre-empts an objection our own results invite: if reading the encoder closes the tail, why keep the decoder at all? Because the encoder owes its representation to the decoder. The encoder has no training signal of its own (its gradient is back-propagated from the decoder's rollouts), and the probe is not a free-standing classifier --- it reads the decoder's seed as a feature (Eq.~\eqref{eq:setpred-feat}), so removing the decoder removes both the representation and the probe's input. The decomposition we report is encoder-\emph{and}-decoder versus encoder-and-probe, not decoder versus no-decoder. The split is also what buys generalization: pointer policies are known to degrade on instances larger than those seen in training~\cite{Vinyals2015,Jin2023Pointerformer}, and reading the frozen encoder with a small probe is how we recover feasibility at $n$ far beyond the training range (Section~\ref{sec:res-ood}) without retraining the policy.
 
-\paragraph{Reward and rollouts.} For each polygon $P$ we sample $R$ rollouts from the policy and score each rollout's guard set $S(\pi)$ by a scalar utility that gates coverage at $\tau$ and then prefers smaller guard sets,
+\paragraph{Reward and rollouts} For each polygon $P$ we sample $R$ rollouts from the policy and score each rollout's guard set $S(\pi)$ by a scalar utility that gates coverage at $\tau$ and then prefers smaller guard sets,
 \begin{equation}
-u(\pi \mid P) \,=\, \min\!\big(\Covf{S(\pi)},\, \tau\big) \;-\; \lambda\,\frac{|S(\pi)|}{n} \;-\; \rho\,\max\!\big(0,\, \tau - \Covf{S(\pi)}\big),
+u(\pi \mid P) \,=\, \min\!\big(\Covf{S(\pi)},\, \tau\big) \;-\; \lambda\,\frac{|S(\pi)|}{|V(P)|} \;-\; \rho\,\max\!\big(0,\, \tau - \Covf{S(\pi)}\big),
 \label{eq:reward}
 \end{equation}
 where $\tau = 0.99$ is the coverage gate, $\lambda$ weights guard usage, and $\rho$ penalizes coverage below the gate. Capping the coverage term at $\tau$ removes any incentive to over-cover, so once a rollout is feasible the utility is driven purely by cardinality. Coverage during training is computed with a discretized-visibility sampler ($M = 500$ interior points per polygon) as a cheap approximation; CGAL exact visibility is reserved for evaluation.
 
-\paragraph{Preference-optimization loss.} We score a rollout by its \emph{length-normalized} log-likelihood --- the mean per-token log-probability under the factorization $p_\theta(\pi \mid P) = \prod_t p_\theta(\pi_t \mid \pi_{<t}, P)$,
+\paragraph{Preference-optimization loss} We score a rollout by its \emph{length-normalized} log-likelihood --- the mean per-token log-probability under the factorization $p_\theta(\pi \mid P) = \prod_t p_\theta(\pi_t \mid \pi_{<t}, P)$,
 \begin{equation}
 \bar{\ell}_\theta(\pi \mid P) \,=\, \frac{1}{|\pi|} \sum_{t=1}^{|\pi|} \log p_\theta(\pi_t \mid \pi_{<t}, P),
 \label{eq:lognorm}
