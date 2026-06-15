@@ -8,7 +8,8 @@ Figures in the current paper layout (5):
 - fig_worked_example.pdf : two polygons, seed vs probe vs optimum
 - fig_distributions.pdf  : 3x3 grid, {test, ood, ood-large} x {coverage CCDF, |S|/n, |S|/OPT}
 - fig_mechanism.pdf      : K-invariance fixed point (1x3 panels)
-- fig_embedding.pdf      : (a) PCA and (b) LDA views of frozen encoder embeddings
+- fig_embedding.pdf      : single panel, guard-score distribution (linear rule on
+                           frozen encoder features); class separation = the ROC-AUC
 
 Deprecated single-panel builders (fig_coverage_cdf, fig_pareto, fig_kinvariance,
 fig_encoder_pca) remain defined for reproducibility but are not dispatched; their
@@ -732,11 +733,14 @@ def fig_mechanism() -> None:
 
 
 def fig_embedding() -> None:
-    """1x2: (a) PCA — unsupervised, (b) LDA — supervised (out-of-fold).
+    """Single panel: distribution of a linear rule's guard score over the frozen
+    encoder features, one curve per class. The separation between the two
+    distributions is the visual form of the ROC-AUC reported in the text.
 
     Reads paper/data/encoder_embedding_views.json produced by
-    build_encoder_embedding_views() in build_paper_data.py.
-    Both panels are on the same 200-polygon / 12,268-vertex set.
+    build_encoder_embedding_views() in build_paper_data.py. Uses the out-of-fold
+    LDA scores (held-out polygons, no leakage); the unused PCA fields in that
+    JSON are intentionally not plotted.
     """
     d = _maybe_load("encoder_embedding_views.json")
     if d is None:
@@ -745,47 +749,70 @@ def fig_embedding() -> None:
 
     import numpy as np
 
-    xy = np.asarray(d.get("points_2d") or [], dtype=float)
     labels = np.asarray(d.get("labels") or [], dtype=int)
     lda_scores = np.asarray(d.get("lda_scores") or [], dtype=float)
-    ev = d.get("explained_variance") or [0.0, 0.0]
     lda_auc_mean = d.get("lda_roc_auc_mean", float("nan"))
-    lda_auc_std = d.get("lda_roc_auc_std", float("nan"))
 
-    if xy.size == 0 or labels.size != len(xy):
-        print("skip fig_embedding: invalid points_2d / labels shape")
+    if lda_scores.size == 0 or lda_scores.size != labels.size:
+        print("skip fig_embedding: invalid lda_scores / labels shape")
         return
 
-    fig, (axa, axb) = plt.subplots(1, 2, figsize=(9.0, 3.6))
-
-    # panel (a): PCA scatter
     non_guard = labels == 0
     guard = labels == 1
-    axa.scatter(xy[non_guard, 0], xy[non_guard, 1], s=6,
-                color=COLORS["seed"], alpha=0.30, label="non-guard")
-    axa.scatter(xy[guard, 0], xy[guard, 1], s=8,
-                color=COLORS["t020"], alpha=0.70, label="guard (LS target)")
-    axa.set_xlabel(f"PC1 ({ev[0]*100:.1f}% var)")
-    axa.set_ylabel(f"PC2 ({ev[1]*100:.1f}% var)")
-    axa.set_title("(a) PCA — unsupervised")
-    axa.legend(loc="best", frameon=False)
-    axa.grid(alpha=0.3, linewidth=0.5)
 
-    # panel (b): out-of-fold LDA score histograms
-    if lda_scores.size == len(labels):
-        bins = 50
-        axb.hist(lda_scores[non_guard], bins=bins, density=True,
-                 color=COLORS["seed"], alpha=0.55, label="non-guard")
-        axb.hist(lda_scores[guard], bins=bins, density=True,
-                 color=COLORS["t020"], alpha=0.65, label="guard (LS target)")
-        axb.set_xlabel("LDA score (out-of-fold)")
-        axb.set_ylabel("Density")
-        axb.set_title(f"(b) LDA — supervised (OOF CV-AUC {lda_auc_mean:.3f}"
-                      f"±{lda_auc_std:.3f})")
-        axb.legend(loc="best", frameon=False)
-        axb.grid(alpha=0.3, linewidth=0.5)
+    fig, ax = plt.subplots(figsize=(5.6, 3.4))
+
+    # shared bin grid so the two class densities are directly comparable and
+    # their overlap can be shaded exactly
+    edges = np.histogram_bin_edges(lda_scores, bins=45)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    d0, _ = np.histogram(lda_scores[non_guard], bins=edges, density=True)
+    d1, _ = np.histogram(lda_scores[guard], bins=edges, density=True)
+
+    ax.bar(centers, d0, width=np.diff(edges), align="center",
+           color=COLORS["seed"], alpha=0.55, label="non-guard vertices")
+    ax.bar(centers, d1, width=np.diff(edges), align="center",
+           color=COLORS["t020"], alpha=0.60, label="guard vertices")
+
+    # overlap = confusable mass a linear rule cannot disentangle
+    overlap = np.minimum(d0, d1)
+    ax.fill_between(centers, 0, overlap, step="mid",
+                    color="0.45", alpha=0.55, linewidth=0,
+                    label="overlap (confusable)")
+
+    # linear decision boundary: where the two class-conditional densities cross
+    # in the central region; fall back to the midpoint of the class means
+    diff = d1 - d0
+    lo, hi = np.percentile(lda_scores, [5, 95])
+    central = (centers >= lo) & (centers <= hi)
+    sign_change = np.where(np.diff(np.sign(diff[central])) != 0)[0]
+    if sign_change.size:
+        boundary = centers[central][sign_change[-1]]
     else:
-        axb.axis("off")
+        boundary = 0.5 * (lda_scores[non_guard].mean() + lda_scores[guard].mean())
+    ax.axvline(boundary, color="black", linestyle="--", linewidth=1.0)
+    ymax = max(d0.max(), d1.max())
+    ax.text(boundary, ymax * 1.02, "linear\nseparator", fontsize=7,
+            ha="center", va="bottom", color="black")
+
+    ax.set_xlabel("Linear guard score  (higher $\\rightarrow$ more guard-like)")
+    ax.set_ylabel("Density")
+    ax.set_title("Guards are linearly separable in the frozen features")
+    ax.set_ylim(0, ymax * 1.18)
+    # trim dead space from a handful of score outliers
+    ax.set_xlim(np.percentile(lda_scores, 0.3) - 0.5,
+                np.percentile(lda_scores, 99.7) + 0.5)
+    ax.grid(alpha=0.3, linewidth=0.5, axis="y")
+    ax.legend(loc="upper left", frameon=False, fontsize=7.5)
+
+    # AUC stated in words, anchored in the guard (right-hand) region
+    ax.text(0.97, 0.62,
+            f"AUC {lda_auc_mean:.2f}\na random guard outscores\n"
+            f"a random non-guard\n~{lda_auc_mean*100:.0f}% of the time\n"
+            "(0.5 = chance)",
+            transform=ax.transAxes, fontsize=7, ha="right", va="top",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                      edgecolor="0.7", linewidth=0.6))
 
     plt.tight_layout()
     save(fig, "fig_embedding.pdf")
