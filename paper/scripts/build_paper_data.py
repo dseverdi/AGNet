@@ -44,6 +44,7 @@ PTR_CKPT = REPO_ROOT / "checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt"
 SETPRED_CKPT = REPO_ROOT / "checkpoints/set_predictor/standard/set_predictor_best.pt"
 DEV_TEST_TRAJ = REPO_ROOT / "data/ls_trajectories_dev_test.pkl"
 TEST_TRAJ = REPO_ROOT / "data/ls_trajectories_test.pkl"
+LARGE_TRAJ = REPO_ROOT / "data/ls_trajectories_large.pkl"
 
 
 def _device() -> str:
@@ -405,6 +406,103 @@ def build_per_polygon_all(device: str, batch_size: int = 32,
         print(f"  wrote {out_path} ({len(out_rows)} polygons)")
 
     print(f"  total: {time.perf_counter() - t0:.1f}s")
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  dist_ood_large.json  (per-polygon data for fig_distributions 3rd row)
+# ──────────────────────────────────────────────────────────────────────
+def build_per_polygon_large(device: str, batch_size: int = 8,
+                             ckpt_path: str | None = None,
+                             out_suffix: str = "") -> None:
+    """Run SetPredictor on the ood-large split (285 polygons, n=600-2250) at
+    three thresholds and dump per-polygon (name, n, OPT, seed, probe_t020/25/30)
+    in the same format as dist_dev_test.json / dist_test_OOD.json.
+
+    |S|/OPT will be None for the 79 polygons (n >= 800) that lack an ILP solution.
+    """
+    print(f"[per_polygon_large] starting (batch_size={batch_size})")
+    t0 = time.perf_counter()
+    pointer = _load_pointer(device)
+    setpred = _load_setpredictor(device, ckpt_path)
+
+    DATASET_PATH = os.getenv("DATASET_PATH")
+    sol_dir = os.path.join(DATASET_PATH, "large") if DATASET_PATH else None
+    if not sol_dir:
+        print("  warn: DATASET_PATH unset; OPT will be null")
+
+    with open(LARGE_TRAJ, "rb") as f:
+        records = pickle.load(f)["records"]
+    print(f"  loaded {len(records)} large polygons from {LARGE_TRAJ.name}")
+
+    from collections import defaultdict
+    thresholds = [0.20, 0.25, 0.30]
+    buckets = defaultdict(list)
+    for i, rec in enumerate(records):
+        buckets[rec["n"]].append(i)
+
+    out_rows = []
+    n_done = 0
+    n_total = len(records)
+    with torch.no_grad():
+        for poly_n, ids in sorted(buckets.items()):
+            for start in range(0, len(ids), batch_size):
+                chunk = ids[start: start + batch_size]
+                recs_chunk = [records[i] for i in chunk]
+                # build batch manually (make_batch requires SetPredDataset)
+                pts_list = [torch.tensor(np.asarray(r["points"], dtype=np.float32),
+                                         device=device) for r in recs_chunk]
+                lengths = torch.tensor([r["n"] for r in recs_chunk], device=device)
+                B = len(recs_chunk)
+                N = poly_n
+                pts = torch.zeros(B, N, 2, device=device)
+                in_S_init = torch.zeros(B, N, dtype=torch.bool, device=device)
+                pad = torch.zeros(B, N, dtype=torch.bool, device=device)
+                for b, rec in enumerate(recs_chunk):
+                    n_v = rec["n"]
+                    pts[b, :n_v] = pts_list[b]
+                    for idx in rec["seed"]:
+                        if 0 <= int(idx) < n_v:
+                            in_S_init[b, int(idx)] = True
+
+                ptr_emb = extract_pointer_embeddings(pointer, pts, lengths)
+                logits = setpred(ptr_emb, pts, in_S_init, pad)
+                probs = torch.sigmoid(logits)
+
+                for b, rec in enumerate(recs_chunk):
+                    n_v = rec["n"]
+                    pts_np = pts[b].cpu().numpy()[:n_v]
+                    opt_sol = (_read_opt_solution(sol_dir, rec["name"])
+                               if sol_dir else None)
+                    opt_size = len(opt_sol) if opt_sol else None
+                    seed_idxs = [int(i) for i in rec["seed"] if 0 <= int(i) < n_v]
+                    row = {
+                        "name": rec["name"],
+                        "n": int(n_v),
+                        "OPT": opt_size,
+                        "seed": {
+                            "S_size": len(seed_idxs),
+                            "cov": float(rec.get("seed_cov", 0.0)),
+                        },
+                    }
+                    for t in thresholds:
+                        keep = (probs[b] >= t) & (~pad[b])
+                        keep_idxs = keep[:n_v].nonzero(as_tuple=True)[0].cpu().tolist()
+                        cov = _coverage_exact(pts_np, keep_idxs, rec["name"])
+                        row[f"probe_t{int(round(t * 100)):03d}"] = {
+                            "S_size": len(keep_idxs),
+                            "cov": cov,
+                        }
+                    out_rows.append(row)
+                    n_done += 1
+                    if n_done % 50 == 0:
+                        dt = time.perf_counter() - t0
+                        print(f"    {n_done}/{n_total} polygons, {dt:.1f}s")
+
+    out_name = f"dist_ood_large{out_suffix}.json"
+    out_path = PAPER_DATA / out_name
+    out_path.write_text(json.dumps({"polygons": out_rows}))
+    print(f"  wrote {out_path} ({len(out_rows)} polygons, "
+          f"{time.perf_counter() - t0:.1f}s)")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -847,6 +945,12 @@ if __name__ == "__main__":
         suffix = os.getenv("SP_SUFFIX", "")
         _run(build_per_polygon_all, "per_polygon_all", device,
              batch_size=32, ckpt_path=ckpt, out_suffix=suffix)
+        print()
+    if "per_polygon_large" in steps:
+        ckpt = os.getenv("SP_CKPT")
+        suffix = os.getenv("SP_SUFFIX", "")
+        _run(build_per_polygon_large, "per_polygon_large", device,
+             batch_size=8, ckpt_path=ckpt, out_suffix=suffix)
         print()
     if "classical_baselines" in steps:
         _run(build_classical_baselines, "classical_baselines", device)

@@ -3,12 +3,11 @@
 Run: python paper/scripts/build_figures.py
 Output: paper/gfx/setpred/fig_*.pdf
 
-Figures in the current paper layout (6):
+Figures in the current paper layout (5):
 - fig_po_training.pdf    : PO/BT training dynamics (held-out dev)
 - fig_worked_example.pdf : two polygons, seed vs probe vs optimum
-- fig_distributions.pdf  : 2x3 grid, {test, ood} x {coverage CCDF, |S|/n, |S|/OPT}
-- fig_cov_vs_n.pdf       : per-polygon OOD coverage vs polygon size n
-- fig_mechanism.pdf      : K-invariance fixed point (single panel)
+- fig_distributions.pdf  : 3x3 grid, {test, ood, ood-large} x {coverage CCDF, |S|/n, |S|/OPT}
+- fig_mechanism.pdf      : K-invariance fixed point (1x3 panels)
 - fig_embedding.pdf      : (a) PCA and (b) LDA views of frozen encoder embeddings
 
 Deprecated single-panel builders (fig_coverage_cdf, fig_pareto, fig_kinvariance,
@@ -504,14 +503,13 @@ def _ccdf_xy(cov):
 
 
 def fig_distributions() -> None:
-    """2x3 grid: rows = {test, ood}, cols = {coverage CCDF, |S|/n, |S|/OPT}.
+    """3x3 grid: rows = {test, ood, ood-large}, cols = {coverage CCDF, |S|/n, |S|/OPT}.
 
-    Reads paper/data/dist_dev_test.json and dist_test_OOD.json. Per-polygon schema:
-        {"name", "n", "OPT",
-         "seed":       {"S_size", "cov"},
-         "probe_t020": {"S_size", "cov"},
-         "probe_t025": {"S_size", "cov"},
-         "probe_t030": {"S_size", "cov"}}
+    test and ood rows use per-polygon dist JSON (box plots).
+    ood-large row uses per-polygon dist_ood_large.json if available (box plots),
+    otherwise falls back to aggregate stats from setpred_extreme_ood_seed1234.json
+    (CCDF from percentile points + mean bars for cardinality columns).
+    |S|/OPT for ood-large covers only the 206/285 polygons with an ILP solution.
     """
     d_in = _maybe_load("dist_dev_test.json")
     d_ood = _maybe_load("dist_test_OOD.json")
@@ -521,11 +519,27 @@ def fig_distributions() -> None:
 
     import numpy as np
 
+    # ood-large: prefer per-polygon file, fall back to aggregate
+    d_large_poly = _maybe_load("dist_ood_large.json")
+    _large_agg_path = ROOT.parent / "results/v3/setpred_extreme_ood_seed1234.json"
+    d_large_agg = None
+    if d_large_poly is None:
+        try:
+            d_large_agg = json.loads(_large_agg_path.read_text())
+        except Exception:
+            pass
+    have_large = (d_large_poly is not None) or (d_large_agg is not None)
+    if not have_large:
+        print("warn fig_distributions: ood-large data not found; drawing 2-row figure")
+
     # methods in display order: policy seed, then conservative -> aggressive
     methods = [("seed", "seed", "Seed"),
                ("probe_t030", "t030", "$t{=}0.30$"),
                ("probe_t025", "t025", "$t{=}0.25$"),
                ("probe_t020", "t020", "$t{=}0.20$")]
+    # cell keys in the aggregate result file
+    _agg_cell = {"probe_t020": "t=0.2|K=1", "probe_t025": "t=0.25|K=1",
+                 "probe_t030": "t=0.3|K=1"}
     box_colors = [COLORS[c] for _, c, _ in methods]
     box_labels = [lab for _, _, lab in methods]
 
@@ -550,11 +564,18 @@ def fig_distributions() -> None:
         for med in bp["medians"]:
             med.set_color("black")
 
-    fig, axes = plt.subplots(2, 3, figsize=(11, 6))
-    rows = [("In-distribution (test, 367 polygons)", d_in["polygons"], axes[0]),
-            ("Out-of-distribution (ood, 2107 polygons)", d_ood["polygons"], axes[1])]
+    n_rows = 3 if have_large else 2
+    fig, axes = plt.subplots(n_rows, 3, figsize=(11, 3.2 * n_rows))
+    per_poly_rows = [
+        ("In-distribution (test, 367 polygons)", d_in["polygons"], axes[0]),
+        ("Out-of-distribution (ood, 2107 polygons)", d_ood["polygons"], axes[1]),
+    ]
+    if have_large and d_large_poly is not None:
+        per_poly_rows.append(
+            ("Extreme OOD (ood-large, 285 polygons)", d_large_poly["polygons"], axes[2])
+        )
 
-    for title, polys, axrow in rows:
+    for title, polys, axrow in per_poly_rows:
         # col 0: coverage complementary CDF
         ax = axrow[0]
         for mkey, ckey, lab in methods:
@@ -562,7 +583,7 @@ def fig_distributions() -> None:
             ax.step(xs, ys, where="post", color=COLORS[ckey], linewidth=1.5,
                     label=("Seed" if mkey == "seed" else f"SetPredictor {lab}"))
         ax.axvline(0.95, color="gray", linestyle=":", linewidth=0.8)
-        ax.set_xlim(0.6, 1.005)
+        ax.set_xlim(0.3, 1.005)
         ax.set_ylim(-0.02, 1.02)
         ax.set_xlabel("Per-polygon coverage $x$")
         ax.set_ylabel("Fraction with $\\mathrm{Cov}\\geq x$")
@@ -580,7 +601,7 @@ def fig_distributions() -> None:
         ax.set_title(title)
         ax.grid(alpha=0.3, linewidth=0.5, axis="y")
 
-        # col 2: |S|/OPT box plot (robust y-limit so outliers don't dominate)
+        # col 2: |S|/OPT box plot
         ax = axrow[2]
         data = [ratio_arr(polys, mkey, "OPT") for mkey, _, _ in methods]
         bp = ax.boxplot(data, patch_artist=True, showmeans=True, showfliers=True,
@@ -594,6 +615,71 @@ def fig_distributions() -> None:
         all_vals = [v for di in data for v in di]
         if all_vals:
             ax.set_ylim(0, float(np.percentile(all_vals, 99)) * 1.1)
+
+    # ood-large aggregate fallback row
+    if have_large and d_large_poly is None and d_large_agg is not None:
+        axrow = axes[2]
+        agg = d_large_agg
+        n_total = agg.get("n_polygons", 285)
+
+        # col 0: CCDF from percentile points
+        ax = axrow[0]
+        for mkey, ckey, lab in methods:
+            if mkey == "seed":
+                dist = agg["seed"]["dist"]
+            else:
+                cell_key = _agg_cell.get(mkey)
+                dist = agg["cells"][cell_key]["dist"] if cell_key else None
+            if dist is None:
+                continue
+            xs, ys = empirical_cdf_points(dist, n_total)
+            ax.step(xs, ys, where="post", color=COLORS[ckey], linewidth=1.5,
+                    label=("Seed" if mkey == "seed" else f"SetPredictor {lab}"))
+        ax.axvline(0.95, color="gray", linestyle=":", linewidth=0.8)
+        ax.set_xlim(0.3, 1.005)
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_xlabel("Per-polygon coverage $x$")
+        ax.set_ylabel("Fraction with $\\mathrm{Cov}\\geq x$")
+        ax.grid(alpha=0.3, linewidth=0.5)
+
+        # col 1: |S|/n — mean bars (per-polygon data not yet available)
+        ax = axrow[1]
+        means_n = []
+        for mkey, _, _ in methods:
+            if mkey == "seed":
+                means_n.append(agg["seed"].get("chv", float("nan")))
+            else:
+                cell_key = _agg_cell.get(mkey)
+                v = agg["cells"][cell_key].get("chv", float("nan")) if cell_key else float("nan")
+                means_n.append(v)
+        xs_bar = list(range(1, len(methods) + 1))
+        ax.bar(xs_bar, means_n, color=box_colors, alpha=0.65, width=0.6)
+        ax.set_xticks(xs_bar)
+        ax.set_xticklabels(box_labels)
+        ax.set_ylabel("$|S|/n$ (mean)")
+        ax.set_title("Extreme OOD (ood-large, 285 polygons)")
+        ax.grid(alpha=0.3, linewidth=0.5, axis="y")
+
+        # col 2: |S|/OPT — mean bars (206/285 polygons with ILP solution)
+        ax = axrow[2]
+        means_opt = []
+        for mkey, _, _ in methods:
+            if mkey == "seed":
+                means_opt.append(agg["seed"].get("opt", float("nan")))
+            else:
+                cell_key = _agg_cell.get(mkey)
+                v = agg["cells"][cell_key].get("opt", float("nan")) if cell_key else float("nan")
+                means_opt.append(v)
+        valid = [(x, v) for x, v in zip(xs_bar, means_opt)
+                 if v is not None and not (isinstance(v, float) and v != v)]
+        if valid:
+            ax.bar([x for x, _ in valid], [v for _, v in valid],
+                   color=[box_colors[x - 1] for x, _ in valid], alpha=0.65, width=0.6)
+        ax.axhline(1.0, color="gray", linestyle=":", linewidth=0.8)
+        ax.set_xticks(xs_bar)
+        ax.set_xticklabels(box_labels)
+        ax.set_ylabel("$|S|/\\mathrm{OPT}$ (mean, 206/285)")
+        ax.grid(alpha=0.3, linewidth=0.5, axis="y")
 
     axes[0][0].legend(loc="lower left", frameon=False)
     plt.tight_layout()
@@ -725,6 +811,5 @@ if __name__ == "__main__":
     _run(fig_po_training,    "fig_po_training")
     _run(fig_worked_example, "fig_worked_example")
     _run(fig_distributions,  "fig_distributions")
-    _run(fig_cov_vs_n,       "fig_cov_vs_n")
     _run(fig_mechanism,      "fig_mechanism")
     _run(fig_embedding,      "fig_embedding")
