@@ -617,6 +617,101 @@ def build_encoder_linear_probe(device: str, n_polygons: int = 200) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  encoder_embedding_views.json  (PCA + out-of-fold LDA for fig_embedding)
+# ──────────────────────────────────────────────────────────────────────
+def build_encoder_embedding_views(device: str, n_polygons: int = 200) -> None:
+    """Compute PCA and out-of-fold LDA views of frozen encoder embeddings on
+    the same 200-polygon / ~12,268-vertex set used by build_encoder_linear_probe,
+    so both panels of fig_embedding share identical vertices.
+
+    PCA: unsupervised, 2 components.
+    LDA: supervised (1 component), fit per GroupKFold(5) fold on training set,
+         projected on the held-out test vertices -> one OOF score per vertex.
+
+    Output: paper/data/encoder_embedding_views.json
+    """
+    print(f"[encoder_embedding_views] starting (n_polygons={n_polygons})")
+    t0 = time.perf_counter()
+    pointer = _load_pointer(device)
+
+    with open(DEV_TEST_TRAJ, "rb") as f:
+        records = pickle.load(f)["records"]
+    sample = records[:n_polygons]
+
+    all_X, all_y, groups = [], [], []
+    for poly_idx, rec in enumerate(sample):
+        pts = torch.tensor(np.asarray(rec["points"], dtype=np.float32),
+                           device=device).unsqueeze(0)
+        lengths = torch.tensor([rec["n"]], device=device)
+        with torch.no_grad():
+            emb = extract_pointer_embeddings(pointer, pts, lengths)[0]  # (n, 128)
+        emb_np = emb.cpu().numpy()
+        labels = np.zeros(rec["n"], dtype=np.int32)
+        for j in rec.get("final", []):
+            if 0 <= int(j) < rec["n"]:
+                labels[int(j)] = 1
+        all_X.append(emb_np)
+        all_y.append(labels)
+        groups.append(np.full(rec["n"], poly_idx, dtype=np.int64))
+
+    X = np.concatenate(all_X, axis=0)
+    y = np.concatenate(all_y, axis=0)
+    g = np.concatenate(groups, axis=0)
+    print(f"  collected {X.shape[0]} per-vertex embeddings "
+          f"({int(y.sum())} positive / {int((1-y).sum())} negative)")
+
+    from sklearn.decomposition import PCA
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.model_selection import GroupKFold
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import StandardScaler
+
+    # PCA (unsupervised) — fit on all vertices
+    pca = PCA(n_components=2)
+    pts_2d = pca.fit_transform(X)
+    ev = pca.explained_variance_ratio_.tolist()
+    print(f"  PCA: ev = {ev[0]:.3f}, {ev[1]:.3f}")
+
+    # Out-of-fold LDA (supervised) — fit per fold, project held-out vertices
+    n_splits = 5
+    gkf = GroupKFold(n_splits=n_splits)
+    oof_scores = np.full(len(y), np.nan)
+    roc_aucs = []
+    for fold, (tr, te) in enumerate(gkf.split(X, y, g)):
+        scaler = StandardScaler().fit(X[tr])
+        Xtr = scaler.transform(X[tr])
+        Xte = scaler.transform(X[te])
+        lda = LinearDiscriminantAnalysis(n_components=1)
+        lda.fit(Xtr, y[tr])
+        # LDA decision_function gives the 1-D projection score
+        scores_te = lda.decision_function(Xte)
+        oof_scores[te] = scores_te
+        roc = roc_auc_score(y[te], scores_te)
+        roc_aucs.append(float(roc))
+        print(f"  fold {fold+1}/{n_splits}: LDA ROC-AUC={roc:.4f}  "
+              f"(test polygons={len(np.unique(g[te]))})")
+
+    lda_auc_mean = float(np.mean(roc_aucs))
+    lda_auc_std = float(np.std(roc_aucs))
+    print(f"  LDA CV ROC-AUC = {lda_auc_mean:.4f} ± {lda_auc_std:.4f}")
+
+    out = {
+        "n_polygons": int(n_polygons),
+        "n_vertices": int(X.shape[0]),
+        "n_positive": int(y.sum()),
+        "points_2d": pts_2d.tolist(),
+        "labels": y.tolist(),
+        "explained_variance": ev,
+        "lda_scores": oof_scores.tolist(),
+        "lda_roc_auc_mean": lda_auc_mean,
+        "lda_roc_auc_std": lda_auc_std,
+    }
+    out_path = PAPER_DATA / "encoder_embedding_views.json"
+    out_path.write_text(json.dumps(out))
+    print(f"  wrote {out_path} ({time.perf_counter() - t0:.1f}s)")
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  multi_seed_summary.json  (M1: probe-seed-variance error bars)
 # ──────────────────────────────────────────────────────────────────────
 def _aggregate_seed_files(files: list, label: str) -> tuple[list, dict]:
@@ -733,6 +828,7 @@ if __name__ == "__main__":
     print()
     steps = _sys.argv[1:] or [
         "encoder_pca", "worked_examples", "per_polygon_ood", "per_polygon_all",
+        "encoder_embedding_views",
     ]
     if "encoder_pca" in steps:
         _run(build_encoder_pca, "encoder_pca", device, n_polygons=80)
@@ -758,6 +854,11 @@ if __name__ == "__main__":
     if "encoder_linear_probe" in steps:
         n = int(os.getenv("LP_N_POLYGONS", "200"))
         _run(build_encoder_linear_probe, "encoder_linear_probe", device,
+             n_polygons=n)
+        print()
+    if "encoder_embedding_views" in steps:
+        n = int(os.getenv("LP_N_POLYGONS", "200"))
+        _run(build_encoder_embedding_views, "encoder_embedding_views", device,
              n_polygons=n)
         print()
     if "multi_seed_summary" in steps:

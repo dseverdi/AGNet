@@ -3,12 +3,13 @@
 Run: python paper/scripts/build_figures.py
 Output: paper/gfx/setpred/fig_*.pdf
 
-Figures in the current paper layout (5):
+Figures in the current paper layout (6):
 - fig_po_training.pdf    : PO/BT training dynamics (held-out dev)
 - fig_worked_example.pdf : two polygons, seed vs probe vs optimum
-- fig_distributions.pdf  : 2x3 grid, {dev_test, OOD} x {coverage CCDF, |S|/n, |S|/OPT}
+- fig_distributions.pdf  : 2x3 grid, {test, ood} x {coverage CCDF, |S|/n, |S|/OPT}
 - fig_cov_vs_n.pdf       : per-polygon OOD coverage vs polygon size n
-- fig_mechanism.pdf      : (a) K-invariance fixed point, (b) encoder PCA separation
+- fig_mechanism.pdf      : K-invariance fixed point (single panel)
+- fig_embedding.pdf      : (a) PCA and (b) LDA views of frozen encoder embeddings
 
 Deprecated single-panel builders (fig_coverage_cdf, fig_pareto, fig_kinvariance,
 fig_encoder_pca) remain defined for reproducibility but are not dispatched; their
@@ -99,14 +100,14 @@ def empirical_cdf_points(dist: dict, n: int) -> tuple[list[float], list[float]]:
 
 
 def fig_coverage_cdf() -> None:
-    """Two-panel coverage CDF: dev_test (367) and OOD test (2107)."""
+    """Two-panel coverage CDF: test (367) and ood (2107)."""
     d_in = load("setpred_dev_test.json")
     d_ood = load("setpred_test_OOD.json")
 
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.0), sharey=True)
     panels = [
-        ("In-distribution (dev$\\_$test, 367 polygons)", d_in, axes[0]),
-        ("Out-of-distribution (test, 2107 polygons)", d_ood, axes[1]),
+        ("In-distribution (test, 367 polygons)", d_in, axes[0]),
+        ("Out-of-distribution (ood, 2107 polygons)", d_ood, axes[1]),
     ]
     series = [
         ("Pretrained pointer (seed)", "seed",  d_in["seed"]["dist"],  d_ood["seed"]["dist"]),
@@ -167,13 +168,13 @@ def fig_pareto() -> None:
          "t=0.4|K=1", "t=0.5|K=1", "t=0.65|K=1"],
     )
     ax.plot(xs_tune, ys_tune, "-", color=COLORS["t030"], alpha=0.45,
-            label="SetPredictor (dev$\\_$tune, t sweep)", linewidth=1.4)
+            label="SetPredictor (dev, t sweep)", linewidth=1.4)
     ax.scatter(xs_tune, ys_tune, color=COLORS["t030"], s=22, alpha=0.7, zorder=3)
 
     # canonical 3 thresholds on dev_test
     xs_test, ys_test, labels_test = collect(d_test, ["t=0.2|K=1", "t=0.25|K=1", "t=0.3|K=1"])
     ax.plot(xs_test, ys_test, "o-", color=COLORS["t020"], markersize=6,
-            label="SetPredictor (dev$\\_$test)", linewidth=1.8, zorder=4)
+            label="SetPredictor (test)", linewidth=1.8, zorder=4)
 
     # pretrained pointer (seed) on dev_test
     seed = d_test["seed"]
@@ -187,7 +188,7 @@ def fig_pareto() -> None:
 
     ax.set_xlabel("Mean $|S|/\\mathrm{OPT}$ (lower is better)")
     ax.set_ylabel("Mean coverage $\\mathrm{Cov}$ (higher is better)")
-    ax.set_title("In-distribution (dev$\\_$test / dev$\\_$tune)")
+    ax.set_title("In-distribution (test / dev)")
     ax.grid(alpha=0.3, linewidth=0.5)
     ax.legend(loc="lower right", frameon=False)
 
@@ -205,7 +206,7 @@ def fig_pareto() -> None:
                     fontsize=7, color="dimgray")
 
     ax.set_xlabel("Mean $|S|/\\mathrm{OPT}$ (lower is better)")
-    ax.set_title("Out-of-distribution (test, 2107 polygons)")
+    ax.set_title("Out-of-distribution (ood, 2107 polygons)")
     ax.grid(alpha=0.3, linewidth=0.5)
     ax.legend(loc="lower right", frameon=False)
 
@@ -479,7 +480,7 @@ def fig_cov_vs_n() -> None:
     ax.set_ylabel("Per-polygon coverage $\\mathrm{Cov}$")
     ax.set_xscale("log")
     ax.set_ylim(-0.02, 1.02)
-    ax.set_title("Out-of-distribution coverage vs polygon size (test, 2107 polygons)")
+    ax.set_title("Out-of-distribution coverage vs polygon size (ood, 2107 polygons)")
     ax.grid(alpha=0.3, linewidth=0.5)
     ax.legend(loc="lower left", frameon=False)
     save(fig, "fig_cov_vs_n.pdf")
@@ -503,7 +504,7 @@ def _ccdf_xy(cov):
 
 
 def fig_distributions() -> None:
-    """2x3 grid: rows = {dev_test, OOD test}, cols = {coverage CCDF, |S|/n, |S|/OPT}.
+    """2x3 grid: rows = {test, ood}, cols = {coverage CCDF, |S|/n, |S|/OPT}.
 
     Reads paper/data/dist_dev_test.json and dist_test_OOD.json. Per-polygon schema:
         {"name", "n", "OPT",
@@ -550,8 +551,8 @@ def fig_distributions() -> None:
             med.set_color("black")
 
     fig, axes = plt.subplots(2, 3, figsize=(11, 6))
-    rows = [("In-distribution (dev$\\_$test, 367 polygons)", d_in["polygons"], axes[0]),
-            ("Out-of-distribution (test, 2107 polygons)", d_ood["polygons"], axes[1])]
+    rows = [("In-distribution (test, 367 polygons)", d_in["polygons"], axes[0]),
+            ("Out-of-distribution (ood, 2107 polygons)", d_ood["polygons"], axes[1])]
 
     for title, polys, axrow in rows:
         # col 0: coverage complementary CDF
@@ -600,65 +601,108 @@ def fig_distributions() -> None:
 
 
 def fig_mechanism() -> None:
-    """1x2: (a) K-invariance fixed point, (b) encoder PCA embedding separation.
+    """1x3: K-invariance fixed point across coverage, |S|/n, and |S|/OPT.
 
-    Reuses paper/data/setpred_iter_sweep.json and encoder_pca.json.
+    Reads paper/data/setpred_iter_sweep.json.
     """
     d_iter = _maybe_load("setpred_iter_sweep.json")
-    d_pca = _maybe_load("encoder_pca.json")
-    if d_iter is None and d_pca is None:
-        print("skip fig_mechanism: neither setpred_iter_sweep.json nor encoder_pca.json found")
+    if d_iter is None:
+        print("skip fig_mechanism: setpred_iter_sweep.json not found")
         return
 
     import numpy as np
-    fig, (axa, axb) = plt.subplots(1, 2, figsize=(9.5, 3.8))
+    cells = d_iter["cells"]
+    thresholds = ["0.5", "0.6", "0.65", "0.7", "0.75", "0.8"]
+    Ks = [1, 2, 3, 5]
+    palette = ["#577590", "#43aa8b", "#90be6d", "#f9c74f", "#f8961e", "#f3722c"]
+    metrics = [
+        ("cov",  "Mean coverage $\\mathrm{Cov}$"),
+        ("chv",  "Mean $|S|/n$"),
+        ("opt",  "Mean $|S|/\\mathrm{OPT}$"),
+    ]
 
-    # panel (a): K-invariance
-    if d_iter is not None:
-        cells = d_iter["cells"]
-        thresholds = ["0.5", "0.6", "0.65", "0.7", "0.75", "0.8"]
-        Ks = [1, 2, 3, 5]
-        palette = ["#577590", "#43aa8b", "#90be6d", "#f9c74f", "#f8961e", "#f3722c"]
+    fig, axes = plt.subplots(1, 3, figsize=(11, 3.6))
+    for ax, (mkey, ylabel) in zip(axes, metrics):
         for t, col in zip(thresholds, palette):
-            covs = [cells[f"t={t}|K={K}"]["cov"] if f"t={t}|K={K}" in cells else None
+            vals = [cells[f"t={t}|K={K}"][mkey] if f"t={t}|K={K}" in cells else None
                     for K in Ks]
-            axa.plot(Ks, covs, "o-", color=col, label=f"$t={t}$",
-                     linewidth=1.5, markersize=5)
-        axa.set_xlabel("Number of inference passes $K$")
-        axa.set_ylabel("Mean coverage $\\mathrm{Cov}$")
-        axa.set_title("(a) Iterative inference is a fixed point")
-        axa.set_xticks(Ks)
-        axa.grid(alpha=0.3, linewidth=0.5)
-        axa.legend(loc="lower right", frameon=False, ncol=2, title="Threshold")
-        all_covs = [cells[f"t={t}|K={K}"]["cov"] for t in thresholds for K in Ks
+            ax.plot(Ks, vals, "o-", color=col, label=f"$t={t}$",
+                    linewidth=1.5, markersize=5)
+        ax.set_xlabel("Inference passes $K$")
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(Ks)
+        ax.grid(alpha=0.3, linewidth=0.5)
+        all_vals = [cells[f"t={t}|K={K}"][mkey] for t in thresholds for K in Ks
                     if f"t={t}|K={K}" in cells]
-        if all_covs:
-            axa.set_ylim(min(all_covs) - 0.003, max(all_covs) + 0.003)
-    else:
-        axa.axis("off")
+        if all_vals:
+            span = max(all_vals) - min(all_vals)
+            pad = max(span * 0.15, 1e-4)
+            ax.set_ylim(min(all_vals) - pad, max(all_vals) + pad)
 
-    # panel (b): encoder PCA
-    xy = np.asarray((d_pca or {}).get("points_2d") or [], dtype=float)
-    labels = np.asarray((d_pca or {}).get("labels") or [], dtype=int)
-    if xy.size and labels.size == len(xy):
-        ev = d_pca.get("explained_variance")
-        non_guard = labels == 0
-        guard = labels == 1
-        axb.scatter(xy[non_guard, 0], xy[non_guard, 1], s=8,
-                    color=COLORS["seed"], alpha=0.35, label="non-guard")
-        axb.scatter(xy[guard, 0], xy[guard, 1], s=10,
-                    color=COLORS["t020"], alpha=0.75, label="guard (LS target)")
-        if ev and len(ev) >= 2:
-            axb.set_xlabel(f"PC1 ({ev[0]*100:.1f}% var)")
-            axb.set_ylabel(f"PC2 ({ev[1]*100:.1f}% var)")
-        axb.set_title("(b) Frozen encoder embeddings")
+    axes[1].set_title("Iterative inference is a fixed point")
+    axes[0].legend(loc="best", frameon=False, ncol=2, title="Threshold", fontsize=7)
+    plt.tight_layout()
+    save(fig, "fig_mechanism.pdf")
+
+
+def fig_embedding() -> None:
+    """1x2: (a) PCA — unsupervised, (b) LDA — supervised (out-of-fold).
+
+    Reads paper/data/encoder_embedding_views.json produced by
+    build_encoder_embedding_views() in build_paper_data.py.
+    Both panels are on the same 200-polygon / 12,268-vertex set.
+    """
+    d = _maybe_load("encoder_embedding_views.json")
+    if d is None:
+        print("skip fig_embedding: encoder_embedding_views.json not found")
+        return
+
+    import numpy as np
+
+    xy = np.asarray(d.get("points_2d") or [], dtype=float)
+    labels = np.asarray(d.get("labels") or [], dtype=int)
+    lda_scores = np.asarray(d.get("lda_scores") or [], dtype=float)
+    ev = d.get("explained_variance") or [0.0, 0.0]
+    lda_auc_mean = d.get("lda_roc_auc_mean", float("nan"))
+    lda_auc_std = d.get("lda_roc_auc_std", float("nan"))
+
+    if xy.size == 0 or labels.size != len(xy):
+        print("skip fig_embedding: invalid points_2d / labels shape")
+        return
+
+    fig, (axa, axb) = plt.subplots(1, 2, figsize=(9.0, 3.6))
+
+    # panel (a): PCA scatter
+    non_guard = labels == 0
+    guard = labels == 1
+    axa.scatter(xy[non_guard, 0], xy[non_guard, 1], s=6,
+                color=COLORS["seed"], alpha=0.30, label="non-guard")
+    axa.scatter(xy[guard, 0], xy[guard, 1], s=8,
+                color=COLORS["t020"], alpha=0.70, label="guard (LS target)")
+    axa.set_xlabel(f"PC1 ({ev[0]*100:.1f}% var)")
+    axa.set_ylabel(f"PC2 ({ev[1]*100:.1f}% var)")
+    axa.set_title("(a) PCA — unsupervised")
+    axa.legend(loc="best", frameon=False)
+    axa.grid(alpha=0.3, linewidth=0.5)
+
+    # panel (b): out-of-fold LDA score histograms
+    if lda_scores.size == len(labels):
+        bins = 50
+        axb.hist(lda_scores[non_guard], bins=bins, density=True,
+                 color=COLORS["seed"], alpha=0.55, label="non-guard")
+        axb.hist(lda_scores[guard], bins=bins, density=True,
+                 color=COLORS["t020"], alpha=0.65, label="guard (LS target)")
+        axb.set_xlabel("LDA score (out-of-fold)")
+        axb.set_ylabel("Density")
+        axb.set_title(f"(b) LDA — supervised (OOF CV-AUC {lda_auc_mean:.3f}"
+                      f"±{lda_auc_std:.3f})")
         axb.legend(loc="best", frameon=False)
         axb.grid(alpha=0.3, linewidth=0.5)
     else:
         axb.axis("off")
 
     plt.tight_layout()
-    save(fig, "fig_mechanism.pdf")
+    save(fig, "fig_embedding.pdf")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -683,3 +727,4 @@ if __name__ == "__main__":
     _run(fig_distributions,  "fig_distributions")
     _run(fig_cov_vs_n,       "fig_cov_vs_n")
     _run(fig_mechanism,      "fig_mechanism")
+    _run(fig_embedding,      "fig_embedding")
