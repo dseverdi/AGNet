@@ -3,10 +3,10 @@
   \toprule
   Split & \# polygons & $n$ range & Use \\
   \midrule
-  \texttt{train}     & 8{,}867 & 8--198       & Pointer + SetPredictor training \\
-  \texttt{dev}       & 857     & 16--198      & SetPredictor checkpoint selection \\
-  \texttt{test}      & 367     & 8--192       & Held-out evaluation (in-distribution) \\
-  \texttt{ood}       & 2{,}107 & 8--1000   & Out-of-distribution evaluation \\
-  \texttt{ood-large} & 285     & 600--2250 & Extreme-OOD evaluation \\
+  train     & 8{,}867 & 8--198       & Pointer + SetPredictor training \\
+  dev       & 840     & 16--198      & SetPredictor checkpoint selection \\
+  test      & 362     & 8--192       & Held-out evaluation (in-distribution) \\
+  ood       & 2{,}081 & 8--1{,}000   & Out-of-distribution evaluation \\
+  ood-large & 285     & 600--2{,}250 & Extreme-OOD evaluation \\
   \bottomrule
 \end{tabular}

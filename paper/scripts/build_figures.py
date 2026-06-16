@@ -106,8 +106,8 @@ def fig_coverage_cdf() -> None:
 
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.0), sharey=True)
     panels = [
-        ("In-distribution (test, 367 polygons)", d_in, axes[0]),
-        ("Out-of-distribution (ood, 2107 polygons)", d_ood, axes[1]),
+        ("In-distribution (test, 362 polygons)", d_in, axes[0]),
+        ("Out-of-distribution (ood, 2081 polygons)", d_ood, axes[1]),
     ]
     series = [
         ("Pretrained pointer (seed)", "seed",  d_in["seed"]["dist"],  d_ood["seed"]["dist"]),
@@ -206,7 +206,7 @@ def fig_pareto() -> None:
                     fontsize=7, color="dimgray")
 
     ax.set_xlabel("Mean $|S|/\\mathrm{OPT}$ (lower is better)")
-    ax.set_title("Out-of-distribution (ood, 2107 polygons)")
+    ax.set_title("Out-of-distribution (ood, 2081 polygons)")
     ax.grid(alpha=0.3, linewidth=0.5)
     ax.legend(loc="lower right", frameon=False)
 
@@ -268,7 +268,7 @@ def _maybe_load(name: str) -> dict | None:
 
 
 def fig_po_training() -> None:
-    """PO/BT training curve on the held-out dev split.
+    """PO/BT training curve over the late checkpoints, on a held-out sample.
 
     Reads paper/data/po_agp_training.json. Expected schema:
         {"epochs": [int, ...],
@@ -295,7 +295,9 @@ def fig_po_training() -> None:
     ax_cov.set_ylabel("Mean coverage", color=COLORS["seed"])
     ax_cov.tick_params(axis="y", labelcolor=COLORS["seed"])
     ax_cov.grid(alpha=0.3, linewidth=0.5)
-    ax_cov.set_ylim(0.0, 1.02)
+    # zoom the coverage axis to the late-phase band so its (small) variation is
+    # visible rather than a dead-flat line at the top of a 0--1 axis
+    ax_cov.set_ylim(0.95, 1.0)
 
     sopt = d.get("size_over_opt_greedy_mean")
     gr_g = d.get("guard_ratio_greedy_mean")
@@ -312,7 +314,7 @@ def fig_po_training() -> None:
         h2, l2 = ax_sopt.get_legend_handles_labels()
         ax_cov.legend(h1 + h2, l1 + l2, loc="lower right", frameon=False)
 
-    ax_cov.set_title("PO/BT training dynamics (held-out dev)")
+    ax_cov.set_title("PO/BT training dynamics (late checkpoints)")
     save(fig, "fig_po_training.pdf")
 
 
@@ -442,50 +444,6 @@ def fig_encoder_pca() -> None:
     save(fig, "fig_encoder_pca.pdf")
 
 
-def fig_cov_vs_n() -> None:
-    """Per-polygon coverage vs polygon size n on the OOD test split.
-
-    Reads paper/data/setpred_test_OOD_per_polygon.json. Expected schema:
-        {"polygons": [
-            {"name": str,
-             "n": int,
-             "seed_cov": float,
-             "probe_cov_t020": float | null},
-            ...
-        ]}
-    """
-    d = _maybe_load("setpred_test_OOD_per_polygon.json")
-    if d is None:
-        print("skip fig_cov_vs_n: paper/data/setpred_test_OOD_per_polygon.json not found")
-        return
-
-    polys = d.get("polygons") or []
-    if not polys:
-        print("skip fig_cov_vs_n: no polygons in JSON")
-        return
-
-    import numpy as np
-
-    ns = np.array([p["n"] for p in polys])
-    seed_cov = np.array([p.get("seed_cov", np.nan) for p in polys])
-    probe_cov = np.array([p.get("probe_cov_t020", np.nan) for p in polys])
-
-    fig, ax = plt.subplots(figsize=(5.4, 3.4))
-    ax.scatter(ns, seed_cov, s=6, alpha=0.45,
-               color=COLORS["seed"], label="Pretrained pointer")
-    ax.scatter(ns, probe_cov, s=6, alpha=0.45,
-               color=COLORS["t020"], label="SetPredictor $t{=}0.20$")
-    ax.axhline(0.95, color="gray", linestyle=":", linewidth=0.8)
-    ax.set_xlabel("Polygon vertex count $n$")
-    ax.set_ylabel("Per-polygon coverage $\\mathrm{Cov}$")
-    ax.set_xscale("log")
-    ax.set_ylim(-0.02, 1.02)
-    ax.set_title("Out-of-distribution coverage vs polygon size (ood, 2107 polygons)")
-    ax.grid(alpha=0.3, linewidth=0.5)
-    ax.legend(loc="lower left", frameon=False)
-    save(fig, "fig_cov_vs_n.pdf")
-
-
 # ──────────────────────────────────────────────────────────────────────
 #  Grouped figures (current paper layout): fig_distributions, fig_mechanism
 # ──────────────────────────────────────────────────────────────────────
@@ -568,8 +526,8 @@ def fig_distributions() -> None:
     n_rows = 3 if have_large else 2
     fig, axes = plt.subplots(n_rows, 3, figsize=(11, 3.2 * n_rows))
     per_poly_rows = [
-        ("In-distribution (test, 367 polygons)", d_in["polygons"], axes[0]),
-        ("Out-of-distribution (ood, 2107 polygons)", d_ood["polygons"], axes[1]),
+        ("In-distribution (test, 362 polygons)", d_in["polygons"], axes[0]),
+        ("Out-of-distribution (ood, 2081 polygons)", d_ood["polygons"], axes[1]),
     ]
     if have_large and d_large_poly is not None:
         per_poly_rows.append(

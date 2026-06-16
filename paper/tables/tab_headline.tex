@@ -4,14 +4,14 @@
   Method & Mean cov & $\#\{\mathrm{Cov}\ge 0.95\}/N$ & Mean $|S|/n$ & Mean $|S|/\OPT$ \\
   \midrule
   \multicolumn{5}{l}{\emph{Classical baseline (non-learned)}} \\
-  \quad Greedy & 0.9994 & 367/367 & 0.1523 & 1.0086 \\
+  \quad Greedy & 0.9994 & 362/362 & 0.1524 & 1.0092 \\
   \midrule
   \multicolumn{5}{l}{\emph{Learned policy / probe}} \\
-  \quad Pretrained pointer (seed) & 0.9689 & 296/367\,(0.763,0.844) & 0.1664 & 1.0878 \\
-  \quad SetPredictor full ($t=0.20$) & \textbf{0.9984}\,$\pm$\,0.0011 & $366.2 \pm 1.3$/367 & 0.3890\,$\pm$\,0.0606 & 2.5593\,$\pm$\,0.4043 \\
-  \quad SetPredictor, no-encoder ($t=0.20$) & 0.9972\,$\pm$\,0.0013 & $366.8 \pm 0.4$/367 & 0.4783\,$\pm$\,0.0503 & 3.1087\,$\pm$\,0.3348 \\
+  \quad Pretrained pointer (seed) & 0.9689 & 293/362\,(0.766,0.847) & 0.1664 & 1.0885 \\
+  \quad SetPredictor full ($t=0.20$) & \textbf{0.9985}\,$\pm$\,0.0010 & $361.5 \pm 0.9$/362 & 0.3888\,$\pm$\,0.0603 & 2.5560\,$\pm$\,0.4027 \\
+  \quad SetPredictor, no-encoder ($t=0.20$) & 0.9972\,$\pm$\,0.0013 & $361.8 \pm 0.4$/362 & 0.4781\,$\pm$\,0.0504 & 3.1093\,$\pm$\,0.3350 \\
   \midrule
   \multicolumn{5}{l}{\emph{Oracle editor (\SetPredictor{} target, policy-seeded)}} \\
-  \quad LS on policy seed & 0.9948 & 367/367 & 0.1367 & 0.8840$^{\dagger}$ \\
+  \quad LS on policy seed & 0.9948 & 362/362 & 0.1369 & 0.8854$^{\dagger}$ \\
   \bottomrule
 \end{tabular}
