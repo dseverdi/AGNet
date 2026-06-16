@@ -560,20 +560,31 @@ def fig_distributions() -> None:
         ax.set_title(title)
         ax.grid(alpha=0.3, linewidth=0.5, axis="y")
 
-        # col 2: |S|/OPT box plot
+        # col 2: |S|/OPT box plot. Omitted for ood-large: only 206/285 polygons
+        # have an ILP optimum (the 79 largest, n>=800, lack one), so the ratio
+        # would be biased toward the smaller polygons of the split -- consistent
+        # with tab_large and the eval protocol (paper Section 5.3).
         ax = axrow[2]
-        data = [ratio_arr(polys, mkey, "OPT") for mkey, _, _ in methods]
-        bp = ax.boxplot(data, patch_artist=True, showmeans=True, showfliers=True,
-                        widths=0.6,
-                        flierprops=dict(marker=".", markersize=2, alpha=0.3))
-        style_box(ax, bp)
-        ax.axhline(1.0, color="gray", linestyle=":", linewidth=0.8)
-        ax.set_xticklabels(box_labels)
-        ax.set_ylabel("$|S|/\\mathrm{OPT}$")
-        ax.grid(alpha=0.3, linewidth=0.5, axis="y")
-        all_vals = [v for di in data for v in di]
-        if all_vals:
-            ax.set_ylim(0, float(np.percentile(all_vals, 99)) * 1.1)
+        if "ood-large" in title:
+            ax.axis("off")
+            ax.text(0.5, 0.5,
+                    "$|S|/\\mathrm{OPT}$ omitted\n"
+                    "(OPT unavailable for\n79/285 polygons, $n\\geq800$)",
+                    ha="center", va="center", transform=ax.transAxes,
+                    color="0.4")
+        else:
+            data = [ratio_arr(polys, mkey, "OPT") for mkey, _, _ in methods]
+            bp = ax.boxplot(data, patch_artist=True, showmeans=True, showfliers=True,
+                            widths=0.6,
+                            flierprops=dict(marker=".", markersize=2, alpha=0.3))
+            style_box(ax, bp)
+            ax.axhline(1.0, color="gray", linestyle=":", linewidth=0.8)
+            ax.set_xticklabels(box_labels)
+            ax.set_ylabel("$|S|/\\mathrm{OPT}$")
+            ax.grid(alpha=0.3, linewidth=0.5, axis="y")
+            all_vals = [v for di in data for v in di]
+            if all_vals:
+                ax.set_ylim(0, float(np.percentile(all_vals, 99)) * 1.1)
 
     # ood-large aggregate fallback row
     if have_large and d_large_poly is None and d_large_agg is not None:
