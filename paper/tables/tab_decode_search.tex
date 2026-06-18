@@ -1,0 +1,10 @@
+% from paper/data/decode_search.json (tools/eval_decode_search.py, K=32, test split, seed 1234)
+\begin{tabular}{lrrrrrr}
+  \toprule
+  Decode of the frozen policy & $\#\{\mathrm{Cov}\ge 0.95\}/N$ & $\#\{\mathrm{Cov}<0.99\}$ & Mean $\mathrm{Cov}$ & $\min\mathrm{Cov}$ & $|S|/n$ & $|S|/\OPT$ \\
+  \midrule
+  greedy (seed) & 293/362 & 265 & 0.969 & 0.830 & 0.166 & 1.09 \\
+  best-of-$32$, likelihood (geo-free) & 294/362 & 266 & 0.967 & 0.557 & 0.166 & 1.09 \\
+  best-of-$32$, coverage oracle (\emph{not} geo-free) & 333/362 & 199 & 0.981 & 0.845 & 0.171 & 1.12 \\
+  \bottomrule
+\end{tabular}
