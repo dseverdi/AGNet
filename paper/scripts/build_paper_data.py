@@ -42,8 +42,8 @@ from utils import evaluate_polygon_visibility_numpy_wo_gt
 
 PTR_CKPT = REPO_ROOT / "checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt"
 SETPRED_CKPT = REPO_ROOT / "checkpoints/set_predictor/standard/set_predictor_best.pt"
-DEV_TEST_TRAJ = REPO_ROOT / "data/ls_trajectories_dev_test.pkl"
-TEST_TRAJ = REPO_ROOT / "data/ls_trajectories_test.pkl"
+DEV_TEST_TRAJ = REPO_ROOT / "data/ls_trajectories_dev_test_clean.pkl"   # 362 (train-leak-free)
+TEST_TRAJ = REPO_ROOT / "data/ls_trajectories_test_clean.pkl"            # 2081 (train-leak-free)
 LARGE_TRAJ = REPO_ROOT / "data/ls_trajectories_large.pkl"
 
 
@@ -74,12 +74,16 @@ def _load_setpredictor(device: str, ckpt_path: Path | str | None = None) -> SetP
     HD = cfg.get("heads", cfg.get("predictor_heads", 8))
     H_ptr = cfg.get("ptr_emb_dim", cfg.get("hidden_size", 128))
     disable_ptr_emb = bool(cfg.get("disable_ptr_emb", False))
+    disable_seed = bool(cfg.get("disable_seed", False))
     model = SetPredictor(ptr_emb_dim=H_ptr, hidden=H, n_attn_layers=L, heads=HD,
-                         disable_ptr_emb=disable_ptr_emb).to(device)
+                         disable_ptr_emb=disable_ptr_emb,
+                         disable_seed=disable_seed).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     if disable_ptr_emb:
         print(f"  [setpred] loaded with disable_ptr_emb=True from {path.name}")
+    if disable_seed:
+        print(f"  [setpred] loaded with disable_seed=True from {path.name}")
     return model
 
 
@@ -341,6 +345,13 @@ def build_per_polygon_all(device: str, batch_size: int = 32,
         ("test_OOD", TEST_TRAJ, "test",
          f"dist_test_OOD{out_suffix}.json"),
     ]
+    # Optional split filter (e.g. SP_SPLITS=dev_test) — lets the fast in-dist
+    # eval run on its own; the slow OOD pass can be deferred or skipped.
+    only = os.getenv("SP_SPLITS")
+    if only:
+        wanted = {s.strip() for s in only.split(",") if s.strip()}
+        splits = [s for s in splits if s[0] in wanted]
+        print(f"[per_polygon_all] SP_SPLITS={only} -> running {[s[0] for s in splits]}")
 
     from collections import defaultdict
 

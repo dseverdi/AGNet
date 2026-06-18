@@ -92,7 +92,8 @@ class SetPredictor(nn.Module):
 
     def __init__(self, ptr_emb_dim: int = 128, hidden: int = 128,
                  n_attn_layers: int = 3, heads: int = 8,
-                 disable_ptr_emb: bool = False):
+                 disable_ptr_emb: bool = False,
+                 disable_seed: bool = False):
         super().__init__()
         self._ptr_emb_dim = ptr_emb_dim
         self._hidden = hidden
@@ -102,6 +103,12 @@ class SetPredictor(nn.Module):
         # ablation that isolates representation signal from raw-coordinate
         # signal (paper §6, C1 ablation).
         self._disable_ptr_emb = bool(disable_ptr_emb)
+        # When True, the policy's seed indicator is masked to zeros — both as an
+        # input feature and in the seed-context pool — so the probe cannot read
+        # the decoder's guard set. Used for the no-seed ablation that isolates
+        # encoder knowledge from the decoder's seed (paper §6; reviewer Q2).
+        # Architecture and parameter count are unchanged.
+        self._disable_seed = bool(disable_seed)
 
         # Per-vertex input is (ptr_emb || xy || in_S) ∈ ℝ^{H_ptr + 3}.
         d_in = ptr_emb_dim + 3
@@ -142,6 +149,10 @@ class SetPredictor(nn.Module):
         if pad is None:
             pad = torch.zeros(B, L, dtype=torch.bool, device=ptr_emb.device)
 
+        # No-seed ablation: zero the seed indicator everywhere it is read — the
+        # input feature below and the seed-context pool (in_S_eff) further down.
+        if self._disable_seed:
+            in_S = torch.zeros_like(in_S)
         in_S_f = in_S.float().unsqueeze(-1)
         if self._disable_ptr_emb:
             ptr_emb = torch.zeros_like(ptr_emb)

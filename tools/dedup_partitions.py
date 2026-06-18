@@ -109,6 +109,26 @@ def _filter_baseline_classical(test_drop: set[str]) -> None:
     path.write_text(json.dumps(d, indent=2))
 
 
+def _filter_baseline_classical_ood(ood_drop: set[str]) -> None:
+    """Drop leaked ood instances from baseline_classical.json test_OOD per_polygon
+    lists (greedy + ls) and update the aggregate n_polygons stat."""
+    path = PDATA / "baseline_classical.json"
+    if not path.exists():
+        return
+    d = json.loads(path.read_text())
+    pp = d.get("splits", {}).get("test_OOD", {}).get("per_polygon", {})
+    for key in ("greedy", "ls"):
+        if key in pp:
+            b = len(pp[key])
+            pp[key] = [r for r in pp[key] if r.get("name") not in ood_drop]
+            print(f"  baseline_classical test_OOD.{key}: {b} -> {len(pp[key])}")
+    # update the aggregate n_polygons stat if present
+    agg = d.get("splits", {}).get("test_OOD", {}).get("ls", {})
+    if "n_polygons" in agg:
+        agg["n_polygons"] = len(pp.get("ls", []))
+    path.write_text(json.dumps(d, indent=2))
+
+
 def _dist_block(records: list[dict], key: str) -> dict:
     covs = [r[key]["cov"] for r in records]
     return {
@@ -192,6 +212,7 @@ def main() -> None:
 
     print("[dedup] baseline_classical.json:")
     _filter_baseline_classical(test_drop)
+    _filter_baseline_classical_ood(ood_drop)
     print("[dedup] regenerate pre-aggregated setpred_dev_test.json:")
     regenerate_setpred_dev_test()
     print("[dedup] cleaned trajectory pickles:")

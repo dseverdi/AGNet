@@ -282,10 +282,11 @@ def main() -> None:
     HD = saved_args.get("predictor_heads", 8)
     H_ptr = saved_args.get("hidden_size", args.hidden_size)
     no_enc = saved_args.get("disable_ptr_emb", False)
-    print(f"[eval-setpred] architecture: hidden={H} layers={L} heads={HD} ptr_emb_dim={H_ptr} disable_ptr_emb={no_enc}")
+    no_seed = saved_args.get("disable_seed", False)
+    print(f"[eval-setpred] architecture: hidden={H} layers={L} heads={HD} ptr_emb_dim={H_ptr} disable_ptr_emb={no_enc} disable_seed={no_seed}")
 
     model = SetPredictor(ptr_emb_dim=H_ptr, hidden=H, n_attn_layers=L, heads=HD,
-                         disable_ptr_emb=no_enc).to(device)
+                         disable_ptr_emb=no_enc, disable_seed=no_seed).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     print(f"[eval-setpred] params = {model.num_params():,}")

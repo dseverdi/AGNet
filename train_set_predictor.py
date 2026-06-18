@@ -84,6 +84,13 @@ def parse_args() -> argparse.Namespace:
                         "embedding to zeros so the SetPredictor sees only "
                         "(xy, in_S). Architecture and parameter count are "
                         "unchanged.")
+    p.add_argument("--disable-seed", action="store_true",
+                   help="No-seed ablation: mask the policy's seed indicator to "
+                        "zeros (both the input feature and the seed-context "
+                        "pool) so the SetPredictor cannot read the decoder's "
+                        "guard set. Combine with --disable-ptr-emb for the "
+                        "coords-only control. Architecture/param count "
+                        "unchanged.")
 
     # Eval during training: per-epoch threshold sweep on dev.
     p.add_argument("--eval-thresholds", nargs="+", type=float,
@@ -317,9 +324,12 @@ def main() -> None:
         n_attn_layers=args.predictor_attn_layers,
         heads=args.predictor_heads,
         disable_ptr_emb=args.disable_ptr_emb,
+        disable_seed=args.disable_seed,
     ).to(device)
     if args.disable_ptr_emb:
         print("[setpred] coordinate-only ablation: ptr_emb masked to zeros")
+    if args.disable_seed:
+        print("[setpred] no-seed ablation: seed indicator masked to zeros")
     print(f"[setpred] params = {model.num_params():,}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
