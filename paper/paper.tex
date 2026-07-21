@@ -6,6 +6,7 @@
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage[section]{placeins} % keep floats within sections
+\usepackage{adjustbox} % shrink-only table scaling (max width); resizebox would also UPSCALE narrow tables
 \usepackage{hyperref} % clickable refs/citations and \url (load late)
 % notation helpers
 \usepackage{easyReview}
@@ -70,7 +71,7 @@ The Art Gallery Problem (AGP) asks for the minimum number of guards needed to ob
 
 \paragraph{Why geo-free inference} One could object that the coordinates are given, so a solver could just compute visibility from them; a visibility-based greedy does exactly that, at a lower guard count. Geo-free inference withholds the computation, not the information. The geo-free policy and classical greedy start from the same coordinates: greedy evaluates visibility at every step, while the geo-free model must have learned it. This makes the constraint a measurement tool. A solver that may query a visibility oracle at inference can reproduce greedy or local search, so its learned behaviour cannot be told apart from what the oracle computes (Section~\ref{sec:problem-geofree}). Withholding the oracle removes that confound, and it is a fair restriction: it denies the model a computation, not information.
 
-Geo-free inference also shifts where the visibility cost is paid. In a classical pipeline that cost is the largest per-instance expense --- a visibility polygon per vertex, then a polygon-union coverage per candidate set --- and it recurs for every polygon. A geo-free policy pays it once, at training, and then answers each instance with a single coordinate-only forward pass in tens of milliseconds, with model memory independent of $n$ (Sections~\ref{sec:exp-eval} and~\ref{sec:res-runtime}). This trade of a high fixed cost for a low marginal one helps when many instances must be solved or latency is tight. That the trade is even available is not an assumption: the probing study is what shows the required visibility structure can be learned from coordinates. Several concrete settings fit. In design-space search, a layout-optimization loop scores many candidate polygons and needs a fast coverage estimate to guide it. In triage, a one-pass covering set marks the easy polygons and warm-starts an exact vertex-guard integer program~\cite{Couto2011ExactAGP} on the rest. In interactive tools, coverage feedback must keep pace with edits, which exact visibility at $n$ in the thousands cannot. In each case the learned model is a fast first pass and an exact method remains the authority on quality, so the probe's over-guarding (Section~\ref{sec:results}) is acceptable. We do not claim it replaces a visibility-based solver on guard count, or that it helps where an exact oracle is cheap.
+Geo-free inference also shifts where the visibility cost is paid. In a classical pipeline that cost is the largest per-instance expense --- a visibility polygon per vertex, then a polygon-union coverage per candidate set --- and it recurs for every polygon. A geo-free policy pays it once, at training, and then answers each instance with a single coordinate-only forward pass in tens of milliseconds on a GPU, with model memory independent of $n$ (Sections~\ref{sec:exp-eval} and~\ref{sec:res-runtime}). This trade of a high fixed cost for a low marginal one helps when many instances must be solved or latency is tight. That the trade is even available is not an assumption: the probing study is what shows the required visibility structure can be learned from coordinates. Several concrete settings fit. In design-space search, a layout-optimization loop scores many candidate polygons and needs a fast coverage estimate to guide it. In triage, a one-pass covering set marks the easy polygons and warm-starts an exact vertex-guard integer program~\cite{Couto2011ExactAGP} on the rest. In interactive tools, coverage feedback must keep pace with edits, which exact visibility at $n$ in the thousands cannot. In each case the learned model is a fast first pass and an exact method remains the authority on quality, so the probe's over-guarding (Section~\ref{sec:results}) is acceptable. We do not claim it replaces a visibility-based solver on guard count, or that it helps where an exact oracle is cheap.
 
 The reinforcement method we evaluate is an LSTM pointer-network policy trained with Preference Optimization (PO)~\cite{Pan2025PO} on Bradley--Terry preference pairs~\cite{BradleyTerry1952} drawn from the policy's own rollouts. The policy emits a vertex-index sequence with an $\EOS$ token; the reward couples coverage and guard usage. PO replaces REINFORCE advantages~\cite{Williams1992,Bello2016} with binary preferences between pairs of policy rollouts, preserving a usable gradient signal even when the reward saturates under the coverage constraint~\cite{Pan2025PO}. We refer to inference under this policy as \emph{geo-free} --- the network reads only vertex coordinates at the moment it places guards, never querying a visibility oracle (defined precisely in Section~\ref{sec:problem-geofree}).
 
@@ -186,7 +187,7 @@ The choice of PO over REINFORCE is deliberate. Once a rollout meets the coverage
 
 \begin{table}[t]
   \centering
-  \small
+  \footnotesize
   \input{tables/tab_reinforce.tex}
   \caption{Training-objective comparison on the combined \texttt{dev}$+$\texttt{test} pool (greedy decode). Coverage is geometric polygon coverage; $|S|/\OPT$ is the mean approximation ratio. The two REINFORCE rows are short $30$-epoch runs scored under an \emph{earlier} evaluation protocol: computed on the combined \texttt{dev}$+$\texttt{test} pool \emph{before} the train/eval-leakage deduplication that produced the clean splits used in all other tables (Section~\ref{sec:exp-dataset}), and with far fewer training epochs than the $200$-epoch PO/BT policy. They are reported only as evidence for the \emph{choice of training objective} --- REINFORCE over-guards by $3.5$--$7\times$ the optimum, a gap far too large to be a protocol artifact --- and their absolute numbers are \emph{not} matched cell-for-cell to the headline tables. The PO/BT entry is shown under the same earlier protocol for reference (which is why its $|S|/\OPT = 1.30$ here differs from the clean-split \texttt{test} value in Table~\ref{tab:headline}); the policy it refers to is the one used throughout the paper.}
   \label{tab:reinforce}
@@ -239,7 +240,7 @@ We supplement the library with $313$ additional random simple polygons (\texttt{
 
 \begin{table}[t]
   \centering
-  \small
+  \footnotesize
   \input{tables/tab_dataset_partition.tex}
   \caption{Dataset partition. The \texttt{dev} and \texttt{test} splits share the same source library files, partitioned $70/30$ by seeded random shuffle (seed $1234$): \texttt{dev} is used for checkpoint selection and \texttt{test} is the in-distribution held-out evaluation. The \texttt{ood} split is a larger held-out set spanning the training size range and extending well beyond it, to $n = 1000$ (about five times the training maximum); its genuinely larger-than-training polygons ($n > 198$) are analyzed separately in Section~\ref{sec:res-ood}. The \texttt{ood-large} split is used for an extreme-OOD evaluation (Table~\ref{tab:large}).}
   \label{tab:dataset_partition}
@@ -261,7 +262,7 @@ The PO/BT policy is the released \texttt{lstm\_bt} checkpoint: a \emph{single} P
 \medskip 
 
 \emph{Sizes:} the model dimensions of Section~\ref{sec:method-arch} take the following values:
-\begin{center}\small
+\begin{center}\footnotesize
 \begin{tabular}{ll}
   \toprule
   working width $d$                & $128$ \\
@@ -284,7 +285,7 @@ The PO/BT policy is the released \texttt{lstm\_bt} checkpoint: a \emph{single} P
 
 For each polygon we greedy-decode the policy's $\EOS$-truncated seed and evaluate it with CGAL exact polygon visibility~\cite{cgal:eb-25b}; separately, we run one \SetPredictor{} pass, threshold at $t$ to obtain $S(t)$, and evaluate $S(t)$ with CGAL. Let $N$ be the partition size. We report mean coverage $\frac{1}{N}\sum \Covf{S}$, the normalized guard count $|S|/n$, and the approximation ratio $|S|/\OPT$ against the vertex-guard optimum. Because the mean hides the tail, we also report the per-polygon counts $\#\{\Covf{S} \geq c\}$ for $c \in \{0.95, 0.99, 0.999, 1\}$ and the worst case $\min_P \Covf{S}$. We distinguish two notions throughout. \emph{Exact feasibility} is full coverage, $\Covf{S} = 1$, as the problem defines it (Eq.~\eqref{eq:opt}); we reserve the words \emph{feasible} and \emph{feasibility} for this exact sense. Separately, the counts $\#\{\Covf{S} \geq c\}$ report a family of \emph{coverage gates}; we single out $c = \cfeas$ as the \emph{$0.95$ coverage gate}, a near-feasibility reporting threshold, and report the gate-clearing rate $\#\{\Covf{S} \geq \cfeas\}/N$ with Wilson $95\%$ confidence intervals. Clearing the $0.95$ gate does \emph{not} mean a polygon is feasible in the exact sense. These reporting gates are distinct from the training-time coverage gate $\tau = 0.99$ of Eq.~\eqref{eq:reward}, which shapes the reward rather than scoring the output. Where we compare the policy's and the probe's gate-clearing rates on the same polygons, we test the paired per-polygon outcomes with an exact McNemar test. As noted in Section~\ref{sec:exp-dataset}, $\OPT$ values are taken from the vertex-guard optimal solutions distributed with the AGPVG library (for library instances) or computed via ILP (for the \texttt{random} class). For $79$ of the \texttt{ood-large} polygons (all with $n \geq 800$) no optimum is available --- most are library instances whose distributed solutions do not cover them (they are open at the source), and for the remainder our ILP did not terminate within budget. Restricting $|S|/\OPT$ to the $206$ solved instances would bias the ratio toward the easier $600$--$700$-vertex polygons, so on \texttt{ood-large} we report coverage and the normalized guard count $|S|/n$ over all $285$ polygons but no approximation ratio.
 
-\paragraph{Computational cost} All experiments were run on a single workstation with an AMD Ryzen 9 3900X CPU, 64~GB RAM, and an NVIDIA GeForce RTX~2080~SUPER GPU (8~GB VRAM). Training the \SetPredictor{} probe is light: about $5$~s per epoch, $\approx 5$~minutes for a $60$-epoch run on the GPU above (the four-seed ensemble, $\approx 20$~minutes); the frozen PO/BT policy is reused rather than retrained. The geometric preprocessing --- the exact per-vertex CGAL visibility polygons and the $M=500$ discretized-visibility matrix --- is computed once per polygon and cached for the $\sim$$9.9$k library polygons, so it is not repeated across rollouts, edits, or seeds. At inference the method is a single geo-free forward pass: the full policy-encode-plus-probe pipeline runs in $\approx 25$~ms at $n=1000$ and $\approx 57$~ms at $n=2000$ on a GPU ($\approx 89$ and $\approx 264$~ms on CPU), the probe itself contributing only $\approx 10$~ms at $n=2000$. Exact CGAL coverage is used solely for evaluation and is the dominant offline cost, scaling with the guard-set size.
+\paragraph{Computational cost} All experiments were run on a single workstation with an AMD Ryzen 9 3900X CPU, 64~GB RAM, and an NVIDIA GeForce RTX~2080~SUPER GPU (8~GB VRAM). Training the \SetPredictor{} probe is light: about $5$~s per epoch, $\approx 5$~minutes for a $60$-epoch run on the GPU above (the four-seed ensemble, $\approx 20$~minutes); the frozen PO/BT policy is reused rather than retrained. The geometric preprocessing --- the exact per-vertex CGAL visibility polygons and the $M=500$ discretized-visibility matrix --- is computed once per polygon and cached for the $\sim$$9.9$k library polygons, so it is not repeated across rollouts, edits, or seeds. At inference the method is a single geo-free forward pass, tens of milliseconds on the GPU above; Section~\ref{sec:res-runtime} times it in full and sets it against the classical visibility-based pipeline. Exact CGAL coverage is used solely for evaluation and is the dominant offline cost, scaling with the guard-set size.
 
 \section{Results}
 \label{sec:results}
@@ -296,8 +297,8 @@ The results follow the hypothesis: the policy places guards but leaves a tail (S
 
 \begin{table}[t]
   \centering
-  \small
-  \resizebox{\textwidth}{!}{\input{tables/tab_headline.tex}}
+  \footnotesize
+  \adjustbox{max width=\textwidth}{\input{tables/tab_headline.tex}}
   \caption{Held-out evaluation on \texttt{test} ($362$ polygons). Classical greedy is the only non-learned anchor. The \emph{seed} row is the PO/BT policy decoded greedily; \emph{LS on policy seed} is its local-search refinement --- the \SetPredictor{}'s supervised target, not a classical baseline (Section~\ref{sec:exp-training}). \emph{\SetPredictor{} full} and \emph{no-encoder} are the headline probe and its zeroed-embedding ablation, each mean $\pm$ std over four seeds $\{1234, 11, 22, 33\}$ at $t = 0.20$ (Section~\ref{sec:res-headline-ablation}). Both probes saturate the $0.95$ gate ($\ge 361/362$); the encoder's effect surfaces at the stricter gates of Table~\ref{tab:dist_shift} and in the $\approx\!20\%$ higher guard cost the no-encoder probe pays ($|S|/\OPT$ $3.11$ versus $2.56$). Wilson $95\%$ CI shown only where the proportion is informative.\\
   $^{\dagger}$$|S|/\OPT < 1$ for the oracle editor because it halts at a disc-vis coverage gate ($\tau = 0.99$) and slightly undercovers (mean exact coverage $0.995$), so it uses fewer guards than the \emph{full-coverage} optimum. This is an artifact of the training reward, not a loose $\OPT$; the $|S|/n$ column is free of this caveat.}
   \label{tab:headline}
@@ -313,8 +314,8 @@ The geo-free policy on its own (Table~\ref{tab:headline}, \emph{seed} row) place
 
 \begin{table}[t]
   \centering
-  \small
-  \resizebox{\textwidth}{!}{\input{tables/tab_dist_shift.tex}}
+  \footnotesize
+  \adjustbox{max width=\textwidth}{\input{tables/tab_dist_shift.tex}}
   \caption{Per-polygon coverage distribution on \texttt{test} ($362$ polygons). Counts are polygons reaching each coverage threshold; \emph{min} $\Covf{S}$ is the worst polygon. The policy has a long left tail; the \SetPredictor{} shifts the whole distribution right. This table exposes the encoder's contribution: where the $0.95$ gate saturates, the stricter $0.99$/$0.999$ gates and $\min\Covf{S}$ separate the full probe from the no-encoder ablation --- at $t=0.20$, $4$ polygons below $0.99$ versus $56$, and a worst polygon lifted from $0.952$ to $0.977$. All rows are the displayed seed ($1234$); Table~\ref{tab:headline} gives the four-seed mean$\pm$std.}
   \label{tab:dist_shift}
 \end{table}
@@ -327,7 +328,7 @@ The no-encoder ablation removes the encoder but keeps the policy's seed indicato
 
 \begin{table}[t]
   \centering
-  \small
+  \footnotesize
   \input{tables/tab_ablation.tex}
   \caption{Encoder--seed ablation on \texttt{test} ($362$ polygons), all probes at $t = 0.20$, four-seed mean $\pm$ std over $\{1234, 11, 22, 33\}$. The four rows are the $2\times2$ on/off combinations of the two probe inputs --- the frozen encoder embedding and the policy's seed indicator; an absent input is masked to zeros, leaving architecture and parameter count unchanged. The two axes must be read together --- the coverage tail ($\#\{\mathrm{Cov}<0.99\}$, $\min\mathrm{Cov}$) against guard cost ($|S|/n$, $|S|/\OPT$) --- because the same threshold $t = 0.20$ does not produce the same operating regime across rows: a probe that selects nearly all vertices will show a short tail simply by over-guarding, not by genuinely learning to place guards. The encoder-only probe nearly matches the full probe on both; the seed-only probe (the no-encoder row of Table~\ref{tab:dist_shift}) widens the tail at higher cost. The coords-only probe is \emph{degenerate}: its threshold barely functions --- it selects $0.72$, $0.70$, $0.67$ of all vertices at $t = 0.20, 0.25, 0.30$ --- so it holds coverage by \emph{flooding} guards rather than selecting them, and its small $\#\{\mathrm{Cov}<0.99\}$ is an artifact of over-guarding ($|S|/\OPT = 4.64$), not selection quality. Only the encoder-bearing probes reach the economical regime ($|S|/\OPT \approx 2.4$--$2.6$); without the encoder the probe is stuck at $3.1\times$ (seed only) or $4.6\times$ (neither). The encoder is what makes economical coverage \emph{reachable}.}
   \label{tab:ablation}
@@ -337,9 +338,9 @@ The four conditions calibrate differently, so comparing them at one threshold ca
 
 \begin{table}[t]
   \centering
-  \small
+  \footnotesize
   \input{tables/tab_ablation_thresholds.tex}
-  \caption{Encoder--seed ablation across the operating curve on \texttt{test} ($362$ polygons), four-seed mean over $\{1234, 11, 22, 33\}$, at all three swept thresholds $t \in \{0.20, 0.25, 0.30\}$. This is the matched-\emph{budget} companion to Table~\ref{tab:ablation}: because the conditions calibrate differently, reading each at a common guard budget $|S|/n$ --- comparing rows at a matched $|S|/n$ rather than a matched threshold --- removes the over-guarding confound. Only the encoder-bearing probes (full, no-seed) ever reach an economical budget ($|S|/n \approx 0.3$--$0.4$) with a short tail; the no-encoder probe pays more guards for a longer tail, and the coords-only probe stays pinned in the flooding regime ($|S|/n \ge 0.67$) at every threshold.}
+  \caption{Encoder--seed ablation across the operating curve on \texttt{test} ($362$ polygons), four-seed mean over $\{1234, 11, 22, 33\}$ at $t \in \{0.20, 0.25, 0.30\}$ --- the matched-\emph{budget} companion to Table~\ref{tab:ablation}. Compare rows at a matched $|S|/n$ rather than a matched threshold; the reading is in the text.}
   \label{tab:ablation_thresholds}
 \end{table}
 
@@ -351,9 +352,9 @@ Since the \SetPredictor{} is itself a small Transformer, one might worry that \e
 
 \begin{table}[t]
   \centering
-  \small
+  \footnotesize
   \input{tables/tab_probe_ladder.tex}
-  \caption{Probe-capacity ladder over the frozen encoder features: held-out per-vertex ROC-AUC / PR-AUC on the $362$-polygon \texttt{test} split against the LS target (guard membership). Capacities are a linear (logistic) readout; an attention-free MLP (the \SetPredictor{} with $0$ self-attention layers --- a per-vertex projection with masked-mean-pooled seed and global context); a single self-attention layer; and the full three-layer, eight-head probe. The attention-bearing rungs are four-seed mean $\pm$ std; the linear rung is the held-out logistic reference (consistent with the cross-validated $0.843$ reported above). AUC rises with capacity but saturates early --- most of the linear-to-full gain is captured with \emph{no} self-attention --- so the readout signal is carried by the representation, not manufactured by the probe.}
+  \caption{Probe-capacity ladder: held-out per-vertex ROC-AUC / PR-AUC on the $362$-polygon \texttt{test} split against the LS target. Attention-bearing rungs are four-seed mean $\pm$ std; the linear rung is a single held-out logistic fit (consistent with the cross-validated $0.843$ in the text). Most of the linear-to-full gain arrives with no self-attention at all.}
   \label{tab:probe_ladder}
 \end{table}
 
@@ -361,7 +362,7 @@ Closing the tail has a price, with the threshold $t$ as the knob: the approximat
 
 \begin{table}[t]
   \centering
-  \small
+  \footnotesize
   \input{tables/tab_pareto.tex}
   \caption{Cost of coverage on \texttt{test} ($362$ polygons), displayed seed ($1234$). The four-seed mean $|S|/\OPT$ is $2.02 \pm 0.21$ at $t = 0.30$ and $2.56 \pm 0.40$ at $t = 0.20$.}
   \label{tab:pareto}
@@ -374,8 +375,8 @@ Closing the tail has a price, with the threshold $t$ as the knob: the approximat
 
 \begin{table}[t]
   \centering
-  \small
-  \resizebox{\textwidth}{!}{\input{tables/tab_ood.tex}}
+  \footnotesize
+  \adjustbox{max width=\textwidth}{\input{tables/tab_ood.tex}}
   \caption{Out-of-distribution evaluation on \texttt{ood} ($2081$ polygons, $n$ up to $1000$). Rows as in Table~\ref{tab:headline}: the policy seed, the full probe, and the no-encoder ablation, both probes the four-seed mean $\pm$ std at $t = 0.20$.}
   \label{tab:ood}
 \end{table}
@@ -384,8 +385,8 @@ The next test of the representation is the \texttt{ood} split, a larger held-out
 
 \begin{table}[t]
   \centering
-  \small
-  \resizebox{\textwidth}{!}{\input{tables/tab_large.tex}}
+  \footnotesize
+  \adjustbox{max width=\textwidth}{\input{tables/tab_large.tex}}
   \caption{Extreme out-of-distribution evaluation on \texttt{ood-large} ($285$ polygons, $n$ from $600$ to $2250$), coverage scored by exact CGAL at $t = 0.20$ over all $285$. The approximation ratio is omitted because $\OPT$ is unavailable for $79$ polygons ($n \geq 800$; Section~\ref{sec:exp-eval}). The full-probe and no-encoder rows are four-seed mean $\pm$ std; their $\min \mathrm{Cov}$ is the mean $\pm$ std of the four per-seed worst-polygon coverages.}
   \label{tab:large}
 \end{table}
@@ -399,8 +400,8 @@ The next test of the representation is the \texttt{ood} split, a larger held-out
 
 \begin{table}[t]
   \centering
-  \small
-  \resizebox{\textwidth}{!}{\input{tables/tab_decode_search.tex}}
+  \footnotesize
+  \adjustbox{max width=\textwidth}{\input{tables/tab_decode_search.tex}}
   \caption{Decode-time search on \texttt{test} ($362$ polygons), all reading the same frozen PO/BT policy. \emph{greedy} is the seed of Table~\ref{tab:headline}. \emph{best-of-$32$, likelihood} draws $K=32$ stochastic rollouts and keeps the one with the highest length-normalized log-likelihood --- a geo-free decode search with no visibility oracle. \emph{best-of-$32$, coverage oracle} instead keeps the highest-coverage sample (tie-break: fewer guards); it consults exact coverage to choose and is therefore \emph{not} geo-free, reported only as an upper bound on what the policy's own samples contain. Greedy is included in each candidate pool, so neither selection can underperform it on its own ranking metric. Geo-free search matches greedy and does not close the tail; even oracle-assisted search falls well short of the \SetPredictor{} (Table~\ref{tab:dist_shift}).}
   \label{tab:decode_search}
 \end{table}
@@ -418,17 +419,29 @@ Re-running the probe with its own output as the updated seed indicator does not 
 \subsection{Runtime and memory: geo-free versus classical}
 \label{sec:res-runtime}
 
-Geo-free inference moves the visibility cost from inference to training; Table~\ref{tab:runtime} shows the effect on real polygons across the size grid used for the learned-pipeline timing. At inference the learned pipeline is one coordinate-only forward pass, a policy encode plus a probe pass, costing $6$--$57$~ms on a GPU and $12$--$264$~ms on a CPU for $n$ from $200$ to $2000$ (same workstation as Section~\ref{sec:exp-eval}; the probe alone is ${\approx}\,10$~ms at $n=2000$). The classical pipeline recomputes geometry for every instance. Building the per-vertex visibility polygons, which a visibility-based greedy needs before it picks any guard, already costs $0.12$~s at $n=200$ and $1.6$~s at $n=2000$, or $19$--$34\times$ the learned GPU pass; this is the cost the geo-free method skips. Greedy selection then adds much more: on our $n=200$ polygons the full greedy took $\approx 13.8$~s, and its exact-area union is $O(n^2)$ in polygon operations and exhausted the CGAL backend on larger instances, so we report it only where it is stable. Memory follows the same pattern. The classical pipeline stores $n$ visibility polygons and the $n \times M$ discretized-visibility matrix per instance, with peak memory growing in $n$; the learned pipeline is a fixed ${\approx}\,0.83$M parameters ($\approx 3.3$~MB at single precision) plus $O(nd)$ activations, independent of $n$. This does not make the learned method a better solver, as classical greedy wins on guard count (Section~\ref{sec:res-headline}). It is, rather, the basis for the settings in Section~\ref{sec:intro}: when many instances must be solved or a geometry backend is costly, paying the visibility cost once at training beats paying it per instance.
+Geo-free inference moves the visibility cost from inference to training; Table~\ref{tab:runtime} shows the effect on real polygons across the size grid used for the learned-pipeline timing. At inference the learned pipeline is one coordinate-only forward pass, a policy encode plus a probe pass, costing $6$--$57$~ms on a GPU and $12$--$264$~ms on a CPU for $n$ from $200$ to $2000$ (same workstation as Section~\ref{sec:exp-eval}; the probe alone is ${\approx}\,10$~ms at $n=2000$).
+
+Table~\ref{tab:runtime} reports two classical implementations, because the choice that matters for training also matters here. \emph{Exact greedy} is the implementation used for every guard-count and coverage comparison elsewhere in the paper (Table~\ref{tab:headline} onward): each candidate's marginal gain is an exact CGAL polygon-set union. That is the right choice for a quality anchor, but greedy's own selection loop is, like a PO/BT rollout, a many-query-per-polygon computation --- roughly $n/6$ rounds, each scanning up to $n$ candidates --- and exact scoring is not the fastest a classical solver could be at that. Building the per-vertex visibility polygons it needs before selecting anything already costs $0.12$~s at $n=200$ and $1.6$~s at $n=2000$, $19$--$34\times$ the learned GPU pass; with selection on top the full run takes $\approx13.8$~s at $n=200$, and its exact-area union is $O(n^2)$ in polygon operations and exhausted the CGAL backend on larger instances, so we report it only where it is stable.
+
+\emph{Disc-vis greedy} is the same additive algorithm scored instead on the discretized visibility matrix of Eq.~\eqref{eq:discrete visibility} --- the same $M=500$-sample approximation Section~\ref{sec:method-pointer} uses for PO/BT rewards and the local-search targets, applied here to a from-scratch guard-set build rather than seed refinement. Scoring all remaining candidates is one vectorized array operation per round instead of one CGAL call per candidate, and it is close to free: $1.5$--$78$~ms across the grid. The visibility construction it still needs (exact per-vertex visibility plus the $M$-sample check, a different, non-threaded implementation from the one behind the vis.-precompute column) dominates its cost, $0.34$--$4.3$~s, but unlike exact greedy this is stable at every $n$ we tested, not only $n=200$. At $n=200$ it is already ${\approx}\,41\times$ faster than exact greedy's total; it remains $16$--$28\times$ slower than the learned CPU pass and $57$--$75\times$ slower than the learned GPU pass across the whole grid --- the geo-free advantage holds against the fastest classical alternative we could construct, not only the exact one.
+
+That speed is not a free improvement, and Table~\ref{tab:discvis-quality} shows why. Disc-vis greedy stops the moment its own sample-based estimate crosses the same $0.99$ gate used elsewhere, but we score the resulting guard set with exact CGAL after the fact, and the two diverge as $n$ grows: at $n\approx200$ they agree closely ($0.991$ estimated against $0.973 \pm 0.007$ true), but by $n=2000$ the estimate still reads $0.990$ while true coverage has fallen to $0.807 \pm 0.007$. The gap tracks guard count more than it tracks $n$: over a family-diverse sample of $40$ polygons spanning $n \in [20, 1750]$, the Spearman correlation of the gap with guard count is $0.95$ against $0.88$ with $n$, and controlling for the other separates them ($0.78$ partial correlation for guard count, $0.29$ for $n$). Two polygons at the same $n=500$ make the point directly: one needing $3$ guards has a gap of $+0.004$, one needing $56$ has a gap of $+0.044$. We read this as a selection effect rather than plain sampling noise: each round of greedy hill-climbs against the same fixed $500$ points, so the more rounds it runs, the more chances it has to land on a guard set that scores well on those particular points without truly covering the polygon. Training does not hit this the same way --- PO/BT reward is one noisy sample per rollout, averaged over many rollouts and polygons, and the local-search editor refines an already-good seed with a handful of edits rather than building a guard set from empty over dozens of rounds --- which is consistent with why the paper relies on this approximation for training and local-search targets but always re-scores with exact CGAL at evaluation, rather than treating one sample-based estimate as ground truth for a single high-stakes decision.
+
+Memory is easiest to state for the two representations we can bound precisely. The disc-vis matrix is $n \times 500$ booleans, $100$~KB at $n=200$ growing to $1$~MB at $n=2000$; the learned pipeline is a fixed ${\approx}\,0.83$M parameters (${\approx}\,3.3$~MB at single precision) plus $O(nd)$ activations, independent of $n$. Peak process memory was comparable across $n$ for both classical implementations, dominated by fixed library overhead; the growing exact polygon-set representation showed up as the instability reported above rather than as a clean memory signal. None of this makes the learned method a better solver --- classical greedy wins on guard count regardless of which scoring rule it uses (Section~\ref{sec:res-headline}) --- but it is the basis for the settings in Section~\ref{sec:intro}: when many instances must be solved or a geometry backend is costly, paying the visibility cost once at training beats paying it per instance, whether the classical alternative is exact or approximate.
 
 \begin{table}[t]
   \centering
-  \small
+  \scriptsize
   \input{tables/tab_runtime.tex}
-  \caption{Per-instance inference cost, classical visibility-based versus geo-free learned pipeline, on real polygons across a size grid matched to the learned-pipeline timing. ``vis.\ precompute'' is the CGAL construction of the per-vertex visibility polygons --- the geometry a visibility-based solver needs before selecting, and exactly what the geo-free pipeline avoids; the geo-free columns are the full policy-encode-plus-probe forward pass, and the last column is the GPU speedup over visibility precompute. Greedy \emph{selection} adds far more on top (${\approx}\,13.8$~s at $n=200$; its $O(n^2)$ growing-union step is unstable at large $n$, so it is not tabulated across the grid). Learned inference memory is fixed at ${\approx}\,0.83$M parameters regardless of $n$; the classical pipeline's visibility storage grows with $n$.}
+  \caption{Per-instance inference cost. ``vis.\ precompute'' is the CGAL per-vertex visibility construction alone; ``disc-vis greedy'' is the full \texttt{greedy\_agp\_disc.py} pipeline (visibility, $M=500$-sample matrix, and selection --- strictly more work than vis.\ precompute, hence higher); the geo-free columns are the policy-encode-plus-probe pass, with GPU speedup taken over vis.\ precompute. Exact greedy (${\approx}\,13.8$~s at $n=200$, visibility included) is unstable at larger $n$ and is not tabulated.}
   \label{tab:runtime}
+  \vspace{1.2\baselineskip}
+  \input{tables/tab_discvis_quality.tex}
+  \caption{Disc-vis greedy's stopping quality, mean $\pm$ std over $8/5/3/3$ polygons per bucket. ``disc-vis coverage'' is the sample estimate it stops on (target $0.99$); ``exact coverage'' is the same guard set scored by CGAL afterwards.}
+  \label{tab:discvis-quality}
 \end{table}
 
-\figincl[0.62\linewidth]{gfx/setpred/fig_runtime.pdf}{The table as a growth curve (log--log). Geo-free inference (circles: GPU, squares: CPU) grows slowly with $n$; classical visibility precompute (triangles) grows faster and starts almost two orders of magnitude higher; full greedy selection at $n=200$ (star) is higher still and could not be measured reliably beyond it. Same data as Table~\ref{tab:runtime}.}{fig:runtime}
+\figincl[0.62\linewidth]{gfx/setpred/fig_runtime.pdf}{The runtime table as a growth curve (log--log; a constant vertical gap is a constant ratio). Geo-free inference (circles: GPU, squares: CPU) grows slowly with $n$; classical visibility precompute (triangles) starts almost two orders of magnitude higher; disc-vis greedy (dashed diamonds) is higher still. Exact greedy is omitted here as a single anecdotal point (Table~\ref{tab:runtime}: $\approx13.8$~s at $n=200$, unstable beyond it). Timing data of Table~\ref{tab:runtime}; the quality this speed costs is in Table~\ref{tab:discvis-quality}.}{fig:runtime}
 
 \section{Discussion}
 \label{sec:discussion}

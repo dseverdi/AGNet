@@ -1,14 +1,16 @@
-% numbers from results/classical_timing.json (classical) and results/probe_timing.json (learned)
-% classical timings are on the nearest available real polygons (n approx 199, 476, 950, 1875)
-\begin{tabular}{rrrrr}
+% numbers from results/classical_timing.json (exact classical), results/discvis_greedy_timing.json
+% (disc-vis greedy), and results/probe_timing.json (learned). Classical timings are on the
+% nearest available real polygons (n approx 199, 476, 950, 1875 for vis.-precompute /
+% 193, 480, 900, 2000 for disc-vis greedy).
+\begin{tabular}{rrrrrr}
   \toprule
-   & \multicolumn{1}{c}{Classical} & \multicolumn{2}{c}{Geo-free learned} & \\
-  \cmidrule(lr){2-2}\cmidrule(lr){3-4}
-  $n$ & vis.\ precompute (ms) & CPU (ms) & GPU (ms) & GPU speedup \\
+   & \multicolumn{2}{c}{Classical} & \multicolumn{2}{c}{Geo-free learned} & \\
+  \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+  $n$ & vis.\ precompute (ms) & disc-vis greedy (ms) & CPU (ms) & GPU (ms) & GPU speedup \\
   \midrule
-  $200$  & $120$  & $12$  & $6$  & $19\times$ \\
-  $500$  & $438$  & $33$  & $13$ & $34\times$ \\
-  $1000$ & $671$  & $89$  & $25$ & $27\times$ \\
-  $2000$ & $1616$ & $264$ & $57$ & $29\times$ \\
+  $200$  & $120$  & $340$  & $12$  & $6$  & $19\times$ \\
+  $500$  & $438$  & $938$  & $33$  & $13$ & $34\times$ \\
+  $1000$ & $671$  & $1684$ & $89$  & $25$ & $27\times$ \\
+  $2000$ & $1616$ & $4274$ & $264$ & $57$ & $29\times$ \\
   \bottomrule
 \end{tabular}

@@ -788,10 +788,11 @@ def fig_embedding() -> None:
 
 
 def fig_runtime() -> None:
-    """Per-instance inference cost: classical visibility-based pipeline vs.
-    geo-free learned pipeline (CPU/GPU), wall-clock time vs polygon size n.
-    Companion to Table tab:runtime / Section 6.5. Reads results/classical_timing.json
-    (which folds in results/probe_timing.json under "learned_total_ms")."""
+    """Per-instance inference cost: classical visibility-based pipeline (exact
+    and disc-vis-scored) vs. geo-free learned pipeline (CPU/GPU), wall-clock
+    time vs polygon size n. Companion to Table tab:runtime / Section 6.5.
+    Reads results/classical_timing.json (folds in results/probe_timing.json
+    under "learned_total_ms") and results/discvis_greedy_timing.json."""
     d = json.loads((ROOT.parent / "results/classical_timing.json").read_text())
     rows = d["classical"]
     buckets = [r["bucket"] for r in rows]
@@ -800,37 +801,39 @@ def fig_runtime() -> None:
     gpu_ms = [d["learned_total_ms"]["cuda"][str(b)] for b in buckets]
     greedy_row = next((r for r in rows if r.get("greedy_ms_mean")), None)
 
+    dd = json.loads((ROOT.parent / "results/discvis_greedy_timing.json").read_text())
+    dv_rows = dd["buckets"]
+    dv_buckets = [r["bucket"] for r in dv_rows]
+    dv_ms = [(r["disc_vis_s_mean"] + r["selection_s_mean"]) * 1000 for r in dv_rows]
+
     # Validated 4-slot categorical order (see references/palette.md of the
     # dataviz skill): blue, orange, aqua, yellow -- passes lightness, chroma,
-    # and CVD-separation checks together.
+    # and CVD-separation checks together. Both classical full-pipeline
+    # variants (exact, disc-vis) share the orange hue -- same "cost of
+    # actually producing a guard set" family -- and are distinguished by marker.
     RCOL = {"gpu": "#2a78d6", "greedy": "#eb6834", "cpu": "#1baf7a", "vis": "#eda100"}
 
     fig, ax = plt.subplots(figsize=(4.6, 3.4))
 
     ax.plot(buckets, gpu_ms, "o-", color=RCOL["gpu"], linewidth=1.6,
             markersize=6, label="Geo-free learned, GPU")
-    if greedy_row is not None:
-        ax.scatter([greedy_row["bucket"]], [greedy_row["greedy_ms_mean"]],
-                   marker="*", s=170, color=RCOL["greedy"], edgecolor="black",
-                   linewidth=0.6, zorder=5, label="Classical, full greedy")
+    ax.plot(dv_buckets, dv_ms, "D--", color=RCOL["greedy"], linewidth=1.4,
+            markersize=5.5, label="Classical, disc-vis greedy")
     ax.plot(buckets, cpu_ms, "s-", color=RCOL["cpu"], linewidth=1.6,
             markersize=6, label="Geo-free learned, CPU")
     ax.plot(buckets, vis_ms, "^-", color=RCOL["vis"], linewidth=1.6,
             markersize=6, label="Classical, visibility only")
 
-    # Selective direct labels (neutral ink) at the n=2000 endpoint, plus the
-    # isolated greedy point -- not one label per marker.
+    # Selective direct labels (neutral ink) at the n=2000 endpoint -- not one
+    # label per marker.
     ax.annotate(f"{gpu_ms[-1]:.0f} ms", (buckets[-1], gpu_ms[-1]),
                 textcoords="offset points", xytext=(6, -2), fontsize=7, color="0.25")
     ax.annotate(f"{cpu_ms[-1]:.0f} ms", (buckets[-1], cpu_ms[-1]),
                 textcoords="offset points", xytext=(6, -2), fontsize=7, color="0.25")
     ax.annotate(f"{vis_ms[-1] / 1000:.1f} s", (buckets[-1], vis_ms[-1]),
                 textcoords="offset points", xytext=(6, -2), fontsize=7, color="0.25")
-    if greedy_row is not None:
-        ax.annotate(f"{greedy_row['greedy_ms_mean'] / 1000:.1f} s\n"
-                    f"(selection, $n{{=}}200$ only)",
-                    (greedy_row["bucket"], greedy_row["greedy_ms_mean"]),
-                    textcoords="offset points", xytext=(8, -4), fontsize=7, color="0.25")
+    ax.annotate(f"{dv_ms[-1] / 1000:.1f} s", (dv_buckets[-1], dv_ms[-1]),
+                textcoords="offset points", xytext=(6, 4), fontsize=7, color="0.25")
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -841,9 +844,9 @@ def fig_runtime() -> None:
     ax.set_xlabel("Polygon size $n$")
     ax.set_ylabel("Wall-clock time (ms, log scale)")
     ax.grid(alpha=0.25, linewidth=0.5)
-    # Below-plot legend: the greedy star sits in the upper-left of the data
-    # area, so any in-axes legend corner collides with it.
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=2,
+    # Below-plot legend: the exact-greedy star sits in the upper-left of the
+    # data area, so any in-axes legend corner collides with it.
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=2,
               frameon=False, fontsize=7.5, columnspacing=1.2, handletextpad=0.5)
 
     save(fig, "fig_runtime.pdf")
