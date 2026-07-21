@@ -787,6 +787,68 @@ def fig_embedding() -> None:
     save(fig, "fig_embedding.pdf")
 
 
+def fig_runtime() -> None:
+    """Per-instance inference cost: classical visibility-based pipeline vs.
+    geo-free learned pipeline (CPU/GPU), wall-clock time vs polygon size n.
+    Companion to Table tab:runtime / Section 6.5. Reads results/classical_timing.json
+    (which folds in results/probe_timing.json under "learned_total_ms")."""
+    d = json.loads((ROOT.parent / "results/classical_timing.json").read_text())
+    rows = d["classical"]
+    buckets = [r["bucket"] for r in rows]
+    vis_ms = [r["vis_ms_mean"] for r in rows]
+    cpu_ms = [d["learned_total_ms"]["cpu"][str(b)] for b in buckets]
+    gpu_ms = [d["learned_total_ms"]["cuda"][str(b)] for b in buckets]
+    greedy_row = next((r for r in rows if r.get("greedy_ms_mean")), None)
+
+    # Validated 4-slot categorical order (see references/palette.md of the
+    # dataviz skill): blue, orange, aqua, yellow -- passes lightness, chroma,
+    # and CVD-separation checks together.
+    RCOL = {"gpu": "#2a78d6", "greedy": "#eb6834", "cpu": "#1baf7a", "vis": "#eda100"}
+
+    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+
+    ax.plot(buckets, gpu_ms, "o-", color=RCOL["gpu"], linewidth=1.6,
+            markersize=6, label="Geo-free learned, GPU")
+    if greedy_row is not None:
+        ax.scatter([greedy_row["bucket"]], [greedy_row["greedy_ms_mean"]],
+                   marker="*", s=170, color=RCOL["greedy"], edgecolor="black",
+                   linewidth=0.6, zorder=5, label="Classical, full greedy")
+    ax.plot(buckets, cpu_ms, "s-", color=RCOL["cpu"], linewidth=1.6,
+            markersize=6, label="Geo-free learned, CPU")
+    ax.plot(buckets, vis_ms, "^-", color=RCOL["vis"], linewidth=1.6,
+            markersize=6, label="Classical, visibility only")
+
+    # Selective direct labels (neutral ink) at the n=2000 endpoint, plus the
+    # isolated greedy point -- not one label per marker.
+    ax.annotate(f"{gpu_ms[-1]:.0f} ms", (buckets[-1], gpu_ms[-1]),
+                textcoords="offset points", xytext=(6, -2), fontsize=7, color="0.25")
+    ax.annotate(f"{cpu_ms[-1]:.0f} ms", (buckets[-1], cpu_ms[-1]),
+                textcoords="offset points", xytext=(6, -2), fontsize=7, color="0.25")
+    ax.annotate(f"{vis_ms[-1] / 1000:.1f} s", (buckets[-1], vis_ms[-1]),
+                textcoords="offset points", xytext=(6, -2), fontsize=7, color="0.25")
+    if greedy_row is not None:
+        ax.annotate(f"{greedy_row['greedy_ms_mean'] / 1000:.1f} s\n"
+                    f"(selection, $n{{=}}200$ only)",
+                    (greedy_row["bucket"], greedy_row["greedy_ms_mean"]),
+                    textcoords="offset points", xytext=(8, -4), fontsize=7, color="0.25")
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(150, 3200)
+    ax.set_xticks(buckets)
+    ax.set_xticklabels([str(b) for b in buckets])
+    ax.minorticks_off()
+    ax.set_xlabel("Polygon size $n$")
+    ax.set_ylabel("Wall-clock time (ms, log scale)")
+    ax.grid(alpha=0.25, linewidth=0.5)
+    # Below-plot legend: the greedy star sits in the upper-left of the data
+    # area, so any in-axes legend corner collides with it.
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=2,
+              frameon=False, fontsize=7.5, columnspacing=1.2, handletextpad=0.5)
+
+    save(fig, "fig_runtime.pdf")
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  Dispatcher: attempts every figure, reports skips/failures cleanly.
 #  fig_coverage_cdf / fig_pareto / fig_kinvariance / fig_encoder_pca are
@@ -809,3 +871,4 @@ if __name__ == "__main__":
     _run(fig_distributions,  "fig_distributions")
     _run(fig_mechanism,      "fig_mechanism")
     _run(fig_embedding,      "fig_embedding")
+    _run(fig_runtime,        "fig_runtime")
