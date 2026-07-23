@@ -53,6 +53,7 @@ from utils import (
     get_or_build_disc_vis,
     save_disc_vis_cache,
     load_disc_vis_cache,
+    _DISC_VIS_CACHE,
 )
 
 
@@ -330,6 +331,8 @@ def main() -> None:
         cache_path = os.path.join(REPO_ROOT, cache_path)
     if cache_path and os.path.exists(cache_path):
         load_disc_vis_cache(cache_path)
+    # Baseline for deciding whether the cache is worth rewriting at the end.
+    _cache_entries_at_start = len(_DISC_VIS_CACHE)
 
     model = load_model(args, device)
     loader = DataLoader(
@@ -455,14 +458,21 @@ def main() -> None:
     print(f"  wall  {summary['wall_time_s']:.1f}s")
     print(f"  saved -> {out_path}")
 
-    # Persist disc_vis cache so the next process (training, eval) starts
-    # warm.
+    # Persist disc_vis cache so the next process (training, eval) starts warm,
+    # but only if this run actually computed something new. Rewriting an
+    # unchanged ~800 MB pickle is pure cost, and it is a corruption risk when
+    # several seeds run concurrently against the same shared cache.
     if cache_path:
-        try:
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            save_disc_vis_cache(cache_path)
-        except Exception as e:
-            print(f"  [warn] could not save disc_vis cache: {e}")
+        grew = len(_DISC_VIS_CACHE) > _cache_entries_at_start
+        if not grew:
+            print(f"  [cache] unchanged ({len(_DISC_VIS_CACHE)} entries), "
+                  f"not rewriting {cache_path}")
+        else:
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                save_disc_vis_cache(cache_path)
+            except Exception as e:
+                print(f"  [warn] could not save disc_vis cache: {e}")
 
 
 if __name__ == "__main__":

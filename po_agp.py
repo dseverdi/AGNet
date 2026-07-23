@@ -5105,6 +5105,21 @@ def main() -> None:
     if need_cgal_train_prewarm:
         prewarm_vis_cache(small_train, verbose=args.verbose)
 
+    # Load the persisted disc-vis cache before training under --fast-reward.
+    # Previously --disc-vis-cache-path was honoured only on the LS fine-tuning
+    # path, so a pretraining run rebuilt every per-polygon visibility matrix
+    # from scratch. Two reasons this matters:
+    #   (i)  cost -- ~8k matrices rebuilt per run;
+    #   (ii) consistency -- the sample points are seeded by hash(name), which
+    #        Python salts per process, so each run would otherwise draw
+    #        *different* points, while tools/build_ls_trajectories.py loads
+    #        this same cache by default. Policy and probe targets would then be
+    #        scored against different point sets.
+    # Load-only: we do not write back, so a shared cache cannot be corrupted by
+    # a concurrent or interrupted run.
+    if args.fast_reward and getattr(args, "disc_vis_cache_path", None):
+        load_disc_vis_cache(args.disc_vis_cache_path, verbose=True)
+
     if remaining > 0 and not args.finetune_only:
         po_train(
             model, small_train, reward_fn,
