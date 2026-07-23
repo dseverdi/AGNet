@@ -53,8 +53,9 @@ def main() -> None:
     p.add_argument("--ref-test", default="data/ls_trajectories_dev_test_clean.pkl")
     p.add_argument("--out-tune", required=True)
     p.add_argument("--out-test", required=True)
-    p.add_argument("--strict", action="store_true", default=True,
-                   help="fail if a reference polygon is missing from --input")
+    p.add_argument("--no-strict", dest="strict", action="store_false", default=True,
+                   help="tolerate reference polygons missing from --input "
+                        "(only for smoke tests built with --n-samples)")
     args = p.parse_args()
 
     src = load(args.input)

@@ -79,6 +79,28 @@
 
 set -euo pipefail
 
+# With `set -e` the script aborts at the failing command, so the per-phase
+# guards further down never get to print. On an unattended multi-day run that
+# leaves only a bare traceback in the log, so surface the context here.
+trap 'rc=$?; {
+  echo ""
+  echo "############################################################"
+  echo "# FAILED (exit $rc) at line $LINENO: ${BASH_COMMAND%% *}"
+  echo "#"
+  echo "# If this was CUDA OOM: lower PO_BATCH (and AGNET_BUCKET_SIZE"
+  echo "#   follows it automatically), e.g. PO_BATCH=16. Also check no"
+  echo "#   orphaned python process is holding the GPU:"
+  echo "#     nvidia-smi --query-compute-apps=pid,used_memory --format=csv"
+  echo "# If it was ModuleNotFoundError: torch, set PYTHON explicitly."
+  echo "#"
+  echo "# Every phase is idempotent, so fix and re-run the same command."
+  echo "# BUT: po_agp_best_greedy.pt is written DURING training, so if a"
+  echo "#   policy run died part-way, DELETE its checkpoint dir first or"
+  echo "#   phase 1 will be skipped and a half-trained policy used:"
+  echo "#     rm -rf checkpoints/v3/po_agp/lstm_bt_seed<S>"
+  echo "############################################################"
+} >&2' ERR
+
 # ----------------------------------------------------------------- environment
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
@@ -163,8 +185,31 @@ PO_TRAIN_SIZE=8000
 # use the same value. Rollout decoding is latency-bound (K=8 sequential LSTM
 # decodes), so a bigger batch buys parallelism per sequential step almost for
 # free until the GPU saturates. Override with PO_BATCH=... if you hit OOM.
-PO_BATCH="${PO_BATCH:-128}"
+PO_BATCH="${PO_BATCH:-10}"
 PO_LR="${PO_LR:-2e-4}"
+
+# po_agp.py batches via BucketBatchSampler, which chunks length-sorted indices
+# into buckets and only then splits each bucket by batch_size. With bucket_size
+# = 10 any larger --batch-size is INERT: every bucket yields one batch of 10.
+#
+# That cap is a MEMORY constraint, not an oversight. A PO step decodes
+# batch*K sequences autoregressively and holds the graph across all decode
+# steps, so peak memory grows steeply with polygon size. Measured at the
+# worst-case training polygon (n=198, K=8) on a 7.57 GiB RTX 2080 SUPER:
+#     batch  8 -> 3.82 GiB      batch 12 -> 5.70 GiB
+#     batch 10 -> 4.61 GiB      batch 16 -> OOM
+# So 10 is about the ceiling on an 8 GiB card, and the ~73 min/epoch
+# (~10 days per 200-epoch seed) that implies is inherent to that hardware.
+#
+# The defaults below therefore reproduce the released recipe and are SAFE on
+# 8 GiB. On a larger card raise BOTH together -- bucket_size must be >=
+# batch_size or the batch is silently capped. Size it for the target machine:
+#     python tools/probe_max_batch.py
+# Roughly batch ~= 1.8 * (GPU GiB). Note the speedup is sub-linear: decoding is
+# latency-bound, so k times fewer steps is not k times faster. Changing the
+# batch also changes optimisation (fewer, larger gradient steps); that is
+# acceptable for a within-policy contrast provided every seed uses one value.
+export AGNET_BUCKET_SIZE="${AGNET_BUCKET_SIZE:-$PO_BATCH}"
 PO_EVAL_K=200
 PO_DISC_VIS=500
 
@@ -208,16 +253,42 @@ export AGNET_DISC_VIS_CACHE_SIZE="${AGNET_DISC_VIS_CACHE_SIZE:-12000}"
 # it dominates probe runtime and we only need the final checkpoint here.
 PROBE_EPOCHS=60
 PROBE_SEED=1234
+# Per-epoch rollout eval is OFF, and we evaluate the FINAL checkpoint rather
+# than set_predictor_best.pt. Two reasons:
+#   1. train_set_predictor.py only writes set_predictor_best.pt when some
+#      threshold beats the policy seed on coverage AND guard count. That fires
+#      for some conditions and not others (the coords-only probe never triggers
+#      it), so "best" would give the ablation arms checkpoints chosen by
+#      different logic at different epochs -- a confound in a controlled
+#      full-vs-no-encoder comparison.
+#   2. "best" is a selection, and selection is exactly what leaked in the
+#      published probe runs (their val-traj was the POOLED dev pickle, so the
+#      selection metric saw 64 of the 362 held-out test polygons). Taking the
+#      final epoch removes the selection step altogether, so no leak is
+#      possible here regardless of which pickle is passed.
+# Setting PROBE_ROLLOUT_EVAL>0 re-enables the sweep; it would then select on the
+# TUNE partition only, which is legitimate but reintroduces the asymmetry in 1.
 PROBE_ROLLOUT_EVAL=0
+PROBE_CKPT_NAME="set_predictor_final.pt"
 
 if [[ $SMOKE -eq 1 ]]; then
     echo "### SMOKE MODE: 2-epoch pipeline validation, results are NOT usable ###"
+    # Phase 2 dominates a smoke run if left unbounded: the real trajectory
+    # builds took 67.5 min (train, 8867) and 9.6 min (dev, 1224) as recorded in
+    # their summaries. Cap them so the smoke test exercises every phase in
+    # minutes. The carve must then tolerate missing reference polygons.
+    TRAJ_N=200
+    CARVE_STRICT=0
     PO_EPOCHS=2
     PROBE_EPOCHS=2
     PO_TRAIN_SIZE=256
     PO_EVAL_K=30
     SEEDS=(99)
 fi
+
+# Full splits and strict carve unless --smoke overrides them.
+TRAJ_N="${TRAJ_N:-}"
+CARVE_STRICT="${CARVE_STRICT:-1}"
 
 mkdir -p results/policy_seeds logs
 
@@ -337,6 +408,7 @@ for S in "${SEEDS[@]}"; do
                 --split "$SPLIT" \
                 --tau "$PO_TAU" --tau-penalty "$PO_TAU_PEN" --lam "$PO_LAMBDA" \
                 --disc-vis-samples "$PO_DISC_VIS" \
+                ${TRAJ_N:+--n-samples "$TRAJ_N"} \
                 --out "$OUT"
         fi
     done
@@ -356,7 +428,8 @@ for S in "${SEEDS[@]}"; do
             --ref-tune data/ls_trajectories_dev_tune.pkl \
             --ref-test data/ls_trajectories_dev_test_clean.pkl \
             --out-tune "$TRAJ_TUNE" \
-            --out-test "$TRAJ_TEST"
+            --out-test "$TRAJ_TEST" \
+            $([[ "$CARVE_STRICT" == "0" ]] && echo --no-strict)
     fi
 
     # -- phases 3+4: the two probes that constitute the ablation -------------
@@ -366,8 +439,8 @@ for S in "${SEEDS[@]}"; do
         else
             VDIR="$NOENC_DIR"; EXTRA=(--disable-ptr-emb)
         fi
-        if [[ -e "${VDIR}/set_predictor_best.pt" ]]; then
-            echo "[skip] phase 3/4 ($VARIANT) — ${VDIR}/set_predictor_best.pt exists"
+        if [[ -e "${VDIR}/${PROBE_CKPT_NAME}" ]]; then
+            echo "[skip] phase 3/4 ($VARIANT) — ${VDIR}/${PROBE_CKPT_NAME} exists"
         else
             echo "--- phase 3/5: probe '${VARIANT}' on policy seed ${S} ---"
             # val-traj is the TUNE partition: any checkpoint/threshold selection
@@ -396,7 +469,7 @@ for S in "${SEEDS[@]}"; do
             echo "--- phase 5/5: eval '${VARIANT}' (policy seed ${S}) ---"
             # Evaluate on the held-out 362, the same split as Table tab:headline.
             run "$PYTHON" eval_set_predictor.py \
-                --checkpoint "${VDIR}/set_predictor_best.pt" \
+                --checkpoint "${VDIR}/${PROBE_CKPT_NAME}" \
                 --val-traj "$TRAJ_TEST" \
                 --pointer-checkpoint "$POL_CKPT" \
                 --sol-dir "${DATASET_ROOT}/dev" \
@@ -429,16 +502,19 @@ for S in "${SEEDS[@]}"; do
     "traj_dev_pooled": "${TRAJ_DEV}",
     "traj_tune": "${TRAJ_TUNE}",
     "traj_test": "${TRAJ_TEST}",
-    "probe_full": "${FULL_DIR}/set_predictor_best.pt",
-    "probe_noenc": "${NOENC_DIR}/set_predictor_best.pt",
+    "probe_full": "${FULL_DIR}/${PROBE_CKPT_NAME}",
+    "probe_noenc": "${NOENC_DIR}/${PROBE_CKPT_NAME}",
     "eval_full": "results/policy_seeds/pseed${S}_full.json",
     "eval_noenc": "results/policy_seeds/pseed${S}_noenc.json"
   }
 }
 EOF
         echo "[manifest] results/policy_seeds/manifest_pseed${S}.json"
-        printf "[done] policy seed %s in %.2f h (policy training %.2f h)\n" \
-               "$S" "$(echo "$T_TOTAL/3600" | bc -l)" "$(echo "$T_POLICY/3600" | bc -l)"
+        # awk, not bc: bc is not installed on every box, and an empty $(... | bc)
+        # made printf %.2f fail under `set -e`, aborting AFTER all real work was
+        # done. awk is guaranteed present wherever this script's awk ETA runs.
+        awk -v t="$T_TOTAL" -v p="$T_POLICY" -v s="$S" 'BEGIN{
+            printf "[done] policy seed %s in %.2f h (policy training %.2f h)\n", s, t/3600, p/3600 }'
     fi
 done
 

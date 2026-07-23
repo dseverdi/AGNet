@@ -1933,9 +1933,20 @@ def po_train(
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
 
     lengths = get_lengths_from_dataset(dataset)
+    # BucketBatchSampler chunks length-sorted indices into buckets, then splits
+    # each bucket by batch_size. With the historical bucket_size=10 any
+    # batch_size above 10 was INERT: every bucket yielded a single batch of 10,
+    # so --batch-size had no effect and an epoch was always len(dataset)/10
+    # steps. Default preserves that behaviour; pass --bucket-size to make
+    # batch_size meaningful (a bucket must hold several batches to be split).
+    bucket_size = max(10, int(os.getenv("AGNET_BUCKET_SIZE", "10")))
     sampler = BucketBatchSampler(
-        lengths, batch_size, shuffle=True, bucket_size=10,
+        lengths, batch_size, shuffle=True, bucket_size=bucket_size,
     )
+    if bucket_size < batch_size:
+        print(f"  [warn] bucket_size={bucket_size} < batch_size={batch_size}: "
+              f"effective batch is {min(batch_size, bucket_size)}. "
+              f"Set AGNET_BUCKET_SIZE >= batch_size (e.g. {batch_size * 8}).")
     loader = DataLoader(
         dataset, batch_sampler=sampler, collate_fn=collate_fn,
         pin_memory=True, num_workers=0,
