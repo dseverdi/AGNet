@@ -51,6 +51,12 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from greedy_agp import precompute_visibility_polygons, greedy_guard_selection_fast
+from agp_greedy_fast import greedy_guard_selection_lazy
+
+IMPLS = {
+    "original": greedy_guard_selection_fast,
+    "lazy": greedy_guard_selection_lazy,
+}
 
 PICKLES = [
     REPO / "data/ls_trajectories_dev_test_clean.pkl",
@@ -76,7 +82,7 @@ def load_polys():
     return by_n
 
 
-def _worker_time_one(n: int, coverage_threshold: float) -> None:
+def _worker_time_one(n: int, coverage_threshold: float, impl: str) -> None:
     """Child-process entry point: time greedy on a single polygon, print the
     result tagged so the parent can find it among any library stdout noise."""
     by_n = load_polys()
@@ -85,35 +91,41 @@ def _worker_time_one(n: int, coverage_threshold: float) -> None:
         sys.exit(1)
     r = by_n[n]
     pts = np.asarray(r["points"], dtype=np.float64)
+    fn = IMPLS[impl]
     t0 = time.perf_counter()
-    greedy_guard_selection_fast(pts, coverage_threshold=coverage_threshold, name=r["name"])
+    guard_idxs, coverages = fn(pts, coverage_threshold=coverage_threshold, name=r["name"])
     dt = (time.perf_counter() - t0) * 1e3
-    print("WORKER_RESULT:" + json.dumps({"greedy_ms": dt, "name": r["name"], "n": n}))
+    print("WORKER_RESULT:" + json.dumps({
+        "greedy_ms": dt, "name": r["name"], "n": n,
+        "n_guards": len(guard_idxs), "final_coverage": coverages[-1] if coverages else None,
+    }))
 
 
-def _time_greedy_subprocess(n: int, coverage_threshold: float, timeout_s: float):
+def _time_greedy_subprocess(n: int, coverage_threshold: float, timeout_s: float, impl: str):
     """Time greedy on polygon n in an isolated subprocess. A hang is killed at
-    timeout_s; a native crash only takes down the child. Returns (ms, status)
+    timeout_s; a native crash only takes down the child. Returns (ms, status, meta)
     with ms=None on failure."""
     try:
         proc = subprocess.run(
             [sys.executable, "-u", str(Path(__file__).resolve()),
-             "--worker-n", str(n), "--coverage-threshold", str(coverage_threshold)],
+             "--worker-n", str(n), "--coverage-threshold", str(coverage_threshold),
+             "--impl", impl],
             capture_output=True, text=True, timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
-        return None, f"timeout>{timeout_s:.0f}s"
+        return None, f"timeout>{timeout_s:.0f}s", {}
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         detail = tail[-1] if tail else f"exit {proc.returncode}"
-        return None, f"crashed ({detail[:160]})"
+        return None, f"crashed ({detail[:160]})", {}
     for line in proc.stdout.splitlines():
         if line.startswith("WORKER_RESULT:"):
             data = json.loads(line[len("WORKER_RESULT:"):])
             if "greedy_ms" in data:
-                return data["greedy_ms"], "ok"
-            return None, f"error ({data.get('error', 'unknown')})"
-    return None, "no result (unparseable subprocess output)"
+                meta = {"n_guards": data.get("n_guards"), "final_coverage": data.get("final_coverage")}
+                return data["greedy_ms"], "ok", meta
+            return None, f"error ({data.get('error', 'unknown')})", {}
+    return None, "no result (unparseable subprocess output)", {}
 
 
 def main() -> None:
@@ -131,11 +143,19 @@ def main() -> None:
                           "'500,1000,2000'. Default: all of " + str(BUCKETS) + ". "
                           "Buckets not listed are left untouched in --out.")
     ap.add_argument("--out", type=str, default=str(REPO / "results/classical_timing.json"))
+    ap.add_argument("--impl", type=str, default="original", choices=sorted(IMPLS),
+                     help="Which greedy implementation to time: 'original' "
+                          "(greedy_agp.greedy_guard_selection_fast, the reference "
+                          "implementation used for every guard-count/coverage number "
+                          "elsewhere in the paper) or 'lazy' "
+                          "(agp_greedy_fast.greedy_guard_selection_lazy, a "
+                          "behavior-equivalent but much faster alternative -- see its "
+                          "module docstring).")
     ap.add_argument("--worker-n", type=int, default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.worker_n is not None:
-        _worker_time_one(args.worker_n, args.coverage_threshold)
+        _worker_time_one(args.worker_n, args.coverage_threshold, args.impl)
         return
 
     selected_buckets = (
@@ -187,23 +207,26 @@ def main() -> None:
                 continue
             if n <= args.greedy_max_n:
                 try:
+                    fn = IMPLS[args.impl]
                     t2 = time.perf_counter()
-                    greedy_guard_selection_fast(pts, coverage_threshold=args.coverage_threshold, name=r["name"])
+                    guard_idxs, coverages = fn(pts, coverage_threshold=args.coverage_threshold, name=r["name"])
                     gt = (time.perf_counter() - t2) * 1e3
                     greedy_ms.append(gt); greedy_status.append("ok")
-                    print(f"[bucket {b}] {r['name']} n={n}: greedy_full={gt:.0f}ms", flush=True)
+                    print(f"[bucket {b}] {r['name']} n={n}: greedy_full={gt:.0f}ms "
+                          f"(impl={args.impl}, guards={len(guard_idxs)}, cov={coverages[-1]:.4f})", flush=True)
                 except Exception as e:
                     greedy_status.append(f"crashed ({e})")
                     print(f"[bucket {b}] {r['name']} n={n}: greedy FAILED ({e})", flush=True)
             elif args.greedy_timeout_s is not None:
                 t2 = time.perf_counter()
-                gt, status = _time_greedy_subprocess(n, args.coverage_threshold, args.greedy_timeout_s)
+                gt, status, meta = _time_greedy_subprocess(n, args.coverage_threshold, args.greedy_timeout_s, args.impl)
                 wall = time.perf_counter() - t2
                 greedy_status.append(status)
                 if gt is not None:
                     greedy_ms.append(gt)
                     print(f"[bucket {b}] {r['name']} n={n}: greedy_full={gt:.0f}ms "
-                          f"(subprocess, wall={wall:.0f}s)", flush=True)
+                          f"(subprocess, impl={args.impl}, wall={wall:.0f}s, "
+                          f"guards={meta.get('n_guards')}, cov={meta.get('final_coverage')})", flush=True)
                 else:
                     print(f"[bucket {b}] {r['name']} n={n}: greedy {status} (wall={wall:.0f}s)", flush=True)
             # flush after every polygon, not just every bucket: a hang/crash on
