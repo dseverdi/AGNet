@@ -54,17 +54,16 @@ def main() -> None:
     sweep = json.loads(SWEEP.read_text())
     cells = sweep["cells"]
 
-    rows = []
-
-    # --- low-t points (the headline range already in the paper) -------------
-    if DIST.exists():
-        dist = json.loads(DIST.read_text()).get("cells", {})
-        for t, c in _single_pass_cells(dist):
-            rows.append((t, c["cov"], c.get("chv"), c.get("opt")))
-
-    # --- high-t points (computed for fig:mechanism, never reported) ---------
-    for t, v in _single_pass_cells(cells):
-        rows.append((t, v["cov"], v.get("chv"), v.get("opt")))
+    # ONE population only. The low-t window (t = 0.20/0.25/0.30) lives in
+    # setpred_dev_test.json, which is the 362-polygon *test* split, whereas this
+    # sweep is the 1224-polygon pooled dev+test set. Mixing them would put rows
+    # from different populations in the same column and make the trend
+    # unreadable -- the policy-seed baseline alone differs between them
+    # (|S|/OPT 1.21 pooled vs 1.09 on test). We therefore report only the
+    # unreported high-t end here and cross-reference the headline tables for the
+    # low-t window.
+    rows = [(t, v["cov"], v.get("chv"), v.get("opt"))
+            for t, v in _single_pass_cells(cells)]
 
     # dedupe by threshold, ascending
     seen, uniq = set(), []

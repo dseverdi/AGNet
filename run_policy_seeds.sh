@@ -296,7 +296,11 @@ for S in "${SEEDS[@]}"; do
     POL_DIR="checkpoints/v3/po_agp/lstm_bt_seed${S}"
     POL_CKPT="${POL_DIR}/po_agp_best_greedy.pt"
     TRAJ_TRAIN="data/ls_trajectories_train_pseed${S}.pkl"
+    # Pooled dev directory (1224 = dev+test). NOT usable directly: it must be
+    # carved into the canonical tune/test partitions, see phase 2b.
     TRAJ_DEV="data/ls_trajectories_dev_pseed${S}.pkl"
+    TRAJ_TUNE="data/ls_trajectories_dev_tune_pseed${S}.pkl"   # 857, selection
+    TRAJ_TEST="data/ls_trajectories_dev_test_pseed${S}.pkl"   # 362, held out
     FULL_DIR="checkpoints/set_predictor/pseed${S}_full"
     NOENC_DIR="checkpoints/set_predictor/pseed${S}_noenc"
     LOG="logs/policy_seed${S}.log"
@@ -337,6 +341,24 @@ for S in "${SEEDS[@]}"; do
         fi
     done
 
+    # -- phase 2b: carve the pooled dev trajectories into the paper's splits --
+    # DATASET_PATH/dev holds 1224 polygons: dev and test POOLED. The paper's
+    # test split is the 362 that survive the 70/30 carve plus train-leak dedup.
+    # Training or evaluating on the raw 1224 would mix the tuning and held-out
+    # partitions and produce numbers not comparable with the paper. We filter by
+    # polygon name against the canonical pickles so the partition is identical.
+    if [[ -e "$TRAJ_TUNE" && -e "$TRAJ_TEST" ]]; then
+        echo "[skip] phase 2b -- $TRAJ_TUNE and $TRAJ_TEST exist"
+    else
+        echo "--- phase 2b/5: carve dev into tune(857)/test(362) ---"
+        run "$PYTHON" tools/carve_traj_by_reference.py \
+            --input "$TRAJ_DEV" \
+            --ref-tune data/ls_trajectories_dev_tune.pkl \
+            --ref-test data/ls_trajectories_dev_test_clean.pkl \
+            --out-tune "$TRAJ_TUNE" \
+            --out-test "$TRAJ_TEST"
+    fi
+
     # -- phases 3+4: the two probes that constitute the ablation -------------
     for VARIANT in full noenc; do
         if [[ "$VARIANT" == "full" ]]; then
@@ -348,9 +370,11 @@ for S in "${SEEDS[@]}"; do
             echo "[skip] phase 3/4 ($VARIANT) — ${VDIR}/set_predictor_best.pt exists"
         else
             echo "--- phase 3/5: probe '${VARIANT}' on policy seed ${S} ---"
+            # val-traj is the TUNE partition: any checkpoint/threshold selection
+            # must not see the held-out 362.
             run "$PYTHON" train_set_predictor.py \
                 --train-traj "$TRAJ_TRAIN" \
-                --val-traj "$TRAJ_DEV" \
+                --val-traj "$TRAJ_TUNE" \
                 --pointer-checkpoint "$POL_CKPT" \
                 --epochs "$PROBE_EPOCHS" \
                 --batch-size 32 --lr 3e-4 \
@@ -370,9 +394,10 @@ for S in "${SEEDS[@]}"; do
             echo "[skip] phase 5 ($VARIANT) — $OUT exists"
         else
             echo "--- phase 5/5: eval '${VARIANT}' (policy seed ${S}) ---"
+            # Evaluate on the held-out 362, the same split as Table tab:headline.
             run "$PYTHON" eval_set_predictor.py \
                 --checkpoint "${VDIR}/set_predictor_best.pt" \
-                --val-traj "$TRAJ_DEV" \
+                --val-traj "$TRAJ_TEST" \
                 --pointer-checkpoint "$POL_CKPT" \
                 --sol-dir "${DATASET_ROOT}/dev" \
                 --thresholds 0.20 0.25 0.30 \
@@ -401,7 +426,9 @@ for S in "${SEEDS[@]}"; do
   "artifacts": {
     "policy": "${POL_CKPT}",
     "traj_train": "${TRAJ_TRAIN}",
-    "traj_dev": "${TRAJ_DEV}",
+    "traj_dev_pooled": "${TRAJ_DEV}",
+    "traj_tune": "${TRAJ_TUNE}",
+    "traj_test": "${TRAJ_TEST}",
     "probe_full": "${FULL_DIR}/set_predictor_best.pt",
     "probe_noenc": "${NOENC_DIR}/set_predictor_best.pt",
     "eval_full": "results/policy_seeds/pseed${S}_full.json",
