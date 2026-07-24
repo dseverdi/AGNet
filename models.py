@@ -172,7 +172,41 @@ class PointerNet(nn.Module):
         else:
             self.eos_logit_bias = None
         
-    def apply_mask_to_logits(self, logits, mask, idxs, lengths=None): 
+    def apply_mask_to_logits(self, logits, mask, idxs, lengths=None):
+        # Vectorised, semantics-identical replacement for
+        # _apply_mask_to_logits_legacy below. The legacy version ran three
+        # `for b in range(batch_size)` loops (EOS-unmask, all-but-one guard,
+        # all-inf safety), each doing per-element .item()/.sum() host<->device
+        # syncs; called twice per decode step, this dominated training
+        # wall-clock (~60% of a step, GPU ~17% util). Same result, tensor ops,
+        # at most one .any() sync per call. Set self._legacy_mask=True to
+        # revert. Equivalence is asserted in tools/smoke_fast_decode.py.
+        if getattr(self, "_legacy_mask", False):
+            return self._apply_mask_to_logits_legacy(logits, mask, idxs, lengths)
+        B = logits.size(0)
+        device = logits.device
+        clone_mask = mask.clone()
+        if idxs is not None:
+            clone_mask[torch.arange(B, device=device), idxs] = True
+        eos = None
+        if lengths is not None:
+            eos = (lengths if torch.is_tensor(lengths)
+                   else torch.as_tensor(lengths, device=device)).to(device).long().view(-1)
+            # Keep every sample's EOS position open (legacy steps 2 & 3; step 3
+            # is a no-op once EOS is unconditionally unmasked here).
+            clone_mask.scatter_(1, eos.view(-1, 1), False)
+        masked_logits = logits.masked_fill(clone_mask, float('-inf'))
+        # Safety: an entirely -inf row gets its EOS (or col 0) logit restored.
+        all_neg_inf = (torch.isinf(masked_logits) & (masked_logits < 0)).all(dim=1)
+        if bool(all_neg_inf.any()):
+            fix = eos if eos is not None else torch.zeros(B, dtype=torch.long, device=device)
+            r = all_neg_inf.nonzero(as_tuple=True)[0]
+            c = fix[r]
+            masked_logits[r, c] = logits[r, c]
+            clone_mask[r, c] = False
+        return masked_logits, clone_mask
+
+    def _apply_mask_to_logits_legacy(self, logits, mask, idxs, lengths=None):
         batch_size = logits.size(0)
         # Create a new mask to avoid in-place modifications
         clone_mask = mask.clone()
@@ -430,6 +464,30 @@ class PointerNet(nn.Module):
                     cov_M_per_sample.append(int(vm.shape[1]))
 
         log_probs_list = [[] for _ in range(batch_size)]
+
+        # Fast decode: for the plain training/eval case (no coverage gating,
+        # no marginal-cov injection, no per-sample budget, no EOS-logit bias,
+        # lengths given) the per-step per-sample .item() loops below are pure
+        # host<->device syncs. When use_fast, we vectorise the safety/NaN guards
+        # and DEFER the append: sampled indices and (differentiable) step
+        # log-probs are accumulated as tensors and materialised once after the
+        # loop, so ~3*B syncs/step become ~2. Sampling, masking and state
+        # updates are byte-for-byte the legacy path, so the result is identical
+        # (asserted in tools/smoke_fast_decode.py). AGNET_LEGACY_DECODE=1 /
+        # self._legacy_mask=True forces the legacy loops.
+        use_fast = (
+            not getattr(self, "_legacy_mask", False)
+            and not cov_track_active
+            and per_sample_budget is None
+            and self.eos_logit_bias is None
+            and lengths is not None
+        )
+        if use_fast:
+            eos_pos_t = (lengths if torch.is_tensor(lengths)
+                         else torch.as_tensor(lengths, device=device)).to(device).long().view(-1)
+            step_idx_list: list = []
+            step_lp_list: list = []
+
         for step in range(max_steps):
             _, (hidden, context) = self.decoder(decoder_input.unsqueeze(1), (hidden, context))
             query = hidden.squeeze(0)
@@ -508,16 +566,24 @@ class PointerNet(nn.Module):
                     if has_alt:
                         logits[b, eos_pos] = float('-inf')
             # Safety: if all logits are -inf for a sample, unmask EOS
-            for b in range(batch_size):
-                actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
-                if torch.all(torch.isinf(logits[b]) & (logits[b] < 0)):
-                    logits[b, actual_eos] = 0.0  # Only EOS for this sample is valid
+            if use_fast:
+                all_neg_inf = (torch.isinf(logits) & (logits < 0)).all(dim=1)
+                if bool(all_neg_inf.any()):
+                    r = all_neg_inf.nonzero(as_tuple=True)[0]
+                    logits[r, eos_pos_t[r]] = 0.0
+            else:
+                for b in range(batch_size):
+                    actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
+                    if torch.all(torch.isinf(logits[b]) & (logits[b] < 0)):
+                        logits[b, actual_eos] = 0.0  # Only EOS for this sample is valid
             probs = F.softmax(logits, dim=1)
             # Safety: replace any NaN rows with one-hot on their respective EOS
             nan_rows = torch.isnan(probs).any(dim=1, keepdim=True)
             if nan_rows.any():
                 fallback = torch.zeros_like(probs)
-                if lengths is not None:
+                if use_fast:
+                    fallback.scatter_(1, eos_pos_t.view(-1, 1), 1.0)
+                elif lengths is not None:
                     for b in range(batch_size):
                         actual_eos = lengths[b].item() if torch.is_tensor(lengths[b]) else lengths[b]
                         fallback[b, actual_eos] = 1.0
@@ -529,35 +595,72 @@ class PointerNet(nn.Module):
             else:
                 idxs = probs.multinomial(1).squeeze(1)
             
-            for b in range(batch_size):
-                if not finished[b]:
-                    picked = idxs[b].item()
-                    output_idxs[b].append(picked)
-                    log_prob = torch.log(probs[b, idxs[b]])
-                    log_probs_list[b].append(log_prob)
-                    # Check if this sample reached its EOS
-                    actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
-                    if picked == actual_eos:
-                        finished[b] = True
-                    else:
-                        non_eos_counts[b] += 1
-                        # Update running coverage with the picked vertex.
-                        if (cov_track_active
-                                and covered_per_sample[b] is not None
-                                and vis_matrices_list[b] is not None):
-                            vm_b = vis_matrices_list[b]
-                            if 0 <= picked < vm_b.shape[0]:
-                                np.bitwise_or(
-                                    covered_per_sample[b], vm_b[picked],
-                                    out=covered_per_sample[b],
-                                )
+            if use_fast:
+                # Defer per-sample bookkeeping: accumulate sampled indices and
+                # differentiable step log-probs as tensors; reconstruct after
+                # the loop. `finished` is updated tensor-wise for the early
+                # break. Same log-prob (no clamp) as the legacy branch below.
+                step_idx_list.append(idxs)
+                step_lp_list.append(torch.log(probs.gather(1, idxs.unsqueeze(1)).squeeze(1)))
+                finished = finished | (idxs == eos_pos_t)
+            else:
+                for b in range(batch_size):
+                    if not finished[b]:
+                        picked = idxs[b].item()
+                        output_idxs[b].append(picked)
+                        log_prob = torch.log(probs[b, idxs[b]])
+                        log_probs_list[b].append(log_prob)
+                        # Check if this sample reached its EOS
+                        actual_eos = lengths[b].item() if lengths is not None and torch.is_tensor(lengths[b]) else (lengths[b] if lengths is not None else seq_len)
+                        if picked == actual_eos:
+                            finished[b] = True
+                        else:
+                            non_eos_counts[b] += 1
+                            # Update running coverage with the picked vertex.
+                            if (cov_track_active
+                                    and covered_per_sample[b] is not None
+                                    and vis_matrices_list[b] is not None):
+                                vm_b = vis_matrices_list[b]
+                                if 0 <= picked < vm_b.shape[0]:
+                                    np.bitwise_or(
+                                        covered_per_sample[b], vm_b[picked],
+                                        out=covered_per_sample[b],
+                                    )
             selected_mask = F.one_hot(idxs, total_len).bool()
             mask = mask | selected_mask
             decoder_input = embedded[torch.arange(batch_size), idxs, :]
             if finished.all():
                 break
-        log_probs = [torch.stack(lp).sum() if len(lp) > 0 else torch.tensor(0., device=inputs.device) for lp in log_probs_list]
-        log_probs = torch.stack(log_probs)  # shape: (batch_size,)
+
+        if use_fast:
+            # Reconstruct output_idxs (each sample keeps steps up to and
+            # including its first EOS pick; if it never picks EOS it keeps all
+            # steps run) and per-sample log-prob sums, matching the legacy
+            # append semantics exactly.
+            S = len(step_idx_list)
+            if S == 0:
+                log_probs = torch.zeros(batch_size, device=inputs.device)
+                output_idxs = [[] for _ in range(batch_size)]
+            else:
+                idx_mat = torch.stack(step_idx_list, dim=0)        # [S, B]
+                lp_mat = torch.stack(step_lp_list, dim=0)          # [S, B]
+                picked_eos = idx_mat == eos_pos_t.unsqueeze(0)     # [S, B]
+                step_ar = torch.arange(S, device=device).unsqueeze(1)        # [S,1]
+                masked_step = torch.where(picked_eos, step_ar,
+                                          torch.full_like(step_ar, S + 1))
+                first_eos = masked_step.min(dim=0).values          # [B]; S+1 if none
+                ever = first_eos <= S
+                fs = torch.where(ever, first_eos,
+                                 torch.full_like(first_eos, S - 1))  # last-step fallback
+                keep = step_ar <= fs.unsqueeze(0)                  # [S, B] bool
+                log_probs = (lp_mat * keep.to(lp_mat.dtype)).sum(dim=0)  # [B], differentiable
+                idx_cpu = idx_mat.t().tolist()                     # [B][S]
+                keep_cpu = keep.t().tolist()                       # [B][S]
+                output_idxs = [[idx_cpu[b][s] for s in range(S) if keep_cpu[b][s]]
+                               for b in range(batch_size)]
+        else:
+            log_probs = [torch.stack(lp).sum() if len(lp) > 0 else torch.tensor(0., device=inputs.device) for lp in log_probs_list]
+            log_probs = torch.stack(log_probs)  # shape: (batch_size,)
         return output_idxs, log_probs
 
 class CombinatorialRL(nn.Module):

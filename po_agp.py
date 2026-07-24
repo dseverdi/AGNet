@@ -291,6 +291,70 @@ def po_reward_smooth_disc(
     return float(r)
 
 
+def po_rewards_smooth_disc_batch(
+    pts_list, names, lengths, solutions, *,
+    K: int, lam: float = 0.2, tau: float = 0.99, tau_penalty: float = 5.0,
+    cap_at_tau: bool = False, n_samples: int = 500, device="cpu",
+) -> list[float]:
+    """Batched equivalent of po_reward_smooth_disc over B polygons x K rollouts.
+
+    Motivation: in a PO step the reward is computed by calling
+    po_reward_smooth_disc B*K times in a Python loop, each doing a numpy
+    bitwise-OR over the polygon's (n x M) disc-vis matrix. Profiling showed this
+    serial CPU loop is ~54% of a step once the decode masking is vectorised.
+    Here the K rollouts of one polygon share that polygon's matrix, so their
+    coverage is one [K,n] @ [n,M] matmul on the GPU instead of K numpy ORs.
+
+    Semantics are identical: coverage is an integer count of covered samples
+    (float32 matmul of 0/1 rows is exact up to n << 2^24), divided by M and
+    combined in float64 to match the scalar path. Empty solutions return
+    -tau_penalty. Any polygon whose disc-vis is invalid falls back to the exact
+    scalar po_reward_smooth_disc, so behaviour never silently changes.
+
+    solutions: list length B*K, each an iterable of vertex indices (already
+    filtered to < n by the caller, as in the scalar loop).
+    Returns list[float] length B*K, ordered [b0k0, b0k1, ..., b(B-1)k(K-1)].
+    """
+    B = len(pts_list)
+    out = [0.0] * (B * K)
+    tau64 = float(tau)
+    for b in range(B):
+        n = int(lengths[b])
+        disc = get_or_build_disc_vis(pts_list[b], names[b], n_samples=n_samples)
+        if not disc.get("valid"):
+            for k in range(K):
+                out[b * K + k] = po_reward_smooth_disc(
+                    pts_list[b], solutions[b * K + k], names[b], length=n,
+                    lam=lam, tau=tau, tau_penalty=tau_penalty,
+                    cap_at_tau=cap_at_tau, n_samples=n_samples)
+            continue
+        vm = disc["vis_matrix"]          # (ng, M) bool
+        M = int(disc["n_samples"])
+        ng = vm.shape[0]
+        Vt = torch.as_tensor(np.ascontiguousarray(vm), device=device).float()  # [ng, M]
+        sel = torch.zeros(K, ng, dtype=torch.float32, device=device)
+        sizes = [0] * K
+        empty = [False] * K
+        for k in range(K):
+            sol = [int(v) for v in solutions[b * K + k]]
+            sizes[k] = len(sol)
+            if not sol:
+                empty[k] = True
+                continue
+            valid = [v for v in sol if 0 <= v < ng]
+            if valid:
+                sel[k, torch.as_tensor(valid, device=device)] = 1.0
+        covered = (sel @ Vt) > 0                          # [K, M] bool, exact OR
+        cov = covered.sum(dim=1).to(torch.float64) / float(M)   # [K]
+        gr = torch.tensor(sizes, dtype=torch.float64, device=device) / float(max(1, n))
+        eff = torch.minimum(cov, torch.tensor(tau64, dtype=torch.float64, device=device)) if cap_at_tau else cov
+        deficit = torch.clamp(tau64 - cov, min=0.0)
+        r = (eff - lam * gr - tau_penalty * deficit).cpu().tolist()
+        for k in range(K):
+            out[b * K + k] = float(-tau_penalty) if empty[k] else float(r[k])
+    return out
+
+
 def permutation_reward(
     points: np.ndarray,
     permutation: list[int],
@@ -1742,6 +1806,7 @@ def _po_rollouts(
     K: int,
     episode_log: bool = False,
     no_eos: bool = False,
+    batched_reward_fn: Callable | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run K stochastic rollouts per instance.
 
@@ -1795,13 +1860,20 @@ def _po_rollouts(
         # ensures the cache is built before the K-rollout loop.
 
     # Compute rewards
-    rewards_flat: list[float] = []
-    for i in range(B * K):
-        b_idx = i // K
-        n = int(lengths[b_idx].item())
-        sol = [idx for idx in all_idxs[i] if idx < n]
-        r = reward_fn(pts_cache[b_idx], sol, batch_names[b_idx], length=n)
-        rewards_flat.append(float(r))
+    lengths_int = [int(lengths[b].item()) for b in range(B)]
+    solutions = [[idx for idx in all_idxs[i] if idx < lengths_int[i // K]]
+                 for i in range(B * K)]
+    if batched_reward_fn is not None:
+        # Same solutions/filtering as the scalar loop below; the batched fn
+        # returns identical values (verified in tools/smoke_fast_decode.py) but
+        # scores the K rollouts of each polygon in one GPU matmul instead of
+        # B*K serial numpy ORs.
+        rewards_flat = batched_reward_fn(pts_cache, batch_names, lengths_int,
+                                         solutions, device)
+    else:
+        rewards_flat = [float(reward_fn(pts_cache[i // K], solutions[i],
+                                        batch_names[i // K], length=lengths_int[i // K]))
+                        for i in range(B * K)]
 
     rewards   = torch.tensor(rewards_flat, dtype=torch.float32, device=device).view(B, K)
     log_probs = all_log_probs.view(B, K)
@@ -1868,6 +1940,7 @@ def po_train(
     resume_optimizer_state: dict | None = None,
     save_best: bool = True,
     no_eos: bool = False,
+    batched_reward_fn: Callable | None = None,
     debug_stats: bool = False,
     preference_loss: str = "bt",
     early_stop_patience: int = 0,
@@ -2001,7 +2074,7 @@ def po_train(
                 rewards, log_probs = _po_rollouts(
                     model, batch_data, pad_mask, lens_t, names,
                     reward_fn, K, episode_log=episode_log,
-                    no_eos=no_eos,
+                    no_eos=no_eos, batched_reward_fn=batched_reward_fn,
                 )
 
                 # ── PO loss (Bradley-Terry) ───────────────────────────
@@ -4975,6 +5048,12 @@ def main() -> None:
         args.embedding_size, args.hidden_size, args.n_glimpses,
         args.tanh_exploration, args.use_tanh, args.temperature,
     )
+    # Revert switch: AGNET_LEGACY_DECODE=1 restores the per-sample .item() mask
+    # path (baseline behaviour) instead of the vectorised one. Off = fast.
+    if os.getenv("AGNET_LEGACY_DECODE") == "1":
+        _net = model.actor if hasattr(model, "actor") else model
+        _net._legacy_mask = True
+        vprint("[config] AGNET_LEGACY_DECODE=1 -> legacy per-sample mask decode")
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"{'='*60}")
@@ -5050,6 +5129,20 @@ def main() -> None:
             return po_reward_smooth(
                 points, solution, name, length=length,
                 lam=lam, tau=tau, tau_penalty=tau_pen, cap_at_tau=cap_cov,
+            )
+
+    # Batched GPU reward: only for the fast-reward, non-ranking path (what the
+    # seed-replication runner uses). Returns values identical to the scalar
+    # reward_fn but scores each polygon's K rollouts in one matmul (~200x on the
+    # reward phase; verified in tools/smoke_fast_decode.py). None for the other
+    # reward variants, in which case _po_rollouts falls back to the scalar loop.
+    batched_reward_fn = None
+    if args.fast_reward and not args.ranking_mode and os.getenv("AGNET_LEGACY_REWARD") != "1":
+        def batched_reward_fn(pts_list, names_, lengths_, solutions, device):
+            return po_rewards_smooth_disc_batch(
+                pts_list, names_, lengths_, solutions,
+                K=args.num_rollouts, lam=lam, tau=tau, tau_penalty=tau_pen,
+                cap_at_tau=cap_cov, n_samples=args.disc_vis_samples, device=device,
             )
 
     # -- epoch eval callback --
@@ -5170,6 +5263,7 @@ def main() -> None:
             max_grad_norm=args.max_grad_norm,
             resume_optimizer_state=resume_optimizer_state,
             no_eos=args.ranking_mode,
+            batched_reward_fn=batched_reward_fn,
             debug_stats=args.po_debug_stats,
             preference_loss=args.preference_loss,
             early_stop_patience=args.early_stop_patience,

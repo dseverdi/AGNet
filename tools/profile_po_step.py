@@ -40,7 +40,7 @@ from po_agp import (                                                  # noqa: E4
     create_agp_model, prepare_datasets, get_lengths_from_dataset,
     BucketBatchSampler,
 )
-from po_agp import po_reward_smooth_disc                              # noqa: E402
+from po_agp import po_reward_smooth_disc, po_rewards_smooth_disc_batch  # noqa: E402
 
 
 def sync():
@@ -61,6 +61,16 @@ def main() -> None:
     if not dp:
         sys.exit("DATASET_PATH must be set (see .env)")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Load the disc-vis cache so the reward phase reflects REAL (warm-cache)
+    # training rather than on-the-fly CGAL matrix construction, which never
+    # happens once training is warm and otherwise dominates the measurement.
+    cache_path = os.path.join(REPO, "data/disc_vis_cache.pkl")
+    if os.path.exists(cache_path):
+        from po_agp import load_disc_vis_cache
+        load_disc_vis_cache(cache_path, verbose=True)
+    else:
+        print("[warn] no disc_vis cache; reward timing will include CGAL builds")
 
     tr, _ = prepare_datasets(os.path.join(dp, "train"),
                              os.path.join(dp, "dev"), normalize=True)
@@ -99,18 +109,24 @@ def main() -> None:
                                  deterministic=False)
         sync(); t_dec = time.perf_counter() - t0
 
-        # -- 2. reward: B*K serial CPU reward_fn calls --
+        # -- 2. reward: batched GPU disc-vis (what training now uses) --
         t0 = time.perf_counter()
         pts_cache = [bd[b, :int(lt[b].item())].detach().cpu().numpy()
                      for b in range(B)]
-        rflat = []
-        for i in range(B * K):
-            b = i // K
-            n = int(lt[b].item())
-            sol = [int(idx) for idx in all_idxs[i] if int(idx) < n]
-            rflat.append(float(reward_fn(pts_cache[b], sol, names[b], length=n)))
+        lengths_int = [int(lt[b].item()) for b in range(B)]
+        sols = [[int(idx) for idx in all_idxs[i] if int(idx) < lengths_int[i // K]]
+                for i in range(B * K)]
+        if os.getenv("AGNET_PROFILE_SCALAR_REWARD"):
+            rflat = [float(reward_fn(pts_cache[i // K], sols[i], names[i // K],
+                                     length=lengths_int[i // K]))
+                     for i in range(B * K)]
+        else:
+            rflat = po_rewards_smooth_disc_batch(
+                pts_cache, list(names), lengths_int, sols, K=K,
+                lam=1.0, tau=0.99, tau_penalty=3.0, cap_at_tau=True,
+                n_samples=args.disc_vis_samples, device=dev)
         rewards = torch.tensor(rflat, device=dev).view(B, K)
-        t_rew = time.perf_counter() - t0
+        sync(); t_rew = time.perf_counter() - t0
 
         # -- 3. backward: BT loss + step --
         sync(); t0 = time.perf_counter()
