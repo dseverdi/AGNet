@@ -1,0 +1,29 @@
+# Minimal environment for the AGNet policy-seed replication.
+#
+# WHY CONDA AND NOT pip/requirements.txt:
+#   utils.py does an unconditional `import skgeom` (scikit-geometry), a CGAL
+#   binding distributed ONLY as conda-forge binaries -- there are no PyPI
+#   wheels, so `pip install scikit-geometry` cannot work and po_agp.py will not
+#   even start without it. It pulls in cgal-cpp, boost-cpp, gmp and mpfr as
+#   native deps. This is the single biggest deployment constraint.
+#
+# WHY python 3.9 AND torch 2.4.1/cu118:
+#   That is the combination scikit-geometry 0.1.2 is built and verified against
+#   here (build py39hc76a25d_4). cu118 covers sm_86 (RTX 3090) and sm_89
+#   (RTX 4090). It does NOT cover sm_120 (RTX 5090) -- a 5090 needs torch
+#   >=2.7/cu128, which would force a different python/skgeom build and revalidation.
+#   Pick a 3090 or 4090 unless you are prepared to rebuild this env.
+name: MLAG
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pytorch=2.4.1
+  - pytorch-cuda=11.8
+  - numpy=1.26
+  - scikit-geometry=0.1.2
+  - tqdm
+  - matplotlib-base
+  - python-dotenv

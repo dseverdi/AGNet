@@ -49,19 +49,29 @@
 #   default sequential form instead -- concurrent seeds on one GPU will contend
 #   for memory and be slower than running them one after another.
 #
-# OTHER SPEED LEVERS (in rough order of value)
-#   * PO_BATCH   -- rollout decoding is latency-bound, so a larger batch is
-#                   close to free until the GPU saturates. Default 128 here.
-#                   Try PO_BATCH=256 if memory allows; drop to 64 on OOM.
-#   * PO_EPOCHS  -- the released policy's best checkpoint was epoch 114 of 200,
-#                   so 200 is likely more than needed. Shortening changes the
-#                   recipe, but since the claim is within-policy that is
-#                   defensible if every seed uses the same value.
-#   * AMP        -- already on by default on CUDA (po_agp.py resolves use_amp
-#                   to True when device.type == "cuda"); nothing to enable.
-#   * PO_EVAL_K  -- per-epoch eval costs PO_EVAL_K*K extra decodes per epoch
-#                   (200*8 against 8000*8 of training, so only ~2%). Lowering
-#                   it is a marginal win; left at 200 for comparability.
+# THE RECIPE COMES FROM --config, NOT FROM THIS SCRIPT
+#   All hyperparameters are read from configs/po_agp_transformer_bt.json, the
+#   file the released run actually used (its checkpoint records the path). Do
+#   not re-specify them here. To depart from the recipe on purpose, set a
+#   PO_*_OVERRIDE env var, which is passed on the command line and so wins over
+#   the config:
+#     PO_EPOCHS_OVERRIDE  PO_BATCH_OVERRIDE  PO_LR_OVERRIDE  PO_PATIENCE_OVERRIDE
+#
+# SPEED / MEMORY
+#   * The decode is vectorised (see models.py apply_mask_to_logits and the
+#     use_fast path): ~4.4x end-to-end vs the old per-sample .item() loops,
+#     verified bit-identical by tools/smoke_fast_decode.py. AGNET_LEGACY_DECODE=1
+#     and AGNET_LEGACY_REWARD=1 revert the two optimisations independently.
+#   * The recipe's nominal batch_size is 32 but its EFFECTIVE batch was 10,
+#     because bucket_size was hardcoded to 10 when it was trained (see the
+#     bucket note further down). An 8 GiB card is therefore sufficient; raising
+#     AGNET_BUCKET_SIZE to make the batch really 32 is a DEPARTURE from the
+#     published run, not a free speed knob.
+#   * AMP is OFF in this recipe. po_agp.py defaults use_amp to True on CUDA,
+#     but only when it is left unset -- the released config sets
+#     "use_amp": false explicitly, so the seeds train without it. Turning it on
+#     would depart from the recipe, and would buy little anyway: the step is
+#     CPU/decode-latency-bound, with only ~7% real GPU compute.
 #
 # RUN --smoke FIRST. It exercises all five phases with 2 epochs so a broken path
 # or missing dependency surfaces in minutes rather than after hours of training.
@@ -87,8 +97,9 @@ trap 'rc=$?; {
   echo "############################################################"
   echo "# FAILED (exit $rc) at line $LINENO: ${BASH_COMMAND%% *}"
   echo "#"
-  echo "# If this was CUDA OOM: lower PO_BATCH (and AGNET_BUCKET_SIZE"
-  echo "#   follows it automatically), e.g. PO_BATCH=16. Also check no"
+  echo "# If this was CUDA OOM: lower the batch with PO_BATCH_OVERRIDE"
+  echo "#   (AGNET_BUCKET_SIZE follows it automatically), e.g."
+  echo "#   PO_BATCH_OVERRIDE=10 on an 8 GiB card. Also check no"
   echo "#   orphaned python process is holding the GPU:"
   echo "#     nvidia-smi --query-compute-apps=pid,used_memory --format=csv"
   echo "# If it was ModuleNotFoundError: torch, set PYTHON explicitly."
@@ -144,6 +155,31 @@ if ! "$PYTHON" -c 'import torch' 2>/dev/null; then
     exit 1
 fi
 
+# A CPU-only torch imports fine and then trains ~20x slower, silently, for
+# days -- the single most expensive way for this script to "work". Auto-picking
+# $CONDA_PREFIX can easily land on a base env whose torch has no CUDA, so
+# require a visible GPU up front. ALLOW_CPU=1 to override deliberately.
+if [[ "${ALLOW_CPU:-0}" != "1" ]]; then
+    if ! "$PYTHON" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+        {
+            echo "ERROR: '$PYTHON' has torch but NO CUDA device."
+            "$PYTHON" - <<'PY' 2>/dev/null || true
+import torch
+print(f"       torch {torch.__version__}, cuda.is_available()=False, "
+      f"device_count={torch.cuda.device_count()}")
+print(f"       built with CUDA: {torch.version.cuda}")
+PY
+            echo "       Training on CPU takes ~20x longer. Fix the interpreter"
+            echo "       (PYTHON=/path/to/envs/MLAG/bin/python) or check the driver:"
+            echo "         nvidia-smi"
+            echo "       If NVML fails while nvidia-smi lists a healthy GPU, the"
+            echo "       driver state needs a reset/reboot (root)."
+            echo "       To train on CPU anyway: ALLOW_CPU=1"
+        } >&2
+        exit 1
+    fi
+fi
+
 # ----------------------------------------------------------------------- flags
 DRY_RUN=0
 SMOKE=0
@@ -165,60 +201,94 @@ for arg in "$@"; do
 done
 [[ ${#SEEDS[@]} -eq 0 ]] && SEEDS=(11 22 33)
 
-# Released-policy hyperparameters, recovered from
-# checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt -> checkpoint_params.
-# Do not change these: the whole point is that the new policies differ from the
-# released one ONLY in random seed.
-# Epoch budget: the released policy's best checkpoint was epoch 114/200, so
-# epochs past ~120 produced nothing better. We cap at 130 (safe margin) and add
-# early stopping, so a seed halts once its train composite (coverage - guard
-# ratio) plateaus. best-so-far is always checkpointed, so capping/stopping only
-# bounds the search; it cannot discard a better checkpoint. ~35% faster than 200.
-# Override with PO_EPOCHS=200 PO_PATIENCE=0 for the exact released recipe.
-PO_EPOCHS="${PO_EPOCHS:-130}"
-PO_PATIENCE="${PO_PATIENCE:-20}"
-PO_ROLLOUTS=8
-PO_ALPHA=0.05
-PO_LOSS=bt
-PO_LAMBDA=1.0
-PO_TAU=0.99
-PO_TAU_PEN=3.0
-PO_TRAIN_SIZE=8000
-# Batch size is NOT recorded in the released checkpoint (checkpoint_params has
-# only the model/reward hyperparameters), so it cannot be matched exactly in any
-# case. Raising it is safe here because the claim under test is a WITHIN-policy
-# contrast -- each policy is compared against its own no-encoder ablation -- so
-# hyperparameter drift across policies does not threaten it, provided all seeds
-# use the same value. Rollout decoding is latency-bound (K=8 sequential LSTM
-# decodes), so a bigger batch buys parallelism per sequential step almost for
-# free until the GPU saturates. Override with PO_BATCH=... if you hit OOM.
-PO_BATCH="${PO_BATCH:-10}"
-PO_LR="${PO_LR:-2e-4}"
+# ---------------------------------------------------------------------------
+# Released-policy recipe: ONE source of truth.
+#
+# The released run recorded the config file it used --
+# checkpoints/v3/po_agp/lstm_bt/po_agp_final_epoch200.pt -> args['config'] ==
+# 'configs/po_agp_transformer_bt.json' -- and its saved args match that file.
+# So we pass --config and override ONLY --seed and --checkpoint-dir. Any
+# hyperparameter re-specified here as a shell default is a chance to drift from
+# the published recipe; earlier versions of this script did exactly that and
+# silently differed on SIX values (batch 10 vs 32, lr 2e-4 vs 3e-4, schedule
+# none vs cosine, cap_coverage true vs false -- which changes the REWARD
+# FUNCTION -- patience 20 vs 40, epoch_eval_k 200 vs 50).
+#
+# NOTE the config's "model_type": "transformer" key is inert: model_type no
+# longer exists anywhere in po_agp.py, which always builds the LSTM PointerNet
+# (create_agp_model). There is no --model-type flag. So --config alone gives
+# the released LSTM policy.
+PO_CONFIG="${PO_CONFIG:-configs/po_agp_transformer_bt.json}"
+if [[ ! -f "$PO_CONFIG" ]]; then
+    echo "[fatal] recipe config '$PO_CONFIG' not found" >&2
+    exit 1
+fi
 
+# Pull the few values the SCRIPT itself needs (ETA display, bucket sizing,
+# manifest) straight out of the config, so they can never disagree with what
+# po_agp.py actually trains with.
+cfg_get() { "$PYTHON" -c "import json,sys;print(json.load(open('$PO_CONFIG')).get(sys.argv[1],''))" "$1"; }
+PO_EPOCHS="${PO_EPOCHS:-$(cfg_get epochs)}"
+PO_BATCH="${PO_BATCH:-$(cfg_get batch_size)}"
+PO_TRAIN_SIZE="${PO_TRAIN_SIZE:-$(cfg_get train_size)}"
+PO_DISC_VIS="${PO_DISC_VIS:-$(cfg_get disc_vis_samples)}"
+# Reward/loss settings. po_agp.py receives these via --config; they are read
+# here only so the LS-trajectory phase (which must score with the SAME reward
+# as training) and the run manifest stay in lockstep with the recipe.
+PO_ROLLOUTS="$(cfg_get num_rollouts)"
+PO_ALPHA="$(cfg_get alpha)"
+PO_LOSS="$(cfg_get preference_loss)"
+PO_LAMBDA="$(cfg_get reward_lambda)"
+PO_TAU="$(cfg_get coverage_threshold)"
+PO_TAU_PEN="$(cfg_get tau_penalty)"
+PO_LR="$(cfg_get lr)"
+PO_PATIENCE="$(cfg_get early_stop_patience)"
+PO_EVAL_K="$(cfg_get epoch_eval_k)"
+
+# Optional overrides. These are EMPTY by default so the config wins; set the
+# env var only if you deliberately want to depart from the published recipe.
+# (po_agp.py's config loader applies a config value only when the flag was not
+# given on the command line, so anything passed here takes precedence.)
+PO_OVERRIDES=()
+[[ -n "${PO_EPOCHS_OVERRIDE:-}" ]] && PO_OVERRIDES+=(--epochs "$PO_EPOCHS_OVERRIDE")
+[[ -n "${PO_BATCH_OVERRIDE:-}"  ]] && PO_OVERRIDES+=(--batch-size "$PO_BATCH_OVERRIDE")
+[[ -n "${PO_LR_OVERRIDE:-}"     ]] && PO_OVERRIDES+=(--lr "$PO_LR_OVERRIDE")
+[[ -n "${PO_PATIENCE_OVERRIDE:-}" ]] && PO_OVERRIDES+=(--early-stop-patience "$PO_PATIENCE_OVERRIDE")
+# Keep the display/bucket values consistent with an explicit override.
+PO_EPOCHS="${PO_EPOCHS_OVERRIDE:-$PO_EPOCHS}"
+PO_BATCH="${PO_BATCH_OVERRIDE:-$PO_BATCH}"
+
+# THE RELEASED RUN'S EFFECTIVE BATCH WAS 10, NOT 32.
+#
 # po_agp.py batches via BucketBatchSampler, which chunks length-sorted indices
-# into buckets and only then splits each bucket by batch_size. With bucket_size
-# = 10 any larger --batch-size is INERT: every bucket yields one batch of 10.
+# into buckets of bucket_size and only THEN splits each bucket by batch_size.
+# So batch_size > bucket_size is INERT: a bucket of 10 split by 32 yields one
+# batch of 10.
 #
-# That cap is a MEMORY constraint, not an oversight. A PO step decodes
-# batch*K sequences autoregressively and holds the graph across all decode
-# steps, so peak memory grows steeply with polygon size. Measured at the
-# worst-case training polygon (n=198, K=8) on a 7.57 GiB RTX 2080 SUPER:
-#     batch  8 -> 3.82 GiB      batch 12 -> 5.70 GiB
-#     batch 10 -> 4.61 GiB      batch 16 -> OOM
-# So 10 is about the ceiling on an 8 GiB card, and the ~73 min/epoch
-# (~10 days per 200-epoch seed) that implies is inherent to that hardware.
+# When the released policy was trained, bucket_size was HARDCODED to 10 (see
+# `git show 8592243^:po_agp.py`, the commit that introduced AGNET_BUCKET_SIZE).
+# Its config therefore says batch_size 32 while the run actually stepped on
+# batches of 10. Config value != effective value.
 #
-# The defaults below therefore reproduce the released recipe and are SAFE on
-# 8 GiB. On a larger card raise BOTH together -- bucket_size must be >=
-# batch_size or the batch is silently capped. Size it for the target machine:
-#     python tools/probe_max_batch.py
-# Roughly batch ~= 1.8 * (GPU GiB). Note the speedup is sub-linear: decoding is
-# latency-bound, so k times fewer steps is not k times faster. Changing the
-# batch also changes optimisation (fewer, larger gradient steps); that is
-# acceptable for a within-policy contrast provided every seed uses one value.
-export AGNET_BUCKET_SIZE="${AGNET_BUCKET_SIZE:-$PO_BATCH}"
-PO_EVAL_K=200
-PO_DISC_VIS=500
+# Consequence: leaving AGNET_BUCKET_SIZE at its default of 10 reproduces the
+# released data pipeline exactly, and RAISING it to 32 would depart from the
+# published run rather than match it. That is why we do NOT tie the bucket to
+# batch_size here. It also means the replication fits comfortably on an 8 GiB
+# card -- no >=24 GB GPU is required.
+: "${AGNET_BUCKET_SIZE:=10}"
+export AGNET_BUCKET_SIZE
+if [[ "$AGNET_BUCKET_SIZE" != "10" ]]; then
+    echo "[warn] AGNET_BUCKET_SIZE=$AGNET_BUCKET_SIZE (released run used 10)."
+    echo "       Effective batch becomes min(batch_size, $AGNET_BUCKET_SIZE);"
+    echo "       this DEPARTS from the published recipe."
+fi
+
+# MEMORY at the effective batch: a PO step decodes batch*K sequences
+# autoregressively and holds the graph across all decode steps, so peak grows
+# steeply with polygon size. Measured on a 7.57 GiB RTX 2080 SUPER:
+# batch 8 -> 3.82 GiB, 10 -> 4.61 GiB, 12 -> 5.70 GiB, 16 -> OOM (and an
+# effective batch of 32 or 64 OOMs at ~7.4 GiB). Size a new machine with:
+#   python tools/probe_max_batch.py
 
 # Reward is discretised visibility (--fast-reward), matching the released policy:
 # the lstm_bt config was never committed, but its same-era sibling
@@ -286,11 +356,15 @@ if [[ $SMOKE -eq 1 ]]; then
     # minutes. The carve must then tolerate missing reference polygons.
     TRAJ_N=200
     CARVE_STRICT=0
-    PO_EPOCHS=2
     PROBE_EPOCHS=2
+    SEEDS=(99)
+    # These must go through PO_OVERRIDES: the recipe now comes from --config,
+    # so plain shell assignments would change only the ETA display while
+    # po_agp.py still trained the full 200-epoch recipe.
+    PO_EPOCHS=2
     PO_TRAIN_SIZE=256
     PO_EVAL_K=30
-    SEEDS=(99)
+    PO_OVERRIDES+=(--epochs 2 --train-size 256 --epoch-eval-k 30)
 fi
 
 # Full splits and strict carve unless --smoke overrides them.
@@ -351,23 +425,14 @@ train_policy_with_eta() {
         return 0
     fi
 
+    # Everything except the seed, the output dir and the cache comes from
+    # --config, so this run cannot drift from the released recipe. Deliberate
+    # departures go through the PO_*_OVERRIDE env vars (see the recipe block).
     stdbuf -oL -eL "$PYTHON" po_agp.py \
-        --epochs "$PO_EPOCHS" \
+        --config "$PO_CONFIG" \
         --seed "$seed" \
-        --num-rollouts "$PO_ROLLOUTS" \
-        --alpha "$PO_ALPHA" \
-        --preference-loss "$PO_LOSS" \
-        --reward-lambda "$PO_LAMBDA" \
-        --coverage-threshold "$PO_TAU" \
-        --tau-penalty "$PO_TAU_PEN" \
-        --fast-reward --disc-vis-samples "$PO_DISC_VIS" \
         ${DISC_VIS_CACHE:+--disc-vis-cache-path "$DISC_VIS_CACHE"} \
-        --train-size "$PO_TRAIN_SIZE" \
-        --batch-size "$PO_BATCH" \
-        --lr "$PO_LR" \
-        --epoch-eval-k "$PO_EVAL_K" \
-        --early-stop-patience "$PO_PATIENCE" \
-        --skip-finetune \
+        "${PO_OVERRIDES[@]}" \
         "${resume_flag[@]}" \
         --checkpoint-dir "$ckpt_dir" 2>&1 \
     | stdbuf -oL awk -v total="$PO_EPOCHS" -v start="$(date +%s)" '
@@ -395,6 +460,8 @@ echo "============================================================"
 echo "  policy-seed replication"
 echo "  seeds        : ${SEEDS[*]}"
 echo "  policy epochs: $PO_EPOCHS   probe epochs: $PROBE_EPOCHS"
+echo "  batch        : ${PO_BATCH} nominal / bucket ${AGNET_BUCKET_SIZE}"\
+" -> effective $(( PO_BATCH < AGNET_BUCKET_SIZE ? PO_BATCH : AGNET_BUCKET_SIZE ))"
 echo "  python       : $PYTHON  ($("$PYTHON" -c 'import sys; print(sys.executable)'))"
 echo "  torch/cuda   : $("$PYTHON" -c 'import torch; print(torch.__version__, "cuda="+str(torch.cuda.is_available()))')"
 echo "  dataset      : $DATASET_ROOT"
@@ -538,10 +605,17 @@ for S in "${SEEDS[@]}"; do
   "seconds_policy_training": ${T_POLICY},
   "seconds_total": ${T_TOTAL},
   "hyperparams": {
+    "config": "${PO_CONFIG}",
+    "overrides": "${PO_OVERRIDES[*]-}",
     "num_rollouts": ${PO_ROLLOUTS}, "alpha": ${PO_ALPHA},
     "preference_loss": "${PO_LOSS}", "reward_lambda": ${PO_LAMBDA},
     "tau": ${PO_TAU}, "tau_penalty": ${PO_TAU_PEN},
-    "train_size": ${PO_TRAIN_SIZE}, "batch_size": ${PO_BATCH}
+    "lr": ${PO_LR}, "epochs": ${PO_EPOCHS},
+    "early_stop_patience": ${PO_PATIENCE}, "epoch_eval_k": ${PO_EVAL_K},
+    "train_size": ${PO_TRAIN_SIZE},
+    "batch_size_nominal": ${PO_BATCH},
+    "bucket_size": ${AGNET_BUCKET_SIZE},
+    "batch_size_effective": $(( PO_BATCH < AGNET_BUCKET_SIZE ? PO_BATCH : AGNET_BUCKET_SIZE ))
   },
   "artifacts": {
     "policy": "${POL_CKPT}",

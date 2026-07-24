@@ -131,8 +131,9 @@ def e2e_test(model, device):
     return ok
 
 
-def reward_test(model, device):
-    print("== (C) batched disc-vis reward vs per-call scalar reward ==")
+def reward_test(model, device, cap_at_tau=False):
+    print(f"== (C) batched disc-vis reward vs per-call scalar "
+          f"(cap_at_tau={cap_at_tau}) ==")
     from po_agp import po_reward_smooth_disc, po_rewards_smooth_disc_batch
     dp = os.getenv("DATASET_PATH")
     tr, _ = prepare_datasets(os.path.join(dp, "train"),
@@ -141,7 +142,11 @@ def reward_test(model, device):
     loader = torch.utils.data.DataLoader(ds, batch_size=10, shuffle=False,
                                          collate_fn=collate_fn)
     K = 8
-    rp = dict(lam=1.0, tau=0.99, tau_penalty=3.0, cap_at_tau=True, n_samples=500)
+    # cap_at_tau=False is what the RELEASED recipe uses
+    # (configs/po_agp_transformer_bt.json -> "cap_coverage": false), so it is
+    # the default here; True is checked too since other configs set it.
+    rp = dict(lam=1.0, tau=0.99, tau_penalty=3.0, cap_at_tau=cap_at_tau,
+              n_samples=500)
     ok = True
     t_loop = t_batch = 0.0
     max_abs = 0.0
@@ -188,6 +193,51 @@ def reward_test(model, device):
     return ok and max_abs < 1e-6
 
 
+def edge_case_reward_test(device):
+    """Degenerate solutions the random-rollout gate is unlikely to produce.
+
+    Real rollouts are masked against re-selection and pre-filtered to < n, so
+    empty / duplicate / out-of-range solutions almost never appear in gate (C).
+    They CAN arise (a policy that emits EOS immediately yields an empty
+    solution), and the batched path handles them on separate code paths from
+    the scalar one, so they are checked explicitly.
+    """
+    print("== (D) degenerate solutions: empty / duplicate / out-of-range ==")
+    from po_agp import po_reward_smooth_disc, po_rewards_smooth_disc_batch
+    dp = os.getenv("DATASET_PATH")
+    tr, _ = prepare_datasets(os.path.join(dp, "train"),
+                             os.path.join(dp, "dev"), normalize=True)
+    ds = Dataset(tr.samples[:4])
+    loader = torch.utils.data.DataLoader(ds, batch_size=2, shuffle=False,
+                                         collate_fn=collate_fn)
+    bd, pm, lens, names = next(iter(loader))
+    B = bd.shape[0]
+    n0, n1 = int(lens[0]), int(lens[1])
+    K = 4
+    # per polygon: empty, single guard, duplicated guard, first-three guards
+    sols = []
+    for b, n in enumerate((n0, n1)):
+        sols += [[], [0], [0, 0], list(range(min(3, n)))]
+    pts = [bd[b, :int(lens[b])].cpu().numpy() for b in range(B)]
+    ok = True
+    for cap in (False, True):
+        rp = dict(lam=1.0, tau=0.99, tau_penalty=3.0, cap_at_tau=cap, n_samples=500)
+        r_loop = [po_reward_smooth_disc(pts[i // K], sols[i], names[i // K],
+                                        length=int(lens[i // K]), **rp)
+                  for i in range(B * K)]
+        r_batch = po_rewards_smooth_disc_batch(
+            pts, list(names), [int(x) for x in lens], sols, K=K, device=device, **rp)
+        d = max(abs(a - b) for a, b in zip(r_loop, r_batch))
+        tag = "OK " if d < 1e-6 else "FAIL"
+        print(f"  {tag} cap_at_tau={cap!s:5} max|Δ|={d:.2e}")
+        if d >= 1e-6:
+            ok = False
+            for i, (x, y) in enumerate(zip(r_loop, r_batch)):
+                if abs(x - y) >= 1e-6:
+                    print(f"    sol={sols[i]!r}: scalar={x:.6f} batched={y:.6f}")
+    return ok
+
+
 def main():
     if not os.getenv("DATASET_PATH"):
         sys.exit("DATASET_PATH must be set")
@@ -198,8 +248,12 @@ def main():
     model.eval()
     a = unit_test(model, device)
     b = e2e_test(model, device)
-    c = reward_test(model, device)
-    allok = a and b and c
+    # Both reward regimes: cap_at_tau=False is the released recipe, True is
+    # used by other configs. The batched path must match the scalar in both.
+    c = reward_test(model, device, cap_at_tau=False)
+    c2 = reward_test(model, device, cap_at_tau=True)
+    d = edge_case_reward_test(device)
+    allok = a and b and c and c2 and d
     print("\n" + ("ALL PASS — fast decode + batched reward match baseline" if allok
                   else "FAILED — do NOT use the optimised path"))
     sys.exit(0 if allok else 1)
