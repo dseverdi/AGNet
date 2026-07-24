@@ -2125,6 +2125,26 @@ def po_train(
             eval_metrics = epoch_eval_fn(actual_epoch)
             model.train()
 
+        # -- persist per-epoch training dynamics (append-only JSONL) --
+        # The released policy's per-epoch curve was lost, so Fig. training-
+        # dynamics had to be reconstructed from 4 checkpoints (Limitation 11).
+        # Recording it live turns that into a real curve. Append mode so the
+        # log survives --resume-from; each line is one epoch.
+        if checkpoint_dir:
+            rec = {"epoch": actual_epoch,
+                   "train_loss": float(avg_loss),
+                   "best_reward_mean": float(avg_best)}
+            if isinstance(eval_metrics, dict):
+                rec.update({k: v for k, v in eval_metrics.items()
+                            if isinstance(v, (int, float)) or v is None})
+            try:
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                with open(os.path.join(checkpoint_dir, "training_dynamics.jsonl"),
+                          "a") as _f:
+                    _f.write(json.dumps(rec) + "\n")
+            except Exception as _e:
+                print(f"  [warn] could not write training_dynamics.jsonl: {_e}")
+
         # -- early stopping (optional) --
         if early_stop_patience > 0:
             if isinstance(eval_metrics, dict):
@@ -4990,7 +5010,10 @@ def main() -> None:
                     vprint(f"  [resume] unexpected keys: {len(unexpected)} (ignored)")
             start_epoch = int(ckpt.get("epoch", 0))
             resume_optimizer_state = ckpt.get("optimizer_state_dict", None)
-        vprint(f"  -> resumed at epoch {start_epoch}")
+        # Unconditional (not vprint): on an unattended remote run the resume
+        # point is the one thing you must be able to confirm from the log.
+        print(f"[resume] continuing from epoch {start_epoch} "
+              f"(checkpoint: {args.resume_from})")
 
     # -- reward function --
     lam     = args.reward_lambda

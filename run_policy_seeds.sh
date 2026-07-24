@@ -169,7 +169,14 @@ done
 # checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt -> checkpoint_params.
 # Do not change these: the whole point is that the new policies differ from the
 # released one ONLY in random seed.
-PO_EPOCHS=200
+# Epoch budget: the released policy's best checkpoint was epoch 114/200, so
+# epochs past ~120 produced nothing better. We cap at 130 (safe margin) and add
+# early stopping, so a seed halts once its train composite (coverage - guard
+# ratio) plateaus. best-so-far is always checkpointed, so capping/stopping only
+# bounds the search; it cannot discard a better checkpoint. ~35% faster than 200.
+# Override with PO_EPOCHS=200 PO_PATIENCE=0 for the exact released recipe.
+PO_EPOCHS="${PO_EPOCHS:-130}"
+PO_PATIENCE="${PO_PATIENCE:-20}"
 PO_ROLLOUTS=8
 PO_ALPHA=0.05
 PO_LOSS=bt
@@ -304,10 +311,43 @@ run() {
 # --------------------------------------------------------------- ETA reporting
 # po_agp.py prints "[epoch N] ..." with no timing. We prefix each line with
 # elapsed seconds, then project the finish from the mean inter-epoch interval.
+# Return the path of the highest-epoch periodic checkpoint in $1, or empty.
+# po_agp.py writes po_agp_epoch<N>.pt every 5 epochs WITH optimizer state, so
+# any of them is a valid --resume-from point.
+#
+# Pure bash, no pipeline: an `ls *.pt | ...` here would exit non-zero on an
+# empty dir, and under `set -euo pipefail` that abort propagates through
+# resume="$(latest_periodic_ckpt ...)" and kills the whole script BEFORE
+# training starts. The loop below simply prints nothing for an empty dir and
+# always returns 0.
+latest_periodic_ckpt() {
+    local dir="$1" f n best=-1 latest=""
+    shopt -s nullglob
+    for f in "$dir"/po_agp_epoch*.pt; do
+        n="${f##*po_agp_epoch}"; n="${n%.pt}"
+        [[ "$n" =~ ^[0-9]+$ ]] || continue
+        if (( n > best )); then best="$n"; latest="$f"; fi
+    done
+    shopt -u nullglob
+    printf '%s' "$latest"
+}
+
 train_policy_with_eta() {
     local seed="$1" ckpt_dir="$2" log="$3"
+
+    # Resume from the newest periodic checkpoint if one exists. This makes an
+    # interrupted multi-day run cost at most the last <5 epochs rather than the
+    # whole seed -- essential on a rented box (99% reliability over days => a
+    # real chance of one eviction).
+    local resume="" resume_flag=()
+    resume="$(latest_periodic_ckpt "$ckpt_dir")"
+    if [[ -n "$resume" ]]; then
+        resume_flag=(--resume-from "$resume")
+        echo "  [resume] found $resume -> continuing that run"
+    fi
+
     if [[ $DRY_RUN -eq 1 ]]; then
-        echo "+ (policy training, seed=$seed, ${PO_EPOCHS} epochs) -> $ckpt_dir"
+        echo "+ (policy training, seed=$seed, ${PO_EPOCHS} epochs${resume:+, resume from $resume}) -> $ckpt_dir"
         return 0
     fi
 
@@ -326,7 +366,9 @@ train_policy_with_eta() {
         --batch-size "$PO_BATCH" \
         --lr "$PO_LR" \
         --epoch-eval-k "$PO_EVAL_K" \
+        --early-stop-patience "$PO_PATIENCE" \
         --skip-finetune \
+        "${resume_flag[@]}" \
         --checkpoint-dir "$ckpt_dir" 2>&1 \
     | stdbuf -oL awk -v total="$PO_EPOCHS" -v start="$(date +%s)" '
         {
@@ -378,8 +420,13 @@ for S in "${SEEDS[@]}"; do
     T_START=$(date +%s)
 
     # -- phase 1: train the policy (dominant cost) ---------------------------
-    if [[ -e "$POL_CKPT" ]]; then
-        echo "[skip] phase 1 — $POL_CKPT exists"
+    # DONE is keyed on the FINAL-epoch checkpoint, not po_agp_best_greedy.pt.
+    # best_greedy.pt is written mid-run (best-so-far), so keying the skip on it
+    # would treat a half-trained/interrupted policy as complete. The final
+    # checkpoint is written only when training reaches PO_EPOCHS.
+    POL_DONE="${POL_DIR}/po_agp_final_epoch${PO_EPOCHS}.pt"
+    if [[ -e "$POL_DONE" ]]; then
+        echo "[skip] phase 1 — completed policy exists ($POL_DONE)"
     else
         echo "--- phase 1/5: PO/BT policy training (${PO_EPOCHS} epochs) ---"
         mkdir -p "$POL_DIR"
