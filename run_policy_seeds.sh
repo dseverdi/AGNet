@@ -228,7 +228,18 @@ fi
 # manifest) straight out of the config, so they can never disagree with what
 # po_agp.py actually trains with.
 cfg_get() { "$PYTHON" -c "import json,sys;print(json.load(open('$PO_CONFIG')).get(sys.argv[1],''))" "$1"; }
-PO_EPOCHS="${PO_EPOCHS:-$(cfg_get epochs)}"
+# Epoch budget: DELIBERATELY 150, not the config's 200. The released seed's
+# best checkpoint was epoch 114/200 (po_agp_best_greedy.pt -> epoch 114), so
+# 115-200 improved nothing in that run, and early_stop_patience=40 means a
+# similarly-behaved seed halts itself near ~154 regardless of this cap. 150
+# keeps that safety margin while skipping ~13h/seed of the released run's
+# unproductive tail. This is a recorded DEPARTURE from the published 200 (see
+# the manifest's "epochs"/"overrides" fields) -- not a free lunch. If a seed's
+# training_dynamics.jsonl shows its best epoch landing at/near the cap, that
+# seed was truncated and should be resumed with PO_EPOCHS_OVERRIDE=200.
+# Override per-seed with PO_EPOCHS_OVERRIDE=<n> (e.g. =200 for the exact
+# released recipe); override this default itself with PO_EPOCHS=<n>.
+PO_EPOCHS="${PO_EPOCHS:-150}"
 PO_BATCH="${PO_BATCH:-$(cfg_get batch_size)}"
 PO_TRAIN_SIZE="${PO_TRAIN_SIZE:-$(cfg_get train_size)}"
 PO_DISC_VIS="${PO_DISC_VIS:-$(cfg_get disc_vis_samples)}"
@@ -459,7 +470,10 @@ train_policy_with_eta() {
 echo "============================================================"
 echo "  policy-seed replication"
 echo "  seeds        : ${SEEDS[*]}"
-echo "  policy epochs: $PO_EPOCHS   probe epochs: $PROBE_EPOCHS"
+cfg_epochs="$(cfg_get epochs)"
+epoch_note=""
+[[ "$PO_EPOCHS" != "$cfg_epochs" ]] && epoch_note="  (config recipe: ${cfg_epochs}; this is a recorded departure)"
+echo "  policy epochs: $PO_EPOCHS   probe epochs: $PROBE_EPOCHS${epoch_note}"
 echo "  batch        : ${PO_BATCH} nominal / bucket ${AGNET_BUCKET_SIZE}"\
 " -> effective $(( PO_BATCH < AGNET_BUCKET_SIZE ? PO_BATCH : AGNET_BUCKET_SIZE ))"
 echo "  python       : $PYTHON  ($("$PYTHON" -c 'import sys; print(sys.executable)'))"
