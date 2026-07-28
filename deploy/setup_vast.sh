@@ -52,6 +52,16 @@ else
 fi
 export PATH="$CONDA_DIR/bin:$PATH"
 
+# Recent conda (>=24.x installers) refuses to solve against Anaconda's default
+# channels until their Terms of Service are accepted non-interactively -- a
+# fresh miniconda install otherwise hard-fails here with
+# CondaToSNonInteractiveError before installing anything. Accept once; a no-op
+# on conda versions that don't require it.
+"$CONDA_DIR/bin/conda" tos accept --override-channels \
+    --channel https://repo.anaconda.com/pkgs/main >/dev/null 2>&1 || true
+"$CONDA_DIR/bin/conda" tos accept --override-channels \
+    --channel https://repo.anaconda.com/pkgs/r >/dev/null 2>&1 || true
+
 # --- 3. environment ---------------------------------------------------------
 if ! "$CONDA_DIR/bin/conda" env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
     echo "--- creating env '$ENV_NAME' (this takes several minutes) ---"
@@ -64,8 +74,24 @@ else
     echo "--- env '$ENV_NAME' already exists ---"
 fi
 
-PYTHON="$CONDA_DIR/envs/$ENV_NAME/bin/python"
-[[ -x "$PYTHON" ]] || { echo "[fatal] $PYTHON missing after env create" >&2; exit 1; }
+# Don't assume envs live under $CONDA_DIR/envs -- some images (this vast.ai
+# base image included) set envs_dirs in .condarc (here: /venv), so
+# `conda env create -n MLAG` can land the env at e.g. /venv/MLAG instead.
+# Ask conda where it actually put it rather than guessing the path.
+ENV_PREFIX="$("$CONDA_DIR/bin/conda" env list --json | \
+    "$CONDA_DIR/bin/python" -c "
+import json, sys
+envs = json.load(sys.stdin)['envs']
+match = [e for e in envs if e.rsplit('/', 1)[-1] == '$ENV_NAME']
+print(match[0] if match else '')
+")"
+PYTHON="$ENV_PREFIX/bin/python"
+[[ -n "$ENV_PREFIX" && -x "$PYTHON" ]] || {
+    echo "[fatal] could not locate '$ENV_NAME' env's python (looked via" >&2
+    echo "        'conda env list --json'; got prefix='$ENV_PREFIX')" >&2
+    exit 1
+}
+echo "--- env '$ENV_NAME' resolved to $ENV_PREFIX ---"
 
 # --- 4. verify the two imports that actually gate the run -------------------
 echo "--- verifying interpreter ---"

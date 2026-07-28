@@ -329,9 +329,22 @@ def main() -> None:
     print(f"  SetPredictor sweep  ({summary['n_polygons']} polygons, wall {summary['wall_s']:.0f}s)")
     print("=" * 70)
     seed = summary["seed"]
-    opt_s = f"{seed['opt']:.4f}" if seed['opt'] is not None else "  —  "
-    print(f"  seed  cov={seed['cov']:.4f}  |S|/n={seed['chv']:.4f}  "
-          f"|S|/OPT={opt_s}")
+    # Guard every field, not just opt: with an EMPTY val-traj (0 polygons) all
+    # of these means are None and an unguarded f-string format raises
+    # "TypeError: unsupported format string passed to NoneType.__format__".
+    # That is exactly how a --smoke run died on 2026-07-25: the smoke carve
+    # sampled 200 polygons, none landed in the 362-polygon test reference, so
+    # out-test had 0 records and the whole pipeline crashed HERE -- after
+    # training had already succeeded. Real runs always have a populated test
+    # split, so this only ever bites smoke, but it reads like a regression.
+    def _f(v, w=4):
+        return f"{v:.{w}f}" if v is not None else "  —  "
+    if not summary["n_polygons"]:
+        print("  [warn] 0 polygons in --val-traj: nothing to evaluate.")
+        print("         (a --smoke carve can legitimately yield an empty test"
+              " split; not a training failure)")
+    print(f"  seed  cov={_f(seed['cov'])}  |S|/n={_f(seed['chv'])}  "
+          f"|S|/OPT={_f(seed['opt'])}")
     if seed.get("dist"):
         d = seed["dist"]
         print(f"  seed dist: min cov={d['cov_min']:.4f}  "

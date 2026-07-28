@@ -228,7 +228,7 @@ fi
 # manifest) straight out of the config, so they can never disagree with what
 # po_agp.py actually trains with.
 cfg_get() { "$PYTHON" -c "import json,sys;print(json.load(open('$PO_CONFIG')).get(sys.argv[1],''))" "$1"; }
-# Epoch budget: DELIBERATELY 150, not the config's 200. The released seed's
+# Epoch budget: 200. The released seed's
 # best checkpoint was epoch 114/200 (po_agp_best_greedy.pt -> epoch 114), so
 # 115-200 improved nothing in that run, and early_stop_patience=40 means a
 # similarly-behaved seed halts itself near ~154 regardless of this cap. 150
@@ -239,7 +239,7 @@ cfg_get() { "$PYTHON" -c "import json,sys;print(json.load(open('$PO_CONFIG')).ge
 # seed was truncated and should be resumed with PO_EPOCHS_OVERRIDE=200.
 # Override per-seed with PO_EPOCHS_OVERRIDE=<n> (e.g. =200 for the exact
 # released recipe); override this default itself with PO_EPOCHS=<n>.
-PO_EPOCHS="${PO_EPOCHS:-150}"
+PO_EPOCHS="${PO_EPOCHS:-200}"
 PO_BATCH="${PO_BATCH:-$(cfg_get batch_size)}"
 PO_TRAIN_SIZE="${PO_TRAIN_SIZE:-$(cfg_get train_size)}"
 PO_DISC_VIS="${PO_DISC_VIS:-$(cfg_get disc_vis_samples)}"
@@ -261,7 +261,15 @@ PO_EVAL_K="$(cfg_get epoch_eval_k)"
 # (po_agp.py's config loader applies a config value only when the flag was not
 # given on the command line, so anything passed here takes precedence.)
 PO_OVERRIDES=()
-[[ -n "${PO_EPOCHS_OVERRIDE:-}" ]] && PO_OVERRIDES+=(--epochs "$PO_EPOCHS_OVERRIDE")
+# --epochs is NOT config-passthrough like the others below: PO_EPOCHS's own
+# default (200, see above) already departs from the config's 200, so it must
+# ALWAYS be passed explicitly -- po_agp.py's _apply_config_to_args only skips
+# a config value when the flag is literally present in argv, and relying on
+# PO_EPOCHS_OVERRIDE alone left the un-overridden (default) case silently
+# training at the config's 200 instead of 150. Found 2026-07-25 after seed22
+# and seed33 both trained a full 200-epoch run despite the script printing
+# "policy epochs: 150" in its own header the whole time.
+PO_OVERRIDES=(--epochs "${PO_EPOCHS_OVERRIDE:-$PO_EPOCHS}")
 [[ -n "${PO_BATCH_OVERRIDE:-}"  ]] && PO_OVERRIDES+=(--batch-size "$PO_BATCH_OVERRIDE")
 [[ -n "${PO_LR_OVERRIDE:-}"     ]] && PO_OVERRIDES+=(--lr "$PO_LR_OVERRIDE")
 [[ -n "${PO_PATIENCE_OVERRIDE:-}" ]] && PO_OVERRIDES+=(--early-stop-patience "$PO_PATIENCE_OVERRIDE")
@@ -375,7 +383,11 @@ if [[ $SMOKE -eq 1 ]]; then
     PO_EPOCHS=2
     PO_TRAIN_SIZE=256
     PO_EVAL_K=30
-    PO_OVERRIDES+=(--epochs 2 --train-size 256 --epoch-eval-k 30)
+    # PO_OVERRIDES already has --epochs "$PO_EPOCHS" from above (set before
+    # this block ran); argparse takes the LAST --epochs on the line, so
+    # appending here is correct, but replace rather than append to avoid two
+    # conflicting --epochs flags on principle.
+    PO_OVERRIDES=(--epochs 2 --train-size 256 --epoch-eval-k 30)
 fi
 
 # Full splits and strict carve unless --smoke overrides them.

@@ -1,0 +1,65 @@
+# AGNet / MLAG — pip dependencies for training & probe scripts
+# (po_agp.py, train_set_predictor.py, eval_set_predictor.py, utils.py, …)
+#
+# Python: 3.9–3.11 recommended (3.10 is fine on Vast). Not tested on 3.12+
+# for scikit-geometry.
+#
+# ---------------------------------------------------------------------------
+# Vast.ai / fresh GPU machine — recommended install order
+# ---------------------------------------------------------------------------
+# 1) System / conda: get scikit-geometry (import name: skgeom). It is NOT on
+#    PyPI in a usable form; use conda-forge:
+#
+#      conda install -c conda-forge scikit-geometry pybind11
+#
+#    Or create the full env from environment-vast.yml (preferred):
+#
+#      conda env create -f environment-vast.yml
+#      conda activate mlag
+#
+# 2) PyTorch with CUDA matching the instance image, e.g. CUDA 12.1 wheels:
+#
+#      pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121
+#
+#    Local MLAG used torch 2.4.1 + CUDA 11.8. On a CUDA 12.x Vast image, cu121
+#    or cu124 is usually right. Verify:
+#
+#      python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#
+# 3) Remaining pip deps from this file (torch already installed → skip reinstall):
+#
+#      pip install -r requirements.txt
+#
+# 4) Geometry check (hard fail if missing — visibility rewards need it):
+#
+#      python -c "import skgeom, torch; print('skgeom ok', skgeom.__version__); print('cuda', torch.cuda.is_available())"
+#
+# 5) Point data at the copied AGPIL root (not the spock path):
+#
+#      export DATASET_PATH=/workspace/dataset/AGPIL
+#      # or write a local .env with only DATASET_PATH=...
+#
+# ---------------------------------------------------------------------------
+# Core (required for po_agp / set predictor / disc-vis reward)
+# ---------------------------------------------------------------------------
+numpy>=1.24,<2.1
+matplotlib>=3.7
+tqdm>=4.66
+python-dotenv>=1.0
+Pillow>=9.0
+pybind11>=2.10
+
+# ---------------------------------------------------------------------------
+# Optional (results plots, paper scripts, some tools/*)
+# ---------------------------------------------------------------------------
+pandas>=2.0
+scipy>=1.10
+seaborn>=0.13
+networkx>=3.0
+
+# ---------------------------------------------------------------------------
+# NOT installable via this file
+# ---------------------------------------------------------------------------
+# torch          → install with CUDA index URL (step 2 above)
+# skgeom         → conda-forge package "scikit-geometry" (step 1 above)
+# vastai CLI     → optional; only needed on your laptop, not on the instance

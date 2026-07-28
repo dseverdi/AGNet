@@ -41,7 +41,31 @@ from train_set_predictor import SetPredDataset, make_batch
 from utils import evaluate_polygon_visibility_numpy_wo_gt
 
 PTR_CKPT = REPO_ROOT / "checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt"
-SETPRED_CKPT = REPO_ROOT / "checkpoints/set_predictor/standard/set_predictor_best.pt"
+
+# set_predictor_FINAL.pt, not _best.pt -- TEST-SET LEAK, fixed 2026-07-28.
+#
+# standard/set_predictor_best.pt was selected by validating on
+# data/ls_trajectories_dev.pkl -- the POOLED 1224-polygon dev file, which
+# CONTAINS all 362 polygons of the dev_test reporting split (confirmed from the
+# checkpoint's own saved args: val_traj='data/ls_trajectories_dev.pkl'). So the
+# published headline probe was chosen using the split it is reported on.
+#
+# Measured effect at t=0.20 on the 362-polygon dev_test split (exact CGAL):
+#                        best.pt (ep28, leaky)   final.pt (ep60, clean)
+#     full   |S|/OPT             2.8972                  1.5716
+#     noenc  |S|/OPT             2.5790                  2.7621
+# The leak INFLATED the reported full guard count by 1.84x and produced the
+# anomalous inversion where noenc appeared to beat full (2.579 < 2.897). Clean,
+# that inversion disappears: full beats noenc by 1.76x, consistent with every
+# other measurement (policy seeds 11/22 give 1.90x / 1.45x).
+#
+# CAVEAT for the write-up: final.pt is simply the LAST epoch -- no validation
+# selection at all. This is leak-free but must be described as "final epoch, no
+# validation selection", not as a selected checkpoint. A properly *selected*
+# leak-free probe would require retraining with --val-traj on the dev_TUNE
+# carve (857 polygons, disjoint from dev_test); the per-policy-seed runs in
+# run_policy_seeds.sh already do exactly that.
+SETPRED_CKPT = REPO_ROOT / "checkpoints/set_predictor/standard/set_predictor_final.pt"
 DEV_TEST_TRAJ = REPO_ROOT / "data/ls_trajectories_dev_test_clean.pkl"   # 362 (train-leak-free)
 TEST_TRAJ = REPO_ROOT / "data/ls_trajectories_test_clean.pkl"            # 2081 (train-leak-free)
 LARGE_TRAJ = REPO_ROOT / "data/ls_trajectories_large.pkl"

@@ -2026,6 +2026,7 @@ def po_train(
     )
 
     last_ckpt_path: str | None = None
+    last_ckpt_epoch: int | None = None   # for AGNET_KEEP_EVERY retention
     best_cov_greedy = -float("inf")
     best_cov_stoch  = -float("inf")
     best_stop_score = -float("inf")
@@ -2227,6 +2228,27 @@ def po_train(
                 # set-size cost to keep the criterion sensitive.
                 # Use max of greedy and stoch composites so we keep
                 # training whenever EITHER decoding mode is improving.
+                #
+                # DO NOT fold approx_ratio in here. It looks tempting -- on
+                # seed22 the composite was flat (cov 0.9927 / gr 0.0129 at both
+                # epoch 4 and 42) while approx_ratio still improved 0.81 ->
+                # 0.54 -- but it was measured to make things WORSE, because
+                # approx_ratio is noisy epoch-to-epoch and an early lucky low
+                # value raises best_stop_score so later real gains cannot beat
+                # it. Replayed against real trajectories (2026-07-27), stop
+                # epoch would become:
+                #     rule            seed22   seed11-b32   seed11-b10 GOOD
+                #     cov-gr (this)      83         45          164
+                #     -0.1*approx        74         45          129
+                #     -approx            74         45          102
+                #     cov-gated approx   74         45          129
+                # i.e. every variant truncates the run that actually produced
+                # the best policy (|S|/OPT 1.06 at epoch 160). Premature
+                # stopping is instead mitigated by RETAINING checkpoints
+                # (AGNET_KEEP_EVERY) and selecting post-hoc on exact CGAL via
+                # tools/select_best_checkpoint.py. Raise early_stop_patience
+                # if you want longer runs; do not change this metric without
+                # replaying it against those trajectories first.
                 _scores = []
                 cov_g = eval_metrics.get("coverage_greedy_mean")
                 gr_g  = eval_metrics.get("guard_ratio_greedy_mean")
@@ -2255,41 +2277,99 @@ def po_train(
                 break
 
         # -- best-checkpoint saving --
+        # Select on the SAME guard-aware composite the early-stop criterion
+        # uses above (cov - guard_ratio), NOT on raw coverage.
+        #
+        # WHY (found 2026-07-25): raw coverage is trivially maximised by
+        # guarding (almost) every vertex, so any epoch that wanders into the
+        # over-guarding regime hits cov ~= 1.0 and permanently wins argmax --
+        # nothing later can beat it. Measured consequence across retrained
+        # seeds: best_greedy.pt froze at epoch 17 (seed11) and epoch 11
+        # (seed22) with guard_ratio 0.86/0.97, discarding 100+ later epochs of
+        # genuinely better policies. On seed11 the cov-only pick scores
+        # |S|/OPT 3.72 while the cov-gr pick at epoch 164 scores 1.11 --
+        # i.e. it reproduces the released policy (|S|/OPT 1.089). The released
+        # run escaped this only by luck: it never reached cov 1.0, so its
+        # argmax landed on a late, well-trained epoch (114, cov 0.974).
+        # The comment on the early-stop composite above already spells out the
+        # "pure coverage plateaus at 1.0" hazard; this selection simply never
+        # got the same fix. Override with AGNET_BEST_ON_COVERAGE=1 to restore
+        # the old (coverage-only) behaviour for comparison.
         if save_best and checkpoint_dir and isinstance(eval_metrics, dict):
+            _legacy_best = os.getenv("AGNET_BEST_ON_COVERAGE") == "1"
             cov_g = eval_metrics.get("coverage_greedy_mean")
             cov_s = eval_metrics.get("coverage_stoch_mean")
+            _gr_g = eval_metrics.get("guard_ratio_greedy_mean")
+            _gr_s = eval_metrics.get("guard_ratio_stoch_mean")
 
-            if cov_g is not None and cov_g > best_cov_greedy:
-                best_cov_greedy = cov_g
+            if _legacy_best or _gr_g is None:
+                score_g, label_g = cov_g, "coverage_greedy_mean"
+            else:
+                score_g = None if cov_g is None else cov_g - _gr_g
+                label_g = "coverage_minus_guard_ratio_greedy"
+            if _legacy_best or _gr_s is None:
+                score_s, label_s = cov_s, "coverage_stoch_mean"
+            else:
+                score_s = None if cov_s is None else cov_s - _gr_s
+                label_s = "coverage_minus_guard_ratio_stoch"
+
+            if score_g is not None and score_g > best_cov_greedy:
+                best_cov_greedy = score_g
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 p = os.path.join(checkpoint_dir, "po_agp_best_greedy.pt")
                 torch.save({
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "epoch": actual_epoch,
-                    "best_metric": "coverage_greedy_mean",
-                    "best_value": float(cov_g),
+                    "best_metric": label_g,
+                    "best_value": float(score_g),
+                    "coverage_greedy_mean": None if cov_g is None else float(cov_g),
+                    "guard_ratio_greedy_mean": None if _gr_g is None else float(_gr_g),
                     "K": K, "alpha": alpha,
                     "checkpoint_params": checkpoint_params,
                 }, p)
-                print(f"  Saved best-greedy: {p} (cov={cov_g:.3f})")
+                print(f"  Saved best-greedy: {p} ({label_g}={score_g:.3f}"
+                      + (f", cov={cov_g:.3f}, gr={_gr_g:.3f}" if _gr_g is not None else "")
+                      + ")")
 
-            if cov_s is not None and cov_s > best_cov_stoch:
-                best_cov_stoch = cov_s
+            if score_s is not None and score_s > best_cov_stoch:
+                best_cov_stoch = score_s
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 p = os.path.join(checkpoint_dir, "po_agp_best_stoch.pt")
                 torch.save({
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "epoch": actual_epoch,
-                    "best_metric": "coverage_stoch_mean",
-                    "best_value": float(cov_s),
+                    "best_metric": label_s,
+                    "best_value": float(score_s),
+                    "coverage_stoch_mean": None if cov_s is None else float(cov_s),
+                    "guard_ratio_stoch_mean": None if _gr_s is None else float(_gr_s),
                     "K": K, "alpha": alpha,
                     "checkpoint_params": checkpoint_params,
                 }, p)
                 print(f"  Saved best-stoch: {p} (cov={cov_s:.3f})")
 
         # -- periodic checkpoint every 5 epochs --
+        #
+        # RETENTION: keep every AGNET_KEEP_EVERY-th epoch permanently (default
+        # 20) and roll the rest. Previously EVERY periodic checkpoint deleted
+        # its predecessor, leaving exactly one resume point -- which made
+        # post-hoc checkpoint selection impossible: for seed22 only epoch80
+        # survived, so the 120-160 range (where seed11 peaked at |S|/OPT 1.06)
+        # was simply gone.
+        #
+        # This matters because NO in-training metric reliably identifies the
+        # best epoch -- see the best-checkpoint block above. The disc-vis
+        # epoch_eval is a fast PROXY (500 sampled points); it read
+        # approx_ratio ~1.03 for a policy that scored 2.79 on exact CGAL. The
+        # only trustworthy selection is post-hoc, scoring retained checkpoints
+        # with tools/compare_policy_checkpoints.py (exact CGAL, validated to
+        # reproduce the paper's released-policy row). Retaining a ladder of
+        # checkpoints is what makes that possible.
+        #
+        # Cost: ~4 MB per retained checkpoint, so a 200-epoch run keeps ~10
+        # (~40 MB) at the default. Set AGNET_KEEP_EVERY=0 to restore the old
+        # roll-only behaviour on a disk-constrained box.
         if checkpoint_dir and actual_epoch % 5 == 0:
             os.makedirs(checkpoint_dir, exist_ok=True)
             ckpt_path = os.path.join(
@@ -2303,12 +2383,19 @@ def po_train(
                 "checkpoint_params": checkpoint_params,
             }, ckpt_path)
             print(f"  checkpoint -> {ckpt_path}")
-            if last_ckpt_path and os.path.exists(last_ckpt_path):
+            _keep_every = int(os.getenv("AGNET_KEEP_EVERY", "20"))
+            _prev_is_kept = (
+                _keep_every > 0
+                and last_ckpt_epoch is not None
+                and last_ckpt_epoch % _keep_every == 0
+            )
+            if last_ckpt_path and not _prev_is_kept and os.path.exists(last_ckpt_path):
                 try:
                     os.remove(last_ckpt_path)
                 except OSError:
                     pass
             last_ckpt_path = ckpt_path
+            last_ckpt_epoch = actual_epoch
 
         if scheduler is not None:
             scheduler.step()

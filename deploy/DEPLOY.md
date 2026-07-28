@@ -38,13 +38,34 @@ a pip-based image cannot run this code at all, regardless of its CUDA version.
 `deploy/setup_vast.sh` therefore installs miniconda and builds the env from
 `deploy/environment.yml`.
 
+**The disc-vis cache is precomputed locally for the same reason**, and to
+avoid re-paying its CPU cost on a metered box. `data/disc_vis_cache.pkl` now
+has **full train+dev coverage** (12132 entries, 0 missing across 8867 train +
+1224 dev polygons; built/verified 2026-07-24 with
+`tools/build_disc_vis_cache.py`, ~1.5 min on 20 workers). Ship the finished
+`.pkl` and the rented box never touches CGAL for this step at all. If it is
+ever regenerated, `tools/build_disc_vis_cache.py` is a safe top-up (loads the
+existing cache, builds only what's missing, saves back) — but **diff its
+output against a backup before trusting it**; a wrong `AGNET_DISC_VIS_CACHE_SIZE`
+silently evicts already-good entries rather than erroring (see
+[[agnet-disc-vis-cache-eviction-trap]] in memory).
+
 ## 3. Getting code + data onto the box
 
-~2.1 GB total: dataset 1.1 GB, disc-vis cache 799 MB, code 174 MB.
+~2.2 GB total: dataset 1.1 GB, disc-vis cache 919 MB, code 174 MB.
+
+**Always exclude `.env`.** It holds the LOCAL `DATASET_PATH` (wrong on the box,
+so runs fail) and `VAST_AI_API_KEY` / `VAST_SSH_KEY` — syncing it both breaks
+the run and copies your credentials onto a rented machine. Write the box's own
+one-line `.env` instead:
+`printf 'DATASET_PATH=/workspace/dataset/AGPIL/\n' > /workspace/AGNet/.env`
+(bit us 2026-07-25: a code sync clobbered the remote `.env` and pushed the API
+key; caught only by reading the file back afterwards.)
 
 ```bash
 # from the local repo root; $VAST is e.g. root@ssh5.vast.ai -p 12345
-rsync -avz --exclude .git --exclude checkpoints --exclude results \
+rsync -avz --exclude .git --exclude .env --exclude checkpoints --exclude results \
+      --exclude data --exclude logs --exclude __pycache__ \
       ./ "$VAST:~/AGNet/"
 
 # the released policy checkpoint (3.9 MB). REQUIRED: the correctness gate in
@@ -88,9 +109,15 @@ every new machine.** If it ever fails, `AGNET_LEGACY_DECODE=1` and
 Then, before committing days of compute:
 
 ```bash
-PYTHON=~/miniconda3/envs/MLAG/bin/python bash run_policy_seeds.sh --smoke   # minutes
-PYTHON=... PO_EPOCHS_OVERRIDE=1 bash run_policy_seeds.sh 11                # one real epoch
+bash run_policy_seeds.sh --smoke                              # minutes
+PO_EPOCHS_OVERRIDE=1 bash run_policy_seeds.sh 11               # one real epoch
 ```
+
+`setup_vast.sh` prints the exact `PYTHON=...` path for this box at the end of
+its run — some images put conda envs somewhere other than
+`~/miniconda3/envs/<name>` (e.g. this vast.ai base image's `.condarc` sets
+`envs_dirs: [/venv]`, landing the env at `/venv/MLAG`), so don't assume the
+path; copy it from that output.
 
 Multiply the measured epoch time by 200 for the true per-seed ETA. Do not trust
 the estimate in §6 over a measurement on the actual box.
@@ -98,7 +125,7 @@ the estimate in §6 over a measurement on the actual box.
 ## 5. Running the seeds
 
 ```bash
-tmux new -s seed11 -d "PYTHON=~/miniconda3/envs/MLAG/bin/python \
+tmux new -s seed11 -d "PYTHON=/path/from/setup_vast.sh/output \
     bash run_policy_seeds.sh 11 2>&1 | tee logs/seed11.log"
 ```
 

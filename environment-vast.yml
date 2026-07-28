@@ -1,0 +1,36 @@
+# Conda env for AGNet on Vast.ai (or any clean GPU box).
+# Includes scikit-geometry (import skgeom) from conda-forge — required for CGAL
+# visibility used in rewards / LS / evaluation.
+#
+# Create:
+#   conda env create -f environment-vast.yml
+#   conda activate mlag
+#
+# Then install a CUDA build of torch if the pytorch channel pin below does not
+# match your driver (check: python -c "import torch; print(torch.cuda.is_available())"):
+#   pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121
+#
+# Finally:
+#   pip install -r requirements.txt
+#
+name: mlag
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy>=1.24,<2.1
+  - matplotlib>=3.7
+  - tqdm
+  - pillow
+  - pybind11
+  - pandas
+  - scipy
+  - seaborn
+  - networkx
+  # CGAL Python bindings — import name: skgeom
+  - scikit-geometry
+  - pip:
+      - python-dotenv>=1.0
+      # Install torch separately with the CUDA wheel index for your image.
