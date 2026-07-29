@@ -1,20 +1,23 @@
 #!/usr/bin/env python
-"""build_operating_curve_table.py — the probe's full coverage/cost operating curve.
+"""build_operating_curve_table.py -- the probe's full coverage/cost operating curve.
 
-The main tables report only t in {0.20, 0.25, 0.30}, which are the three most
-guard-expensive points on the curve. paper/data/setpred_iter_sweep.json already
-contains six more (t = 0.50 ... 0.80) at K=1, reaching |S|/OPT as low as ~1.06.
-They were computed for the fixed-point experiment (fig:mechanism) and never
-reported as an operating curve.
+The main tables report only t in {0.20, 0.25, 0.30}, the three most guard-expensive
+points. This table traces the whole knob, t in [0.05, 0.80], with the policy seed
+as a reference row.
 
-This script emits tables/tab_operating_curve.tex covering the whole range, plus
-the policy-seed baseline from the same file as a reference row.
+SOURCE. Earlier revisions built this table from paper/data/setpred_iter_sweep.json,
+which covers only the high-t end (t >= 0.5, single probe seed) because it was
+computed for the fixed-point experiment. That file is on the correct 362-polygon
+`test` split -- its K=1 cells agree to machine precision with the sweep used here
+at the shared thresholds 0.5/0.6/0.8 -- but it cannot supply the low-t window or a
+seed spread. The wide ablation sweep covers the whole range t in [0.05, 0.80] over
+four probe seeds on the same split, so we use it instead and the table becomes
+directly comparable to tab_headline and tab_ablation_thresholds.
 
-CAVEAT baked into the caption: this sweep is the combined dev+test pool
-(1224 polygons), displayed seed 1234, whereas tab_headline is test-only (362)
-and a four-seed mean. The two are NOT cell-for-cell comparable; the curve is
-reported for its shape, not to restate the headline numbers.
+The policy-seed row is byte-identical across the four probe seeds (it is the same
+released policy 1234), so it carries no spread.
 
+Source: paper/data/matched_budget/full_{1234,11,22,33}.json
 Usage:  python paper/scripts/build_operating_curve_table.py
 """
 from __future__ import annotations
@@ -22,89 +25,90 @@ from __future__ import annotations
 import json
 import pathlib
 
+import numpy as np
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
-SWEEP = REPO / "paper/data/setpred_iter_sweep.json"
-DIST = REPO / "paper/data/setpred_dev_test.json"
+SWEEP = REPO / "paper/data/matched_budget"
 OUT = REPO / "paper/tables/tab_operating_curve.tex"
 
-def _fmt(v, nd=3):
-    return f"${v:.{nd}f}$" if isinstance(v, (int, float)) else "---"
+SEEDS = ("1234", "11", "22", "33")
 
 
-def _single_pass_cells(cells: dict):
-    """Yield (threshold, cell) for single-pass entries.
+def load():
+    """(policy row, {t: [per-seed cells]}) from the four full-probe sweeps."""
+    per_t: dict[float, list] = {}
+    policy = None
+    for s in SEEDS:
+        d = json.loads((SWEEP / f"full_{s}.json").read_text())
+        if policy is None:
+            policy = d["seed"]
+        for key, c in d["cells"].items():
+            if not key.endswith("|K=1"):
+                continue
+            per_t.setdefault(float(key.split("|")[0].split("=")[1]), []).append(c)
+    return policy, per_t
 
-    Key formats differ between files: setpred_dev_test.json uses 't=0.2|K=1'
-    while setpred_iter_sweep.json uses 't=0.5|K=1', and trailing-zero styles are
-    inconsistent ('0.2' vs '0.20'), so parse the float rather than string-match.
-    """
-    for key, v in cells.items():
-        if not isinstance(v, dict) or "cov" not in v:
-            continue
-        head, _, tail = key.partition("|K=")
-        if tail and tail != "1":
-            continue
-        try:
-            yield float(head.split("=")[1]), v
-        except (IndexError, ValueError):
-            continue
+
+def agg(cells, path, nd):
+    """mean +- std across probe seeds of one metric, formatted."""
+    vals = [path(c) for c in cells]
+    m, sd = float(np.mean(vals)), float(np.std(vals))
+    if sd < 0.5 * 10 ** (-nd):          # spread invisible at this precision
+        return f"${m:.{nd}f}$"
+    return rf"${m:.{nd}f} \pm {sd:.{nd}f}$"
 
 
 def main() -> None:
-    sweep = json.loads(SWEEP.read_text())
-    cells = sweep["cells"]
-
-    # ONE population only. The low-t window (t = 0.20/0.25/0.30) lives in
-    # setpred_dev_test.json, which is the 362-polygon *test* split, whereas this
-    # sweep is the 1224-polygon pooled dev+test set. Mixing them would put rows
-    # from different populations in the same column and make the trend
-    # unreadable -- the policy-seed baseline alone differs between them
-    # (|S|/OPT 1.21 pooled vs 1.09 on test). We therefore report only the
-    # unreported high-t end here and cross-reference the headline tables for the
-    # low-t window.
-    rows = [(t, v["cov"], v.get("chv"), v.get("opt"))
-            for t, v in _single_pass_cells(cells)]
-
-    # dedupe by threshold, ascending
-    seen, uniq = set(), []
-    for r in sorted(rows):
-        if r[0] in seen:
-            continue
-        seen.add(r[0])
-        uniq.append(r)
-
-    seed = sweep.get("seed") or {}
+    policy, per_t = load()
 
     lines = [
         "% auto-generated by build_operating_curve_table.py from",
-        "% paper/data/setpred_iter_sweep.json (+ setpred_dev_test.json for the low-t end).",
-        "% Combined dev+test pool, displayed seed 1234, single pass (K=1).",
-        "% NOT cell-for-cell comparable with tab_headline (test-only, four-seed mean).",
-        r"\begin{tabular}{lrrr}",
+        "% paper/data/matched_budget/full_{1234,11,22,33}.json",
+        "% 362-polygon held-out test split, leak-free probe, four-seed mean +- std,",
+        "% single pass (K=1), coverage by exact CGAL. Same population as tab_headline.",
+        r"\begin{tabular}{lrrrr}",
         r"  \toprule",
-        r"  $t$ & Mean $\Covf{S}$ & Mean $|S|/n$ & Mean $|S|/\OPT$ \\",
+        r"  $t$ & Mean $\Covf{S}$ & Mean $|S|/n$ & Mean $|S|/\OPT$"
+        r" & $\#\{\Covf{S} \ge 0.95\}$ \\",
+        r"  \midrule",
+        rf"  \emph{{policy seed}} & ${policy['cov']:.4f}$ & ${policy['chv']:.3f}$ &"
+        rf" ${policy['opt']:.2f}$ & ${policy['dist']['n_cov_ge_095']}$ \\",
         r"  \midrule",
     ]
 
-    if seed:
-        lines.append(
-            rf"  \emph{{policy seed}} & {_fmt(seed.get('cov'), 4)} & "
-            rf"{_fmt(seed.get('chv'))} & {_fmt(seed.get('opt'), 2)} \\"
-        )
-        lines.append(r"  \midrule")
-
-    for t, cov, chv, opt in uniq:
+    for t in sorted(per_t):
+        cells = per_t[t]
         marker = r"$^{\ast}$" if abs(t - 0.20) < 1e-9 else ""
         lines.append(
-            rf"  ${t:.2f}${marker} & {_fmt(cov, 4)} & {_fmt(chv)} & {_fmt(opt, 2)} \\"
+            rf"  ${t:.2f}${marker} & {agg(cells, lambda c: c['cov'], 4)} &"
+            rf" {agg(cells, lambda c: c['chv'], 3)} &"
+            rf" {agg(cells, lambda c: c['opt'], 2)} &"
+            rf" {agg(cells, lambda c: c['dist']['n_cov_ge_095'], 1)} \\"
         )
 
     lines += [r"  \bottomrule", r"\end{tabular}", ""]
-
     OUT.write_text("\n".join(lines))
-    print(f"wrote {OUT.relative_to(REPO)}  ({len(uniq)} thresholds)")
-    for t, cov, chv, opt in uniq:
-        print(f"  t={t:.2f}  cov={cov:.4f}  |S|/n={chv:.4f}  |S|/OPT={opt:.3f}")
+    print(f"wrote {OUT.relative_to(REPO)}  ({len(per_t)} thresholds)\n")
+    print("\n".join(lines))
+
+    print("\n--- crossover check (claims made in the text) ---")
+    p = policy
+    print(f"  policy seed: cov {p['cov']:.4f}  |S|/OPT {p['opt']:.3f}"
+          f"  #>=0.95 {p['dist']['n_cov_ge_095']}/362")
+    for t in sorted(per_t):
+        c = per_t[t]
+        cov = np.mean([x["cov"] for x in c])
+        opt = np.mean([x["opt"] for x in c])
+        g95 = np.mean([x["dist"]["n_cov_ge_095"] for x in c])
+        flags = []
+        if cov < p["cov"]:
+            flags.append("cov BELOW policy")
+        if opt < p["opt"]:
+            flags.append("cheaper than policy")
+        if g95 < p["dist"]["n_cov_ge_095"]:
+            flags.append("gate BELOW policy")
+        print(f"  t={t:.2f}  cov={cov:.4f}  |S|/OPT={opt:.3f}  #>=0.95={g95:.1f}"
+              + ("   <- " + ", ".join(flags) if flags else ""))
 
 
 if __name__ == "__main__":

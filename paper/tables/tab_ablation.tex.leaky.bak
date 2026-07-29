@@ -3,9 +3,9 @@
   \toprule
   Probe inputs & $\#\{\mathrm{Cov}<0.99\}$ & $\min \mathrm{Cov}$ & $|S|/n$ & $|S|/\OPT$ \\
   \midrule
-  \SetPredictor{} full & $57.8 \pm 4.8$ & 0.551\,$\pm$\,0.327 & 0.25\,$\pm$\,0.01 & 1.62\,$\pm$\,0.03 \\
-  \quad no-seed (encoder only) & $45.5 \pm 13.4$ & 0.547\,$\pm$\,0.335 & 0.30\,$\pm$\,0.02 & 1.94\,$\pm$\,0.12 \\
-  \quad no-encoder (seed only) & $22.0 \pm 6.0$ & 0.941\,$\pm$\,0.023 & 0.45\,$\pm$\,0.04 & 2.94\,$\pm$\,0.27 \\
+  \SetPredictor{} full & $11.0 \pm 8.7$ & 0.951\,$\pm$\,0.029 & 0.39\,$\pm$\,0.06 & 2.56\,$\pm$\,0.40 \\
+  \quad no-seed (encoder only) & $17.2 \pm 2.4$ & 0.918\,$\pm$\,0.029 & 0.37\,$\pm$\,0.01 & 2.42\,$\pm$\,0.07 \\
+  \quad no-encoder (seed only) & $29.0 \pm 18.0$ & 0.947\,$\pm$\,0.022 & 0.48\,$\pm$\,0.05 & 3.11\,$\pm$\,0.34 \\
   \quad coords-only (neither) & $0.8 \pm 0.8$ & 0.962\,$\pm$\,0.044 & 0.72\,$\pm$\,0.01 & 4.64\,$\pm$\,0.06 \\
   \bottomrule
 \end{tabular}

@@ -4,7 +4,7 @@
   Method & Mean cov & $\#\{\mathrm{Cov}\ge 0.95\}/N$ & Mean $|S|/n$ & Mean $|S|/\OPT$ \\
   \midrule
   Pretrained pointer (seed) & 0.9567 & 1778/2081\,(0.839,0.869) & 0.1807 & 1.1488 \\
-  SetPredictor full ($t=0.20$) & \textbf{0.9936}\,$\pm$\,0.0009 & $2058.2 \pm 7.3$/2081 & 0.3023\,$\pm$\,0.0055 & 1.9486\,$\pm$\,0.0363 \\
-  SetPredictor, no-encoder ($t=0.20$) & 0.9874\,$\pm$\,0.0023 & $2047.8 \pm 4.7$/2081 & 0.3670\,$\pm$\,0.0335 & 2.3571\,$\pm$\,0.2149 \\
+  SetPredictor full ($t=0.20$) & \textbf{0.9946}\,$\pm$\,0.0020 & $2064.2 \pm 12.2$/2081 & 0.3617\,$\pm$\,0.0447 & 2.3341\,$\pm$\,0.2951 \\
+  SetPredictor, no-encoder ($t=0.20$) & 0.9849\,$\pm$\,0.0055 & $2037.2 \pm 22.6$/2081 & 0.3667\,$\pm$\,0.0550 & 2.3583\,$\pm$\,0.3646 \\
   \bottomrule
 \end{tabular}

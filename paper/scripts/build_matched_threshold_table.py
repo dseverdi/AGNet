@@ -1,14 +1,23 @@
-"""Matched-threshold / operating-curve view of the encoder-seed ablation
-(reviewer R2): the headline 2x2 (tab_ablation) compares all four conditions at
-a single common threshold t=0.20, which R2 flags as confounded --- conditions
-have different calibration and guard counts, so a probe that floods vertices
-shows a short tail simply by over-guarding.
+"""Matched-BUDGET view of the encoder-seed ablation (reviewer R2, point 6).
 
-This table removes that confound by reporting every condition across the whole
-swept operating curve t in {0.20, 0.25, 0.30}, so conditions can be compared at
-a matched guard budget |S|/n rather than a matched threshold. Aggregation is the
-four-seed mean, on the 362-polygon leak-free dev_test split (same data as
-tab_ablation), reusing the stored per-polygon JSONs --- no GPU.
+R2 objected that the headline 2x2 (tab_ablation) compares all four conditions at
+one common threshold t=0.20 despite their different calibration and guard counts.
+That objection is correct, and the leak-free data proves it: at fixed t the
+0.99-gate failure count is perfectly monotone in |S|/n, so the fixed-t table
+measures set size rather than representation.
+
+This table removes the confound. Each condition is swept over the whole
+threshold range t in [0.05, 0.80] so that the four cost curves overlap, and the
+conditions are then compared at a matched guard budget |S|/OPT instead of a
+matched threshold.
+
+Panel (a) reports the swept curves, so the overlap is visible.
+Panel (b) reads each arm's own curve at four common cost anchors, interpolating
+within the arm, and reports the resulting 0.99-gate tail.
+
+Aggregation is the four-seed mean over probe seeds {1234, 11, 22, 33} on the
+362-polygon leak-free dev_test split, coverage scored by exact CGAL. Source:
+paper/data/matched_budget/<arm>_<seed>.json (16 sweeps).
 
 Output: paper/tables/tab_ablation_thresholds.tex
 """
@@ -21,59 +30,131 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
-PDATA = REPO / "paper" / "data"
+SWEEP = REPO / "paper" / "data" / "matched_budget"
 TABLE = REPO / "paper" / "tables" / "tab_ablation_thresholds.tex"
 
-CONDS = [
-    ("\\SetPredictor{} full",           "full",
-     ["dist_dev_test.json", "dist_dev_test_seed11.json",
-      "dist_dev_test_seed22.json", "dist_dev_test_seed33.json"]),
-    ("\\quad no-seed (encoder only)",   "noseed",
-     [f"dist_dev_test_noseed_seed{s}.json" for s in (1234, 11, 22, 33)]),
-    ("\\quad no-encoder (seed only)",   "noenc",
-     ["dist_dev_test_noenc.json"]
-     + [f"dist_dev_test_noenc_seed{s}.json" for s in (11, 22, 33)]),
-    ("\\quad coords-only (neither)",    "noseednoenc",
-     [f"dist_dev_test_noseednoenc_seed{s}.json" for s in (1234, 11, 22, 33)]),
+SEEDS = ("1234", "11", "22", "33")
+ARMS = [
+    ("full", r"full"),
+    ("noseed", r"no-seed"),
+    ("noenc", r"no-encoder"),
+    ("coords", r"coords-only"),
 ]
-THRESHOLDS = [("0.20", "probe_t020"), ("0.25", "probe_t025"), ("0.30", "probe_t030")]
+
+# Panel (a): a common grid spanning every arm's useful range. The arms spend very
+# differently at any single t, which is the whole point of the table.
+GRID = [0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80]
+# Panel (b): cost anchors inside the band where the encoder-bearing arms overlap.
+# 1.95 is the highest anchor all four `full` seeds reach (their curves top out at
+# 1.97-2.04 at t=0.05), so every cell below is a four-seed mean, never three.
+ANCHORS = [1.95, 1.7, 1.5, 1.3]
 
 
-def cond_threshold_stats(files, key):
-    """Four-seed mean of (|S|/n, |S|/OPT, #Cov<0.99, min Cov) at one threshold."""
-    sn, so, below, mincov = [], [], [], []
-    for f in files:
-        fp = PDATA / f
-        d = json.load(open(fp))["polygons"]
-        sn.append(np.mean([r[key]["S_size"] / r["n"] for r in d]))
-        so.append(np.mean([r[key]["S_size"] / r["OPT"] for r in d if r.get("OPT")]))
-        below.append(sum(1 for r in d if r[key]["cov"] < 0.99))
-        mincov.append(min(r[key]["cov"] for r in d))
-    return (float(np.mean(sn)), float(np.mean(so)),
-            float(np.mean(below)), float(np.mean(mincov)))
+def curve(arm: str, seed: str) -> dict:
+    """t -> (|S|/n, |S|/OPT, mean cov, #Cov<0.99) for one arm and probe seed."""
+    d = json.load(open(SWEEP / f"{arm}_{seed}.json"))
+    out = {}
+    for key, c in d["cells"].items():
+        if not key.endswith("|K=1"):
+            continue
+        t = float(key.split("|")[0].split("=")[1])
+        out[t] = (c["chv"], c["opt"], c["cov"],
+                  float(c["dist"]["n_total"] - c["dist"]["n_cov_ge_099"]))
+    return out
+
+
+CURVES = {(a, s): curve(a, s) for a, _ in ARMS for s in SEEDS}
+
+
+def mean_at(arm: str, t: float, idx: int) -> float:
+    return float(np.mean([CURVES[(arm, s)][t][idx] for s in SEEDS]))
+
+
+def tail_at_cost(arm: str, seed: str, target: float):
+    """#Cov<0.99 where this arm's OWN curve spends |S|/OPT = target.
+
+    Interpolates within the arm, so no arm is ever read at another arm's
+    threshold. Returns None when the arm's curve never reaches that cost.
+    """
+    pts = sorted(CURVES[(arm, seed)].values(), key=lambda v: v[1])
+    xs = [v[1] for v in pts]
+    ys = [v[3] for v in pts]
+    if target < xs[0] or target > xs[-1]:
+        return None
+    for i in range(len(xs) - 1):
+        if xs[i] <= target <= xs[i + 1]:
+            if xs[i + 1] == xs[i]:
+                return ys[i]
+            w = (target - xs[i]) / (xs[i + 1] - xs[i])
+            return ys[i] + w * (ys[i + 1] - ys[i])
+    return None
 
 
 def main() -> None:
-    rows = []
-    rows.append("% auto-generated by build_matched_threshold_table.py")
-    rows.append("\\begin{tabular}{llrrrr}")
-    rows.append("  \\toprule")
-    rows.append("  Probe inputs & $t$ & $|S|/n$ & $|S|/\\OPT$ & "
-                "$\\#\\{\\mathrm{Cov}<0.99\\}$ & $\\min\\mathrm{Cov}$ \\\\")
-    rows.append("  \\midrule")
-    for i, (label, _slug, files) in enumerate(CONDS):
-        for j, (tlab, key) in enumerate(THRESHOLDS):
-            s_n, s_o, blw, mc = cond_threshold_stats(files, key)
-            name = label if j == 0 else ""
-            rows.append(f"  {name} & {tlab} & {s_n:.2f} & {s_o:.2f} & "
-                        f"{blw:.1f} & {mc:.3f} \\\\")
-        if i < len(CONDS) - 1:
-            rows.append("  \\midrule")
-    rows.append("  \\bottomrule")
-    rows.append("\\end{tabular}")
-    TABLE.write_text("\n".join(rows) + "\n")
-    print(f"wrote {TABLE}")
-    print("\n".join(rows))
+    ncol = 1 + 2 * len(ARMS)
+    L = ["% auto-generated by build_matched_threshold_table.py"]
+    L.append(r"\begin{tabular}{l" + "rr" * len(ARMS) + "}")
+    L.append(r"  \toprule")
+    L.append("  & " + " & ".join(
+        rf"\multicolumn{{2}}{{c}}{{{lab}}}" for _, lab in ARMS) + r" \\")
+    L.append("  " + " ".join(
+        rf"\cmidrule(lr){{{2 + 2 * i}-{3 + 2 * i}}}" for i in range(len(ARMS))))
+    L.append(r"  $t$ & " + " & ".join(
+        [r"$|S|/\OPT$ & $\#$fail"] * len(ARMS)) + r" \\")
+    L.append(r"  \midrule")
+    L.append(rf"  \multicolumn{{{ncol}}}{{l}}"
+             r"{\emph{(a) swept operating curves}} \\")
+    for t in GRID:
+        cells = []
+        for arm, _ in ARMS:
+            cells.append(f"{mean_at(arm, t, 1):.2f}")
+            cells.append(f"{mean_at(arm, t, 3):.0f}")
+        L.append(f"  {t:.2f} & " + " & ".join(cells) + r" \\")
+    L.append(r"  \midrule")
+    L.append(rf"  \multicolumn{{{ncol}}}{{l}}"
+             r"{\emph{(b) $\#$fail at matched guard budget} $|S|/\OPT$} \\")
+    for a in ANCHORS:
+        cells = []
+        for arm, _ in ARMS:
+            vals = [tail_at_cost(arm, s, a) for s in SEEDS]
+            vals = [v for v in vals if v is not None]
+            if not vals:
+                cells.append(r"\multicolumn{2}{c}{---}")
+            else:
+                cells.append(rf"\multicolumn{{2}}{{c}}{{${np.mean(vals):.0f}"
+                             rf" \pm {np.std(vals):.0f}$}}")
+        L.append(f"  {a:.2f} & " + " & ".join(cells) + r" \\")
+    L.append(r"  \bottomrule")
+    L.append(r"\end{tabular}")
+    TABLE.write_text("\n".join(L) + "\n")
+    print(f"wrote {TABLE}\n")
+    print("\n".join(L))
+
+    print("\n--- matched-cost tail, four-seed mean (for the prose) ---")
+    for a in ANCHORS:
+        row = {}
+        for arm, _ in ARMS:
+            v = [x for x in (tail_at_cost(arm, s, a) for s in SEEDS)
+                 if x is not None]
+            row[arm] = (float(np.mean(v)), len(v)) if v else (None, 0)
+        f = row["full"][0]
+        ne = row["noenc"][0]
+        rat = f"{ne / f:.2f}x" if f and ne else "n/a"
+        body = "  ".join(
+            f"{k} {row[k][0]:.1f} (n={row[k][1]})" if row[k][0] is not None
+            else f"{k} unreachable" for k in row)
+        print(f"  |S|/OPT {a}: {body}   noenc/full {rat}")
+
+    print("\n--- per-seed strict ordering full < noseed < noenc < coords ---")
+    for a in ANCHORS:
+        ok = tot = 0
+        for s in SEEDS:
+            v = [tail_at_cost(arm, s, a) for arm, _ in ARMS]
+            if any(x is None for x in v):
+                continue
+            tot += 1
+            ok += int(v[0] < v[1] < v[2] < v[3])
+        print(f"  |S|/OPT {a}: {ok}/{tot} seeds")
 
 
 if __name__ == "__main__":

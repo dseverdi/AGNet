@@ -220,13 +220,23 @@ def build_worked_examples(device: str) -> None:
         print(f"  warn: pinned example {name!r} not found; using heuristic pick")
         return _pick(records, target_low, target_high)
 
-    # Pinned, reviewer-vetted examples (see paper/scripts/find_worked_example.py).
-    # The OOD pick rand-350-13 replaces randsimple-300-4: it is unambiguously OOD
-    # (n=350, ~1.8x the n=198 training max) yet at t=0.20 recovers above feasibility
-    # (seed 0.942 -> probe 0.996) at |S|/OPT 2.41 and the lowest guard density of any
-    # clean candidate (|S|/n 0.37) -- not the old 6x-OPT tail outlier that flooded
-    # 229/300 vertices.
-    in_pick = _pick_named(in_records, "rand-62-44", 0.85, 0.95)
+    # Pinned examples, chosen by a stated rule rather than by eye so the figure is
+    # representative rather than flattering.
+    #
+    # In-distribution pick rand-70-35 replaces rand-62-44 (2026-07-29). rand-62-44
+    # was pinned when the probe was the leaky set_predictor_best.pt, under which it
+    # reached Cov=1.000 with 33 of 62 vertices; under the leak-free final.pt the same
+    # polygon only moves 0.928 -> 0.933 and stays BELOW the 0.95 gate, so it no longer
+    # illustrates anything. The replacement is the median-by-n member of the 57
+    # dev_test polygons (of 362) where the seed fails the 0.95 gate and the leak-free
+    # probe clears it -- the median of the rescued set, not its best case. It lands at
+    # |S|/OPT 1.50 against the split mean of 1.57, i.e. an ordinary member of the
+    # population. Reproduce the pick from paper/data/dist_dev_test.json.
+    #
+    # OOD pick rand-350-13 is unchanged: unambiguously OOD (n=350, ~1.8x the n=198
+    # training max) and it clears the gate under the leak-free probe as well
+    # (seed 0.942 -> probe 0.978) at |S|/OPT 2.02, close to the split mean of 1.95.
+    in_pick = _pick_named(in_records, "rand-70-35", 0.85, 0.95)
     ood_pick = _pick_named(ood_records, "rand-350-13", 0.55, 0.85)
 
     threshold = 0.20  # matches tab_headline's headline operating point

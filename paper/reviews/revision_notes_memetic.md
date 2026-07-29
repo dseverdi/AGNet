@@ -4,15 +4,163 @@ Point-by-point map from each reviewer comment to the change made. Section/line
 references are to the revised `paper.tex`. This document seeds the eventual
 cover letter; it is not itself submitted.
 
+## Material correction: a validation-split error in the submitted version
+
+**This must be disclosed prominently in the cover letter.** After the previous
+revision we audited checkpoint selection and found an error in the submitted
+manuscript. The headline probe checkpoint
+(`checkpoints/set_predictor/standard/set_predictor_best.pt`) had been chosen by
+validating on `data/ls_trajectories_dev.pkl` — the *pooled* 1224-polygon
+development file, which **contains all 362 polygons of the reporting split**.
+The reported probe numbers were therefore selected on the split they were
+reported on. The checkpoint's own saved arguments record
+`val_traj='data/ls_trajectories_dev.pkl'`, which is how we identified it.
+
+All probe results have been regenerated from `set_predictor_final.pt` (the
+final training epoch, with *no* validation-based selection), and every affected
+table and figure rebuilt. Selection for the policy checkpoints is now done on
+the disjoint 857-polygon `dev_tune` carve and reported on the held-out 362.
+
+**The direction of the correction is mixed, and we state both halves.** Guard
+cost improved substantially; the coverage tail worsened:
+
+| quantity ($t=0.20$, `test`, 4 probe seeds) | submitted | corrected |
+|---|---|---|
+| full probe $\|S\|/\OPT$ | 2.556 | **1.621** |
+| full probe $\#\{\text{Cov}\ge0.95\}$ | 361.5/362 | **349.8/362** |
+| no-encoder $\|S\|/\OPT$ | 3.109 | 2.941 |
+| ood $\|S\|/\OPT$ (full) | 2.334 | **1.949** |
+| ood: no-encoder / full failure ratio | 2.6× | **1.46×** |
+
+Consequences for the claims, all now reflected in the manuscript:
+
+1. **C2's headline is unchanged and exact** — the ood gate-clearing rate is
+   85.4%→98.8%, and on the $n>198$ subset 85.2%→99.1% over exactly 885
+   instances, matching the submitted 85%→99% and 85%→98.7%.
+2. **C2's "2.6×" was overstated** and is now reported as 1.46×.
+3. **A result was previously hidden by the error:** on `ood` the submitted
+   numbers showed the encoder and no-encoder arms *tied* on guard cost
+   (2.334 vs 2.358). Corrected, the encoder wins (1.949 vs 2.357).
+4. **C1's evidence has moved to matched guard budget** — see the next section;
+   this directly implements Reviewer 2's point 6.
+5. **C4 has been weakened from an exact fixed point** to near-stationarity at
+   the operating thresholds, with a measured slow contraction near the decision
+   boundary. The submitted bounds ($\le0.02$, $\le8.5\times10^{-3}$) do not hold
+   on the corrected data ($0.079$ at $t=0.8$). The claim that each pass drifts
+   *monotonically* has also been withdrawn: it holds for $t\ge0.6$, but at
+   $t=0.5$ the movement is non-monotone and within run-to-run noise. The
+   iteration sweep itself is on the correct held-out 362 (its $K{=}1$ cells agree
+   to machine precision with the wide ablation sweep at the shared thresholds), so
+   only the drift bounds needed restating, not the population.
+6. **The `ood-large` claim is narrowed** to a tail-only advantage: the encoder
+   lifts worst-case coverage roughly seven-fold ($0.766\pm0.106$ against
+   $0.105\pm0.079$), but neither the guard saving nor the gate-clearing count
+   survives the seed spread there ($19.2\pm10.4$ below the gate against
+   $29.2\pm5.5$; the full probe leads on three of four seeds). The submitted text
+   quoted the single most favourable seed pairing (15 against 38); it now reports
+   four-seed means and the per-seed counts.
+
+We also now report **three independent policy-training seeds** (|S|/OPT 1.040,
+1.123, 1.089 against the released policy's 1.089), which resolves Reviewer 1's
+request to reconcile the policy-run description.
+
+### Second-wave corrections (2026-07-29)
+
+A follow-up audit found that three artifacts had reverted to leaky sources, plus
+two claims that the leak-free data does not support. All are fixed; recorded here
+because the fix changed published numbers.
+
+| artifact | problem | fix |
+|---|---|---|
+| `tab_dist_shift` | rebuilt from the leaky pre-aggregated `setpred_dev_test.json`; showed the full probe clearing **362/362** at the 0.95 gate and 358 at 0.99 | now from `dist_dev_test.json`: **345/362** and **302** |
+| `tab_pareto` | same source; $\|S\|/\OPT$ 2.897/2.508/2.204 | **1.572/1.504/1.442** |
+| `tab_large` | reverted to `extreme_ood.json` (pre-aggregated from the leaky checkpoint) | now from `dist_ood_large*.json` |
+| `fig_worked_example` | the pinned in-distribution polygon had been chosen *under the leaky probe*, which reached Cov $=1.000$ on it with 33 of 62 vertices; the leak-free probe only moves it 0.928 → 0.933, i.e. still below the gate | re-pinned to the **median-by-$n$** member of the 57 polygons the leak-free probe rescues (0.915 → 0.996 at $\|S\|/\OPT$ 1.50, against the split mean 1.62) — the median of that set, not its best case |
+| §5.2 McNemar | claimed the probe fixes **all** 69 below-gate polygons and introduces none ("69 → 0", $p\approx3\times10^{-21}$) | it fixes 57 and breaks 5, a net **69 → 17** ($p\approx3\times10^{-12}$) |
+| §5.2 exact coverage | "the probe covers the large majority of polygons exactly" | **61 of 362** against the policy's 3 — a large gain but a minority, now stated as such |
+
+**Root cause, now closed.** The three tables reverted because `build_tables.py`
+still *read* the leaky pre-aggregated files, so any rerun silently undid the
+hand-fixes while printing success. Those filenames are now in an explicit
+deny-list in `build_tables.py`, and `load()` raises on them and names the clean
+replacement. The two figures that still consume leaky sources
+(`fig_coverage_cdf`, `fig_pareto`) are not included in the manuscript.
+
+Standard deviations across probe seeds are now uniformly population std (ddof=0),
+matching `tab_headline`; two `ood-large` figures previously used sample std.
+
+All 44 load-bearing numbers in the manuscript were then re-verified against the
+data files programmatically.
+
+## Reviewer 2, point 6 — the matched-budget comparison
+
+> the ablations are compared at a common probability threshold despite having
+> different calibration and guard counts
+
+This turned out to be the decisive methodological point, and the corrected data
+shows it plainly. At a fixed $t=0.20$ the number of polygons below the 0.99 gate
+is **monotone in guard budget** across the $2\times2$ ablation — full ($|S|/n$
+0.25) 57.8, no-seed (0.30) 45.5, no-encoder (0.45) 22.0, coords-only (0.72) 0.8
+— so at a common threshold the ablation measures set size, not representation.
+The submitted version's ordering (full best) does not survive.
+
+We therefore swept **all four conditions over the full range $t\in[0.05,0.80]$
+on four probe seeds** (16 sweeps, 362 polygons, exact CGAL) so the cost curves
+overlap, and compare at matched budget. `tab_ablation_thresholds` was rebuilt
+around this and is now the primary evidence for C1.
+
+The confound is not hypothetical — the curves **cross**. At $t=0.05$ the
+no-encoder arm is the most expensive condition ($|S|/\OPT$ 5.17 against the full
+probe's 2.01) and has the shorter tail; by $t=0.40$ it is the *cheaper* of the two
+(1.37 against 1.41) and has the longer tail (200 against 96). Which arm looks
+better is decided by the threshold chosen.
+
+At matched cost the ordering is strict and seed-stable: full < no-seed <
+no-encoder < coords-only in **all 16 seed-by-budget cells** (4 probe seeds × 4
+budgets). The most stable way to quote the margin is the inverse reading — the
+cost multiple needed to reach the *same* tail — because it is near-constant across
+the whole overlap band:
+
+| arm | guards needed for the same 0.99-gate tail |
+|---|---|
+| no-seed | 1.08–1.12× the full probe |
+| no-encoder | **1.42–1.45×** |
+| coords-only | **1.72–1.78×** |
+
+One comparison needs no interpolation at all: at $t=0.30$ the full probe uses 15%
+*fewer* guards than the no-encoder arm at the same threshold ($|S|/\OPT$ 1.50
+against 1.77) and leaves 41% fewer polygons below the 0.99 gate (74 against 126).
+
+**Two claims from the previous draft were withdrawn as the wide sweep refuted
+them.** (i) "The ablation never reaches the full probe's coverage at any cost" is
+false: at $t=0.05$ the no-encoder arm averages 0.9998 coverage with no polygon
+below the gate — it simply pays $|S|/\OPT$ 5.17 to do so, against the full probe's
+2.01 at 0.9959. The claim is therefore stated strictly as matched-cost.
+(ii) The coords-only arm was described as "unresponsive to the threshold"; over the
+full range its selected fraction moves 0.82 → 0.03, so that was an artifact of the
+narrow window. It is now characterised by what the wide sweep actually shows — it
+never becomes economical (to match the full probe's tail at $|S|/\OPT$ 1.49 it must
+spend 2.66).
+
+The fixed-threshold table is retained, with the confound stated in its caption,
+because it is what demonstrates *why* the naive comparison misleads.
+
 ## Editor
 
 > conclusions are stated somewhat more strongly than the evidence supports
 
 Addressed by (i) scoping every "what RL/NCO internalizes" claim to *this* policy
-(abstract, C1, Discussion, Conclusion), (ii) rewriting the abstract's central
-inference as "the better-supported of two readings" rather than a certainty, and
-(iii) a probe-capacity ladder that separates representation content from probe
-capacity (new experiment, below).
+(abstract, C1, Discussion, Conclusion); (ii) **cutting** the abstract's inference
+that residual failures are "decoder calibration rather than missing
+representation" — the sentence Reviewers 2 and 3 both objected to; the corrected
+tail (17 of 362 in distribution) does not support it, and the abstract now
+states only that a residual tail remains, without attributing a cause;
+(iii) correcting the abstract's "order of magnitude" reduction to *four-fold* in
+distribution, reserving "order of magnitude" for the `ood` split where it is
+measured (11.7×); (iv) a probe-capacity ladder that separates representation
+content from probe capacity (new experiment, below); and (v) the validation-split
+correction and matched-budget re-analysis documented in the two sections above,
+which is where the strongest overstatement actually originated.
 
 > recent references on probing in Neural Combinatorial Optimization should be considered
 
@@ -80,9 +228,13 @@ n×M matrix storage that grows with n.
 framed as an analysis-of-representations study adapting established components to
 a constrained geometric covering problem, not a new architecture.
 
-**3. Probing shows decodability, not full geometry.** Abstract/Discussion
-softened to the "better-supported of two readings"; the capacity ladder + control
-task make the representation-vs-probe-capacity distinction explicit.
+**3. Probing shows decodability, not full geometry.** We accept this. The
+abstract's causal inference about residual failures has been **removed**
+outright rather than softened, and the capacity ladder plus control task make
+the representation-vs-probe-capacity distinction explicit. The corrected data
+supports the narrower claim the reviewer allows — that the frozen embeddings
+carry guard-relevant structure coordinates do not reproduce — and we no longer
+claim the decoder is solely responsible for what remains.
 
 **4. Guard-count overhead + feasibility definition.** The 2–3× overhead is
 reported prominently and not disguised; the Cov=1 vs 0.95 conflation is fixed
