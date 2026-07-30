@@ -91,6 +91,16 @@ PROSE_QUOTED = [
     # 91.9% pairwise-ordering agreement over 1600 rescored rollouts, and the
     # 94-against-22 gate-crossing asymmetry.
     "results/reward_estimator_agreement.json",
+    # sec:res-iteration, the learned-editor result. eval_t08 is the
+    # coverage-preserving end (13% guard cut, 0.27 recovery); st0p9_cgnone is the
+    # aggressive end (26% cut, mean coverage 0.969 -> 0.925). Both are N=300; the
+    # manuscript previously paired the 0.27 with a 24% cut taken from an N=5 smoke
+    # run, which is why both endpoints are now pinned here.
+    "results/eval_t08.json",
+    "results/editor_sweep/v2/st0p9_cgnone.json",
+    # The supervised-pointer collapse quoted in the same section (mean coverage
+    # 0.496, median approximation ratio 3.10).
+    "results/v2/sl_agp_evaluation.json",
 ]
 
 # Directories to sweep. Everything under them that is not in the keep-set moves.
