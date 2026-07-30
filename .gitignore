@@ -72,3 +72,7 @@ gfx/
 tsplib_cache/
 data/disc_vis_cache.pkl
 data/value_net_training_data.pkl
+# Disc-vis cache backups. The cache itself is ignored above, but ad-hoc copies
+# made before risky runs are not covered by that pattern, and a 919 MB blob was
+# swept into a commit that way (4a488b4). Match any variant.
+data/disc_vis_cache.pkl*

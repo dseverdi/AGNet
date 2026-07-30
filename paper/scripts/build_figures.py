@@ -668,8 +668,15 @@ def fig_mechanism() -> None:
 
     import numpy as np
     cells = d_iter["cells"]
-    thresholds = ["0.5", "0.6", "0.65", "0.7", "0.75", "0.8"]
     Ks = [1, 2, 3, 5]
+    # Derive the thresholds from the data rather than hardcoding them. A hardcoded
+    # list containing t=0.7, which this sweep does not cover, plotted an all-None
+    # series -- invisible, but it still produced a legend entry for a curve that
+    # was not there. Deriving them keeps the legend and the plot in agreement.
+    thresholds = sorted(
+        {k.split("|")[0].split("=")[1] for k in cells if "|K=" in k},
+        key=float,
+    )
     palette = ["#577590", "#43aa8b", "#90be6d", "#f9c74f", "#f8961e", "#f3722c"]
     metrics = [
         ("cov",  "Mean coverage $\\mathrm{Cov}$"),
@@ -695,7 +702,10 @@ def fig_mechanism() -> None:
             pad = max(span * 0.15, 1e-4)
             ax.set_ylim(min(all_vals) - pad, max(all_vals) + pad)
 
-    axes[1].set_title("Iterative inference is a fixed point")
+    # Not "is a fixed point": the corrected data shows near-stationarity at the
+    # operating thresholds and a measurable contraction as t approaches the
+    # decision boundary, so the title must not assert an exact fixed point.
+    axes[1].set_title("Iterative inference is near-stationary, contracting at high $t$")
     axes[0].legend(loc="best", frameon=False, ncol=2, title="Threshold", fontsize=7)
     plt.tight_layout()
     save(fig, "fig_mechanism.pdf")
@@ -766,7 +776,10 @@ def fig_embedding() -> None:
 
     ax.set_xlabel("Linear guard score  (higher $\\rightarrow$ more guard-like)")
     ax.set_ylabel("Density")
-    ax.set_title("Guards are linearly separable in the frozen features")
+    # NOT "linearly separable": AUC 0.84 with the overlap band this plot shows is
+    # a ranking result, not separability in the strict sense of a hyperplane that
+    # partitions the two classes. Say what the measurement supports.
+    ax.set_title("A linear rule ranks guards above non-guards in the frozen features")
     ax.set_ylim(0, ymax * 1.18)
     # trim dead space from a handful of score outliers
     ax.set_xlim(np.percentile(lda_scores, 0.3) - 0.5,

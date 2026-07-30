@@ -56,8 +56,16 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--pointer-checkpoint", type=str,
                    default="checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt")
+    # set_predictor_FINAL.pt, not _best.pt -- TEST-SET LEAK, fixed 2026-07-29.
+    # standard/set_predictor_best.pt was selected by validating on the pooled
+    # data/ls_trajectories_dev.pkl, which contains all 362 polygons of this
+    # reporting split, so every metric computed from it is selection-on-test.
+    # The stored invariance_test.json (Jun 18) was produced with it and reported
+    # 362/362 clearing the 0.95 gate under identity; the leak-free probe clears
+    # 345/362, so the "unchanged under rotation" reading had to be re-measured
+    # against the correct identity baseline rather than a saturated one.
     p.add_argument("--probe-checkpoint", type=str,
-                   default="checkpoints/set_predictor/standard/set_predictor_best.pt")
+                   default="checkpoints/set_predictor/standard/set_predictor_final.pt")
     p.add_argument("--traj", type=str,
                    default="data/ls_trajectories_dev_test_clean.pkl",
                    help="test-split trajectory pkl; we use only points + name")
@@ -130,9 +138,27 @@ def _load_probe(path: str, device: str) -> SetPredictor:
 
 
 def _decode_seed(pointer, pts_t: torch.Tensor, n: int, device: str) -> list[int]:
-    pad = torch.zeros(1, n, dtype=torch.bool, device=device)
+    """Greedy geo-free decode of the policy's seed.
+
+    MASK CONVENTION -- two opposite ones coexist in this codebase, and getting
+    this wrong fails silently:
+      * the pointer's `padding_mask` is a VALIDITY mask. dataset.collate_fn
+        builds it as "True for real vertices, False for padding", and that is
+        what tools/build_ls_trajectories.py feeds the model.
+      * SetPredictor's `pad` is the opposite -- a true padding indicator, which
+        train_set_predictor.make_batch fills with zeros for an unpadded bucket.
+    Passing all-False here (the SetPredictor convention) marks every vertex
+    invalid, so the decoder emits EOS at step 0 and returns an EMPTY seed. The
+    probe then runs with a zeroed seed indicator -- silently the no-seed
+    ablation rather than the real pipeline. That was the bug in the stored
+    invariance_test.json (fixed 2026-07-29); it went unnoticed because the leaky
+    probe over-guarded enough to saturate the 0.95 gate anyway.
+    Verified: with the all-True mask this reproduces the seeds stored in
+    data/ls_trajectories_dev_test_clean.pkl exactly.
+    """
+    valid = torch.ones(1, n, dtype=torch.bool, device=device)
     lengths = torch.tensor([n], dtype=torch.long, device=device)
-    det_idxs, _ = pointer(pts_t, padding_mask=pad, lengths=lengths,
+    det_idxs, _ = pointer(pts_t, padding_mask=valid, lengths=lengths,
                           deterministic=True, no_eos=False, eos_cov_threshold=0.0)
     return [int(i) for i in det_idxs[0] if int(i) < n]
 
