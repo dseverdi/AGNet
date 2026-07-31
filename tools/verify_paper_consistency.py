@@ -42,6 +42,21 @@ def tex_body() -> str:
                      if not l.strip().startswith("%"))
 
 
+def denumber(t: str) -> str:
+    """Normalise LaTeX numeric constructs so token extraction sees whole numbers.
+
+    Without this, `12{,}424` yields the fragments 12 and 424, `10^{-74}` yields 10
+    and 74, and `45^\circ` yields 45 -- fragments that can never be registered and
+    so would pollute the unclassified list indefinitely.
+    """
+    t = t.replace("{,}", "")                          # LaTeX thousands separator
+    t = re.sub(r"(?<=\d),(?=\d{3})", "", t)           # literal 464,001 -> 464001
+    t = re.sub(r"\\figincl\[[^\]]*\]", " ", t)        # \linewidth layout arguments
+    t = re.sub(r"\^\{?-?\d+\}?", " ", t)              # exponents, degree powers
+    t = t.replace(r"\circ", " ")
+    return t
+
+
 def used_tables() -> list[str]:
     return sorted(set(re.findall(r"tables/(tab_[a-z_]*\.tex)", TEX.read_text())))
 
@@ -73,9 +88,10 @@ EXEMPT_RE = [
     r"^(?:0\.05|1\.0|3\.0|0\.99|0\.95|0\.999|500|8|32|60|200|128|464|364|5\.66|9\.9|1600|12|16|2|3|4|5|6|7|10|20|40|50|100|1224|362|2081|285|840|857|8867|313|198|192|600|700|800|1000|1750|2250|350|70|30|110|114|160|95|0\.16|0\.5|1\.5|0\.20|0\.25|0\.30|0\.35|0\.40|0\.45|0\.50|0\.55|0\.60|0\.65|0\.70|0\.75|0\.80|12424|79|206|885|1\.2|0\.9|0\.1)$",
 ]
 EXEMPT_EXPLICIT = {
-    # values that appear only as part of a larger registered string, or are structural
-    "0.0045", "0.0011", "0.029", "0.079", "0.041", "0.003",   # C4 drift, registered as prose
-    "0.78", "0.29", "0.88", "0.0725",                          # disc-vis correlations
+    # Structural or not derivable from any stored artifact. Everything measurable is
+    # registered instead -- exempting a measurement would make the completeness
+    # property hollow, which an audit of this list caught for the C4 drift bounds,
+    # the partial correlations and the Wilson upper bounds.
     "0.582", "0.027", "0.843", "0.009",                        # linear probe (registered)
     "0.52", "91.9", "0.0003",                                  # reward estimator (registered)
     "1.15", "0.97",                                            # Transformer trial, dev-time
@@ -84,8 +100,9 @@ EXEMPT_EXPLICIT = {
     # structural: seed label, polygon-size row headers, a chosen matched-budget anchor,
     # and the dataset-partition upper bound
     "1234", "2000", "900", "480", "193", "250", "1.95",
-    # Wilson interval upper bounds, printed beside a registered lower bound
-    "0.847", "0.869",
+    # the source library's own vertex range, a dataset description rather than a
+    # measurement of our results, and not derivable from any stored artifact
+    "2500",
 }
 
 
@@ -93,15 +110,30 @@ def check_completeness(cl):
     """Every numeral in paper.tex and in the input tables is registered or exempt.
     Fails on anything unclassified -- this is the property that makes 'did I miss
     something?' computable. Catches: whatever has not yet been imagined."""
-    # interval claims carry their numeral in `phrase`, not `typeset`
-    registered = " ".join((c.typeset or "") + " " + (c.phrase or "") for c in cl)
+    # Exact token sets, not substring containment. `"0.029" in registered` was true
+    # merely because some other claim's string contained those characters, which let a
+    # real measurement hide behind a coincidental match.
+    registered = set()
+    for c in cl:
+        for blob in (c.typeset, c.phrase):
+            if blob:
+                # normalise the registered side identically to the haystack, or
+                # "464,001" registers as 464 and 001 and never matches 464001
+                registered |= set(re.findall(
+                    r"(?<![\w.])\d+(?:\.\d+)?(?![\w])", denumber(blob)))
     body = tex_body()
     nums = set()
-    for m in re.finditer(r"\$([^$]{1,120})\$", body):
+    for m in re.finditer(r"\$([^$]{1,120})\$", denumber(body)):
         nums |= {v for v in re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?![\w])", m.group(1))}
     for t in used_tables():
+        # normalise tables identically to the tex body; without it "66,561" splits
+        # into 66 and 561 and the fragment can never be matched
         nums |= set(re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?![\w])",
-                               (TABDIR / t).read_text()))
+                               denumber((TABDIR / t).read_text())))
+    # A token that is a substring of a longer extracted token is an artefact of
+    # LaTeX splitting (8,867 -> 867; 2081 -> 081), not a distinct claim.
+    nums = {v for v in nums
+            if not any(v != w and v in w for w in nums)}
     unclassified = []
     for v in sorted(nums):
         if v in registered or v in EXEMPT_EXPLICIT:
