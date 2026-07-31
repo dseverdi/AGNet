@@ -50,8 +50,14 @@ DELEAK = "2026-07-28"
 
 # Sources predating the de-leak that cannot carry the leak, with the reason.
 PROBE_INDEPENDENT = {
+    # Probe TRAINING targets on the train split. The de-leak cut guards against
+    # pre-dedup *evaluation* sources; these files hold no evaluation split, and
+    # train/eval leakage is handled by deduplicating the eval splits against
+    # train, not by rebuilding train. Used only for the BCE class weight.
+    "data/ls_trajectories_train.pkl": "probe training targets, train split only",
+    **{f"data/ls_trajectories_train_pseed{s}.pkl":
+       "probe training targets, train split only" for s in (11, 22, 33)},
     "paper/data/po_agp_training.json": "policy checkpoints only, no probe",
-    "paper/data/baseline_reinforce.json": "REINFORCE vs PO/BT policies, no probe",
     "paper/data/baseline_classical.json": "classical greedy and LS, no probe",
     "paper/data/encoder_embedding_views.json": "pointer encoder only (verified: loads no SetPredictor)",
     "paper/data/encoder_linear_probe.json": "logistic fit over frozen features, not the SetPredictor",
@@ -63,8 +69,10 @@ PROBE_INDEPENDENT = {
     "results/probe_timing.json": "timing only",
     "results/discvis_gap_correlation.json": "disc-vis vs exact geometry, no probe",
     "results/reward_estimator_agreement.json": "reward estimator vs exact CGAL, no probe",
-    "results/eval_t08.json": "learned editor, predates and is independent of the probe",
-    "results/editor_sweep/v2/st0p9_cgnone.json": "learned editor sweep",
+    "results/eval_editor_test362_t08.json":
+        "learned editor on the canonical dev_test 362; independent of the probe",
+    "results/eval_editor_test362_st0p9.json":
+        "learned editor (aggressive) on the canonical dev_test 362",
     "results/v2/sl_agp_evaluation.json": "supervised pointer baseline, no probe",
     # coords-only arm: those checkpoint dirs hold only final.pt, so no
     # validation-based selection ever existed for them
@@ -386,30 +394,37 @@ def _matched_budget():
 
 
 def _matched_budget_pseeds():
-    """Panel (c): cost multiple per policy. Policy 1234 averages four probe seeds."""
+    """Panel (c): cost multiple per policy, reported as a range over tail levels.
+
+    The panel used to be a 4x4 policy-by-tail grid, but within a policy the
+    multiple is near-constant (spread <= 0.09) and three cells were unreachable,
+    so it now shows one min--max range per policy. These claims therefore register
+    the range endpoints, not each cell.
+    """
     g = "tab_ablation_thresholds.tex"
     tails = (30, 50, 76, 100)
     base = {a: [_mb_curve(a, s) for s in ("1234", 11, 22, 33)] for a in ("full", "noenc")}
+    vals = []
     for t in tails:
         f = [_interp(c.values(), 3, 1, t) for c in base["full"]]
         n_ = [_interp(c.values(), 3, 1, t) for c in base["noenc"]]
         if all(x is not None for x in f + n_):
-            add(id=f"mb.c.1234.{t}", target=g,
-                sources=[f"paper/data/matched_budget/{a}_{s}.json"
-                         for a in ("full", "noenc") for s in ("1234", 11, 22, 33)],
-                n=362, run="policy1234", group="mb_panel_c",
-                typeset=f"{mean(n_)/mean(f):.2f}$\\times$")
+            vals.append(mean(n_) / mean(f))
+    src1234 = [f"paper/data/matched_budget/{a}_{s}.json"
+               for a in ("full", "noenc") for s in ("1234", 11, 22, 33)]
+    add(id="mb.c.1234.range", target=g, sources=src1234, n=362,
+        run="policy1234", group="mb_panel_c",
+        typeset=f"$+{(min(vals)-1)*100:.0f}$--${(max(vals)-1)*100:.0f}\\%$")
     for s in SEEDS:
         fc = _mb_curve("full", f"pseed{s}", "matched_budget_pseeds").values()
         nc = _mb_curve("noenc", f"pseed{s}", "matched_budget_pseeds").values()
-        for t in tails:
-            a_, b_ = _interp(fc, 3, 1, t), _interp(nc, 3, 1, t)
-            if a_ and b_:
-                add(id=f"mb.c.p{s}.{t}", target=g,
-                    sources=[f"paper/data/matched_budget_pseeds/full_pseed{s}.json",
-                             f"paper/data/matched_budget_pseeds/noenc_pseed{s}.json"],
-                    n=362, run=f"policy{s}", group="mb_panel_c",
-                    typeset=f"{b_/a_:.2f}$\\times$")
+        v = [b_ / a_ for t in tails
+             for a_, b_ in [(_interp(fc, 3, 1, t), _interp(nc, 3, 1, t))] if a_ and b_]
+        add(id=f"mb.c.p{s}.range", target=g,
+            sources=[f"paper/data/matched_budget_pseeds/full_pseed{s}.json",
+                     f"paper/data/matched_budget_pseeds/noenc_pseed{s}.json"],
+            n=362, run=f"policy{s}", group="mb_panel_c",
+            typeset=f"$+{(min(v)-1)*100:.0f}$--${(max(v)-1)*100:.0f}\\%$")
 
 
 # ============================================================== tab_policy_seeds
@@ -430,6 +445,17 @@ def _policy_seeds():
                     sources=[f"results/policy_seeds_ood/pseed{s}_{arm}_{split}.json"],
                     n=N, run=f"policy{s}", group=f"pseeds_{tag}",
                     typeset=f"{c['chv']:.3f}")
+                # |S|/OPT: on ood-large this averages the 206 polygons with an
+                # optimum, not all 285; the caption says so.
+                add(id=f"pseeds.{tag}.{s}.{arm}.cov", target=g,
+                    sources=[f"results/policy_seeds_ood/pseed{s}_{arm}_{split}.json"],
+                    n=N, run=f"policy{s}", group=f"pseeds_{tag}",
+                    typeset=f"{c['cov']:.3f}")
+                if c.get("opt"):
+                    add(id=f"pseeds.{tag}.{s}.{arm}.opt", target=g,
+                        sources=[f"results/policy_seeds_ood/pseed{s}_{arm}_{split}.json"],
+                        n=N, run=f"policy{s}", group=f"pseeds_{tag}",
+                        typeset=f"{c['opt']:.2f}")
             sd = json.loads((R / "policy_seeds_ood" /
                              f"pseed{s}_full_{split}.json").read_text())["seed"]
             add(id=f"pseeds.{tag}.{s}.policy.gate", target=g,
@@ -440,6 +466,15 @@ def _policy_seeds():
                 sources=[f"results/policy_seeds_ood/pseed{s}_full_{split}.json"],
                 n=N, run=f"policy{s}", group=f"pseeds_{tag}",
                 typeset=f"{sd['chv']:.3f}")
+            add(id=f"pseeds.{tag}.{s}.policy.cov", target=g,
+                sources=[f"results/policy_seeds_ood/pseed{s}_full_{split}.json"],
+                n=N, run=f"policy{s}", group=f"pseeds_{tag}",
+                typeset=f"{sd['cov']:.3f}")
+            if sd.get("opt"):
+                add(id=f"pseeds.{tag}.{s}.policy.opt", target=g,
+                    sources=[f"results/policy_seeds_ood/pseed{s}_full_{split}.json"],
+                    n=N, run=f"policy{s}", group=f"pseeds_{tag}",
+                    typeset=f"{sd['opt']:.2f}")
 
 
 # ====================================================== hand-curated + prose sources
@@ -482,15 +517,6 @@ def _runtime():
         add(id=f"runtime.{r['device']}.n{r['n']}", target="tab_runtime.tex",
             sources=["results/probe_timing.json"], n=None, run="timing",
             group="runtime_learned", typeset=f"${round(r['total_ms']):d}$")
-
-
-def _reinforce():
-    for row in json.loads((D / "baseline_reinforce.json").read_text())["rows"]:
-        add(id=f"reinforce.{row['name'][:12]}", target="tab_reinforce.tex",
-            sources=["paper/data/baseline_reinforce.json"], n=1224,
-            run="pre-dedup-protocol", group="reinforce",
-            typeset=f"{row['S_over_OPT']:.2f}",
-            note="earlier protocol on the pooled pool; caption says so")
 
 
 def _significance():
@@ -538,25 +564,38 @@ def _canonical():
 
 
 def _editor():
-    a = res("eval_t08.json")["summary"]
-    b = res("editor_sweep/v2/st0p9_cgnone.json")["summary"]
-    add(id="editor.cut13", target="paper.tex", sources=["results/eval_t08.json"],
-        n=a["n_polygons"], run="editor_t08", group="editor",
-        value=(1 - a["ed_size_mean"] / a["seed_size_mean"]) * 100, interval=(12.0, 13.9),
-        phrase="cuts only $13\\%$ of the guards")
-    add(id="editor.recovery", target="paper.tex", sources=["results/eval_t08.json"],
-        n=a["n_polygons"], run="editor_t08", group="editor",
+    # Both arms re-run on the canonical 362-polygon dev_test split (2026-07-31).
+    # The superseded runs (results/eval_t08.json, editor_sweep/v2/st0p9_cgnone.json)
+    # were scored on an ad-hoc 300-polygon sample that straddled the dev/test
+    # boundary (92 test polygons + 208 others), which flattered the coverage
+    # figure: on the clean split the best config LOSES coverage rather than
+    # preserving it. See eval_editor.py --restrict-to-names.
+    a = res("eval_editor_test362_t08.json")["summary"]
+    b = res("eval_editor_test362_st0p9.json")["summary"]
+    add(id="editor.cut13", target="paper.tex",
+        sources=["results/eval_editor_test362_t08.json"],
+        n=a["n_polygons"], run="editor_t08_test362", group="editor",
+        value=(1 - a["ed_size_mean"] / a["seed_size_mean"]) * 100, interval=(15.0, 16.9),
+        phrase="cuts $16\\%$ of the guards")
+    add(id="editor.recovery", target="paper.tex",
+        sources=["results/eval_editor_test362_t08.json"],
+        n=a["n_polygons"], run="editor_t08_test362", group="editor",
         typeset=f"${a['frac_recovery_ge_1.0']:.2f}$")
     add(id="editor.cut26", target="paper.tex",
-        sources=["results/editor_sweep/v2/st0p9_cgnone.json"], n=b["n_polygons"],
-        run="editor_st0p9", group="editor_aggressive",
-        value=(1 - b["ed_size_mean"] / b["seed_size_mean"]) * 100, interval=(25.5, 26.9),
-        phrase="up to $26\\%$")
+        sources=["results/eval_editor_test362_st0p9.json"], n=b["n_polygons"],
+        run="editor_st0p9_test362", group="editor_aggressive",
+        value=(1 - b["ed_size_mean"] / b["seed_size_mean"]) * 100, interval=(21.5, 22.9),
+        phrase="up to $22\\%$")
     add(id="editor.cov925", target="paper.tex",
-        sources=["results/editor_sweep/v2/st0p9_cgnone.json"], n=b["n_polygons"],
-        run="editor_st0p9", group="editor_aggressive",
-        value=b["ed_cov_mean"], interval=(0.9235, 0.9255),
-        phrase="dropping the mean to $0.925$")
+        sources=["results/eval_editor_test362_st0p9.json"], n=b["n_polygons"],
+        run="editor_st0p9_test362", group="editor_aggressive",
+        value=b["ed_cov_mean"], interval=(0.9325, 0.9345),
+        phrase="dropping the mean to $0.933$")
+    add(id="editor.recovery_med_aggr", target="paper.tex",
+        sources=["results/eval_editor_test362_st0p9.json"], n=b["n_polygons"],
+        run="editor_st0p9_test362", group="editor_aggressive",
+        value=b["recovery_median"], interval=(-0.45, -0.30),
+        phrase="median recovery $-0.38$")
 
 
 def _supervised():
@@ -718,14 +757,9 @@ def _ablation_2x2():
 def _policy_seeds_indist():
     """tab_policy_seeds, the in-distribution block."""
     g = "tab_policy_seeds.tex"
-    dev, ne = poly("dist_dev_test.json"), poly("dist_dev_test_noenc.json")
-    S = ["paper/data/dist_dev_test.json", "paper/data/dist_dev_test_noenc.json"]
-    for lab, recs, key in (("policy", dev, "seed"), ("full", dev, "probe_t020"),
-                           ("noenc", ne, "probe_t020")):
-        add(id=f"pseeds.test.1234.{lab}.chv", target=g, sources=S, n=362,
-            run="policy1234", group="pseeds_test", typeset=f"{chv(recs,key):.3f}")
-        add(id=f"pseeds.test.1234.{lab}.gate", target=g, sources=S, n=362,
-            run="policy1234", group="pseeds_test", typeset=f"{gate(recs,key)}/362")
+    # Policy 1234 is no longer a row in this table -- its numbers would be verbatim
+    # copies of tab_headline/tab_ood/tab_large, which is why it was dropped. Those
+    # tables register it; nothing to register here.
     for sd in SEEDS:
         src = [f"results/policy_seeds/pseed{sd}_{a}.json" for a in ("full", "noenc")]
         for lab, arm, key in (("policy", "full", "seed"), ("full", "full", "cell"),
@@ -735,6 +769,13 @@ def _policy_seeds_indist():
             add(id=f"pseeds.test.{sd}.{lab}.chv", target=g, sources=src, n=362,
                 run=f"policy{sd}", group="pseeds_test",
                 typeset=f"{src1['chv']:.3f}")
+            add(id=f"pseeds.test.{sd}.{lab}.cov", target=g, sources=src, n=362,
+                run=f"policy{sd}", group="pseeds_test",
+                typeset=f"{src1['cov']:.3f}")
+            if src1.get("opt"):
+                add(id=f"pseeds.test.{sd}.{lab}.opt", target=g, sources=src, n=362,
+                    run=f"policy{sd}", group="pseeds_test",
+                    typeset=f"{src1['opt']:.2f}")
             add(id=f"pseeds.test.{sd}.{lab}.gate", target=g, sources=src, n=362,
                 run=f"policy{sd}", group="pseeds_test",
                 typeset=f"{src1['dist']['n_cov_ge_095']}/362")
@@ -799,29 +840,18 @@ def _minor_cells():
             sources=["paper/data/dist_dev_test.json"], n=362, run="policy1234",
             group="dist_shift_min",
             typeset=f"& {sum(1 for r in recs if r[key]['cov']>=0.999)} &")
-    rf = json.loads((D / "baseline_reinforce.json").read_text())["rows"]
-    for row in rf:
-        add(id=f"reinforce.{row['name'][:12]}.cov", target="tab_reinforce.tex",
-            sources=["paper/data/baseline_reinforce.json"], n=1224,
-            run="pre-dedup-protocol", group="reinforce_cov",
-            typeset=f"{row['cov']:.3f}")
+    # tab_reinforce was cut: the PO/BT row's numbers matched no run on disk, and
+    # no epoch-30 PO checkpoint exists to match the REINFORCE baselines' budget
+    # (the one epoch-40 candidate is from a collapsed pre-fix run). The objective
+    # choice is now argued from the saturation mechanism in sec:method-pointer,
+    # with the development-run comparison stated qualitatively and no numbers.
 
 
 def _remaining():
     """Cells and prose values not covered by any other group."""
-    # tab_policy_seeds: the policy-1234 rows on ood / ood-large come from paper/data
-    for tag, files, N in (("ood", ("dist_test_OOD.json", "dist_test_OOD_noenc.json"), 2081),
-                          ("ood_large", ("dist_ood_large.json", "dist_ood_large_noenc.json"), 285)):
-        f, fn = poly(files[0]), poly(files[1])
-        src = [f"paper/data/{x}" for x in files]
-        for lab, recs, key in (("policy", f, "seed"), ("full", f, "probe_t020"),
-                               ("noenc", fn, "probe_t020")):
-            add(id=f"pseeds.{tag}.1234.{lab}.chv", target="tab_policy_seeds.tex",
-                sources=src, n=N, run="policy1234", group=f"pseeds_{tag}_1234",
-                typeset=f"{chv(recs,key):.3f}")
-            add(id=f"pseeds.{tag}.1234.{lab}.gate", target="tab_policy_seeds.tex",
-                sources=src, n=N, run="policy1234", group=f"pseeds_{tag}_1234",
-                typeset=f"{gate(recs,key)}/{N}")
+    # The policy-1234 rows were dropped from tab_policy_seeds: with cov and |S|/OPT
+    # present they restated tab_headline/tab_ood/tab_large verbatim. Those tables
+    # register the released policy; nothing to register for it here.
     # disc-vis quality: the gap column and the guard-count spread
     for b in res("discvis_greedy_timing.json")["buckets"]:
         n = b["bucket"]
@@ -844,18 +874,14 @@ def _remaining():
             n=N, run="policy1234", group=f"{tag}_wilson",
             typeset=f"{lo:.3f}")
     # prose: worked example, invariance coverage range, operating curve, runtime, subset
-    we = json.loads((D / "worked_examples.json").read_text())["examples"]
-    for i, e in enumerate(we):
-        add(id=f"fig.we{i}.seedcov", target="paper.tex",
-            sources=["paper/data/worked_examples.json"], n=1, run=f"worked_{e['name']}",
-            group=f"worked_example_{i}", typeset=f"{e['seed_coverage']:.3f}")
-        add(id=f"fig.we{i}.probecov", target="paper.tex",
-            sources=["paper/data/worked_examples.json"], n=1, run=f"worked_{e['name']}",
-            group=f"worked_example_{i}", typeset=f"{e['probe_coverage']:.3f}")
-        add(id=f"fig.we{i}.opt", target="paper.tex",
-            sources=["paper/data/worked_examples.json"], n=1, run=f"worked_{e['name']}",
-            group=f"worked_example_{i}",
-            typeset=f"{len(e['probe_idxs'])/len(e['opt_idxs']):.2f}")
+    # The worked-example coverages and |S|/OPT are drawn ON the figure panels by
+    # build_figures.py and are no longer restated in the caption, which would only
+    # duplicate them. Check 1 tests presence in paper.tex or a table file, so it
+    # cannot see numbers rendered inside a PDF; these values are instead guarded by
+    # check 7, which requires fig_worked_example to be newer than
+    # worked_examples.json. Registering them against paper.tex would fail, and
+    # exempting them from the numeral audit would be wrong -- they are not in the
+    # text to audit.
     inv = json.loads((D / "invariance_test.json").read_text())["summary"]
     covs = [v["mean_cov"] for k, v in inv.items() if k != "identity"]
     add(id="inv.identity_cov", target="paper.tex",
@@ -864,6 +890,9 @@ def _remaining():
     add(id="inv.cov_lo", target="paper.tex",
         sources=["paper/data/invariance_test.json"], n=362, run="policy1234",
         group="invariance_cov", typeset=f"{min(covs):.3f}")
+    add(id="inv.cov_hi", target="paper.tex",
+        sources=["paper/data/invariance_test.json"], n=362, run="policy1234",
+        group="invariance_cov", typeset=f"{max(covs):.3f}")
     add(id="inv.worst_min", target="paper.tex",
         sources=["paper/data/invariance_test.json"], n=362, run="policy1234",
         group="invariance_cov",
@@ -871,10 +900,8 @@ def _remaining():
     full = [json.loads((D / "matched_budget" / f"full_{s}.json").read_text())
             for s in ("1234", 11, 22, 33)]
     c50 = [d["cells"]["t=0.5|K=1"] for d in full]
-    add(id="opcurve.t050.cov_prose", target="paper.tex",
-        sources=[f"paper/data/matched_budget/full_{s}.json" for s in ("1234", 11, 22, 33)],
-        n=362, run="probe_seeds_1234_11_22_33", group="opcurve_prose",
-        typeset=f"{mean(c['cov'] for c in c50):.3f}")
+    # the t=0.50 mean coverage is no longer restated in prose (it is in
+    # tab_operating_curve, which registers it); only the gate count is quoted.
     add(id="opcurve.t050.gate_prose", target="paper.tex",
         sources=[f"paper/data/matched_budget/full_{s}.json" for s in ("1234", 11, 22, 33)],
         n=362, run="probe_seeds_1234_11_22_33", group="opcurve_prose",
@@ -900,13 +927,69 @@ def _remaining():
         sources=[f"paper/data/{f}" for f in OOD], n=885,
         run="probe_seeds_1234_11_22_33", group="ood_subset",
         typeset=f"{mean(sum(1 for r in poly(f) if r['n']>198 and r['probe_t020']['cov']>=0.95)/len(big) for f in OOD)*100:.1f}")
-    a = res("eval_t08.json")["summary"]
-    add(id="editor.cov972", target="paper.tex", sources=["results/eval_t08.json"],
-        n=a["n_polygons"], run="editor_t08", group="editor_cov",
+    a = res("eval_editor_test362_t08.json")["summary"]
+    add(id="editor.cov972", target="paper.tex",
+        sources=["results/eval_editor_test362_t08.json"],
+        n=a["n_polygons"], run="editor_t08_test362", group="editor_cov",
         typeset=fmt(a["ed_cov_mean"], 3))
-    add(id="editor.covseed", target="paper.tex", sources=["results/eval_t08.json"],
-        n=a["n_polygons"], run="editor_t08", group="editor_cov",
+    add(id="editor.covseed", target="paper.tex",
+        sources=["results/eval_editor_test362_t08.json"],
+        n=a["n_polygons"], run="editor_t08_test362", group="editor_cov",
         typeset=f"{a['seed_cov_mean']:.3f}")
+
+
+def _pos_weight():
+    """The probe's BCE positive-class weight, recomputed from the shipped targets.
+
+    Registered because this number went stale once: the paper carried 5.66, which
+    is the ratio in ls_trajectories_train_strict.pkl -- a superseded target set
+    used by exactly one probe checkpoint. All 24 headline/ablation/ladder probes
+    train on ls_trajectories_train.pkl (5.77), and each policy seed generates its
+    own targets (5.77-5.90). train_set_predictor.py derives it as
+    n_removed / n_kept over the training records.
+    """
+    def ratio(fn):
+        with open(REPO / "data" / fn, "rb") as fh:
+            recs = pickle.load(fh)
+        if isinstance(recs, dict):
+            recs = recs.get("records", recs)
+        kept = sum(len(set(r["final"])) for r in recs)
+        rem = sum(r["n"] - len(set(r["final"])) for r in recs)
+        return rem / kept
+
+    released = ratio("ls_trajectories_train.pkl")
+    add(id="posw.released", target="paper.tex",
+        sources=["data/ls_trajectories_train.pkl"], n=8867,
+        run="probe_targets_policy1234", group="pos_weight",
+        value=released, interval=(5.765, 5.785), phrase="$5.77$ for the released")
+    pseeds = [ratio(f"ls_trajectories_train_pseed{s}.pkl") for s in (11, 22, 33)]
+    add(id="posw.pseed_hi", target="paper.tex",
+        sources=[f"data/ls_trajectories_train_pseed{s}.pkl" for s in (11, 22, 33)],
+        n=8867, run="probe_targets_policy_seeds", group="pos_weight",
+        value=max(pseeds), interval=(5.895, 5.905), phrase="$5.90$")
+
+
+def _po_training():
+    """The saturation figures quoted in sec:method-pointer.
+
+    Provenance, which the paper does not lean on for quality claims: per-epoch
+    eval on the first 50 polygons of the 8000 TRAINING prefix (epoch_eval_k=50,
+    train_size=8000 in configs/po_agp_transformer_bt.json), disc-vis approximate
+    coverage, greedy decode. Training data under an approximate metric -- fine
+    for "this run stopped trading one axis against the other", not comparable to
+    the results tables. The figure built on these curves was cut for that reason.
+    """
+    d = json.loads((D / "po_training_curves.json").read_text())
+    src = ["paper/data/po_training_curves.json"]
+    s = d["seeds"]
+    add(id="potrain.s22_sopt_tail", target="paper.tex", sources=src, n=50,
+        run="policy_seed22_log_trainprefix", group="po_training",
+        value=mean(s["22"]["size_over_opt_greedy"][-20:]), interval=(3.6, 4.0),
+        phrase="near $3.8\\times$ the optimum")
+    add(id="potrain.s22_cov_tail", target="paper.tex", sources=src, n=50,
+        run="policy_seed22_log_trainprefix", group="po_training",
+        value=min(s["22"]["coverage_greedy"][-20:]), interval=(0.9995, 1.0005),
+        phrase="coverage $1.000$")
 
 
 def _c4_drift():
@@ -1127,10 +1210,10 @@ def build() -> list[Claim]:
     CLAIMS.clear()
     for fn in (_headline, _dist_shift, _pareto, _ood, _large, _operating_curve,
                _matched_budget, _matched_budget_pseeds, _policy_seeds,
-               _probe_ladder, _decode_search, _runtime, _reinforce,
+               _probe_ladder, _decode_search, _runtime,
                _ablation_2x2, _policy_seeds_indist, _discvis_quality,
                _runtime_classical, _minor_cells, _remaining,
-               _c4_drift, _discvis_correlations, _wilson_uppers, _final_gaps, _approximations,
+               _c4_drift, _po_training, _pos_weight, _discvis_correlations, _wilson_uppers, _final_gaps, _approximations,
                _significance, _invariance, _canonical, _editor, _supervised,
                _linear_probe, _reward_estimator, _verbal):
         fn()

@@ -51,7 +51,7 @@ ANCHORS = [1.95, 1.7, 1.5, 1.3]
 
 
 def curve(arm: str, seed: str) -> dict:
-    """t -> (|S|/n, |S|/OPT, mean cov, #Cov<0.99) for one arm and probe seed."""
+    """t -> (|S|/n, |S|/OPT, mean cov, #Cov<0.99, min cov) per arm and probe seed."""
     d = json.load(open(SWEEP / f"{arm}_{seed}.json"))
     out = {}
     for key, c in d["cells"].items():
@@ -59,7 +59,8 @@ def curve(arm: str, seed: str) -> dict:
             continue
         t = float(key.split("|")[0].split("=")[1])
         out[t] = (c["chv"], c["opt"], c["cov"],
-                  float(c["dist"]["n_total"] - c["dist"]["n_cov_ge_099"]))
+                  float(c["dist"]["n_total"] - c["dist"]["n_cov_ge_099"]),
+                  c["dist"]["cov_min"])
     return out
 
 
@@ -68,6 +69,12 @@ CURVES = {(a, s): curve(a, s) for a, _ in ARMS for s in SEEDS}
 
 def mean_at(arm: str, t: float, idx: int) -> float:
     return float(np.mean([CURVES[(arm, s)][t][idx] for s in SEEDS]))
+
+
+def std_at(arm: str, t: float, idx: int) -> float:
+    """Population std over the four probe seeds, so panel (a) reports the same
+    mean +- std as panel (b) rather than presenting a 4-seed mean as a point."""
+    return float(np.std([CURVES[(arm, s)][t][idx] for s in SEEDS]))
 
 
 def tail_at_cost(arm: str, seed: str, target: float):
@@ -160,7 +167,7 @@ def main() -> None:
         cells = []
         for arm, _ in ARMS:
             cells.append(f"{mean_at(arm, t, 1):.2f}")
-            cells.append(f"{mean_at(arm, t, 3):.0f}")
+            cells.append(f"${mean_at(arm, t, 3):.0f} \\pm {std_at(arm, t, 3):.0f}$")
         L.append(f"  {t:.2f} & " + " & ".join(cells) + r" \\")
     L.append(r"  \midrule")
     L.append(rf"  \multicolumn{{{ncol}}}{{l}}"
@@ -180,16 +187,23 @@ def main() -> None:
     mult = encoder_cost_multiple()
     if any(any(v is not None for v in r.values()) for r in mult.values()):
         L.append(r"  \midrule")
-        L.append(rf"  \multicolumn{{{ncol}}}{{l}}{{\emph{{(c) guards the no-encoder"
-                 r" arm needs for the same tail, per policy}} \\")
-        L.append(r"  policy & " + " & ".join(
-            rf"\multicolumn{{2}}{{c}}{{$\#$fail${{=}}{t}$}}" for t in TAILS) + r" \\")
+        # One number per policy, not a 4x4 grid: within a policy the multiple is
+        # near-constant across tail levels (spread <= 0.09), so the grid spent 16
+        # cells -- three of them empty -- to convey four values. Reported as the
+        # range over the reachable tail levels {30, 50, 76, 100}.
+        L.append(rf"  \multicolumn{{{ncol}}}{{l}}{{\emph{{(c) extra guards the"
+                 r" no-encoder probe needs to leave the same tail as the full probe}} \\")
+        L.append(r"  policy seed & " + " & ".join(
+            rf"\multicolumn{{2}}{{c}}{{{lab}}}" for lab in
+            ("1234$^{\\ast}$", "11", "22", "33")) + r" \\")
+        cells = []
         for p in ["1234"] + PSEEDS:
-            cells = [(f"{mult[p][t]:.2f}$\\times$" if mult[p][t] is not None else "---")
-                     for t in TAILS]
-            star = r"$^{\ast}$" if p == "1234" else ""
-            L.append(f"  {p}{star} & " + " & ".join(
-                rf"\multicolumn{{2}}{{c}}{{{c}}}" for c in cells) + r" \\")
+            vals = [mult[p][t] for t in TAILS if mult[p][t] is not None]
+            cells.append(
+                rf"\multicolumn{{2}}{{c}}{{$+{(min(vals) - 1) * 100:.0f}$--"
+                rf"${(max(vals) - 1) * 100:.0f}\%$}}"
+                if vals else r"\multicolumn{2}{c}{---}")
+        L.append(r"  extra guards & " + " & ".join(cells) + r" \\")
     L.append(r"  \bottomrule")
     L.append(r"\end{tabular}")
     TABLE.write_text("\n".join(L) + "\n")

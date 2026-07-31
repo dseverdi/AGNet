@@ -62,6 +62,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--editor-checkpoint", type=str, default=None)
     p.add_argument("--val-dir", type=str, default=None)
     p.add_argument("--n-samples", type=int, default=-1)
+    # Restrict the evaluation to the polygons named in a trajectory pickle, so
+    # the editor can be scored on exactly the paper's dev_test split. Without
+    # this, --val-dir loads a whole directory and --n-samples takes an
+    # arbitrary prefix, which is how the original 300-polygon editor run came
+    # to straddle the dev/test boundary (92 test polygons + 208 others).
+    p.add_argument("--restrict-to-names", type=str, default=None,
+                   help="path to an LS-trajectory pickle whose polygon names "
+                        "define the evaluation split (e.g. "
+                        "data/ls_trajectories_dev_test_clean.pkl)")
     # Pointer config (must match the pretrained checkpoint).
     p.add_argument("--embedding-size", type=int, default=128)
     p.add_argument("--hidden-size", type=int, default=128)
@@ -254,6 +263,24 @@ def main() -> None:
     print(f"[eval] editor={args.editor_checkpoint}")
 
     _, val_ds = prepare_datasets(train_dir, val_dir, normalize=True)
+    if args.restrict_to_names:
+        import pickle
+        with open(args.restrict_to_names, "rb") as f:
+            recs = pickle.load(f)
+        if isinstance(recs, dict):
+            recs = recs.get("records", recs.get("data", []))
+        keep = {r["name"] for r in recs if isinstance(r, dict) and r.get("name")}
+        before = len(val_ds.samples)
+        val_ds.samples = [s for s in val_ds.samples if s.name in keep]
+        missing = keep - {s.name for s in val_ds.samples}
+        print(f"[eval] restricted {before} -> {len(val_ds)} polygons "
+              f"({len(keep)} names in {os.path.basename(args.restrict_to_names)}"
+              f"{f', {len(missing)} NOT FOUND' if missing else ''})")
+        if missing:
+            raise SystemExit(
+                f"[eval] {len(missing)} split polygons absent from --val-dir; "
+                f"e.g. {sorted(missing)[:5]}. Point --val-dir at the directory "
+                f"containing the split.")
     if args.n_samples > 0:
         val_ds.samples = val_ds.samples[: args.n_samples]
     print(f"[eval] {len(val_ds)} polygons, include_ls={args.include_ls_reference}")

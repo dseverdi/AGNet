@@ -4,7 +4,6 @@ Run: python paper/scripts/build_figures.py
 Output: paper/gfx/setpred/fig_*.pdf
 
 Figures in the current paper layout (5):
-- fig_po_training.pdf    : PO/BT training dynamics (held-out dev)
 - fig_worked_example.pdf : two polygons, seed vs probe vs optimum
 - fig_distributions.pdf  : 3x3 grid, {test, ood, ood-large} x {coverage CCDF, |S|/n, |S|/OPT}
 - fig_mechanism.pdf      : K-invariance fixed point (1x3 panels)
@@ -265,57 +264,6 @@ def _maybe_load(name: str) -> dict | None:
     except Exception as exc:
         print(f"warn: failed to parse {path}: {exc}")
         return None
-
-
-def fig_po_training() -> None:
-    """PO/BT training curve over the late checkpoints, on a held-out sample.
-
-    Reads paper/data/po_agp_training.json. Expected schema:
-        {"epochs": [int, ...],
-         "coverage_greedy_mean": [float, ...],
-         "guard_ratio_greedy_mean": [float, ...],
-         "size_over_opt_greedy_mean": [float, ...]   # optional
-        }
-    """
-    d = _maybe_load("po_agp_training.json")
-    if d is None:
-        print("skip fig_po_training: paper/data/po_agp_training.json not found")
-        return
-
-    epochs = d.get("epochs")
-    cov_g = d.get("coverage_greedy_mean")
-    if not epochs or not cov_g:
-        print("skip fig_po_training: required fields (epochs, coverage_greedy_mean) missing")
-        return
-
-    fig, ax_cov = plt.subplots(figsize=(5.4, 3.2))
-    ax_cov.plot(epochs, cov_g, "-o", color=COLORS["seed"],
-                markersize=3, linewidth=1.4, label="coverage (greedy decode)")
-    ax_cov.set_xlabel("Training epoch")
-    ax_cov.set_ylabel("Mean coverage", color=COLORS["seed"])
-    ax_cov.tick_params(axis="y", labelcolor=COLORS["seed"])
-    ax_cov.grid(alpha=0.3, linewidth=0.5)
-    # zoom the coverage axis to the late-phase band so its (small) variation is
-    # visible rather than a dead-flat line at the top of a 0--1 axis
-    ax_cov.set_ylim(0.95, 1.0)
-
-    sopt = d.get("size_over_opt_greedy_mean")
-    gr_g = d.get("guard_ratio_greedy_mean")
-    second = sopt if sopt else gr_g
-    second_label = ("$|S|/\\mathrm{OPT}$" if sopt
-                    else ("$|S|/n$" if gr_g else None))
-    if second is not None:
-        ax_sopt = ax_cov.twinx()
-        ax_sopt.plot(epochs, second, "-s", color=COLORS["t020"],
-                     markersize=3, linewidth=1.4, label=second_label)
-        ax_sopt.set_ylabel("Mean " + second_label, color=COLORS["t020"])
-        ax_sopt.tick_params(axis="y", labelcolor=COLORS["t020"])
-        h1, l1 = ax_cov.get_legend_handles_labels()
-        h2, l2 = ax_sopt.get_legend_handles_labels()
-        ax_cov.legend(h1 + h2, l1 + l2, loc="lower right", frameon=False)
-
-    ax_cov.set_title("PO/BT training dynamics (late checkpoints)")
-    save(fig, "fig_po_training.pdf")
 
 
 def fig_worked_example() -> None:
@@ -882,7 +830,6 @@ def _run(fn, name: str) -> None:
 
 
 if __name__ == "__main__":
-    _run(fig_po_training,    "fig_po_training")
     _run(fig_worked_example, "fig_worked_example")
     _run(fig_distributions,  "fig_distributions")
     _run(fig_mechanism,      "fig_mechanism")

@@ -8,8 +8,8 @@
   \midrule
   \multicolumn{5}{l}{\emph{Learned policy / probe}} \\
   \quad Pretrained pointer (seed) & 0.9689 & 293/362\,(0.766,0.847) & 0.1664 & 1.0885 \\
-  \quad SetPredictor full ($t=0.20$) & \textbf{0.9912}\,$\pm$\,0.0024 & $349.8 \pm 3.5$/362 & 0.2475\,$\pm$\,0.0050 & 1.6208\,$\pm$\,0.0299 \\
-  \quad SetPredictor, no-encoder ($t=0.20$) & 0.9976\,$\pm$\,0.0004 & $361.5 \pm 0.5$/362 & 0.4517\,$\pm$\,0.0432 & 2.9405\,$\pm$\,0.2654 \\
+  \quad \SetPredictor{} full ($t=0.20$) & \textbf{0.9912}\,$\pm$\,0.0024 & $349.8 \pm 3.5$/362 & 0.2475\,$\pm$\,0.0050 & 1.6208\,$\pm$\,0.0299 \\
+  \quad \SetPredictor{}, no-encoder ($t=0.20$) & 0.9976\,$\pm$\,0.0004 & $361.5 \pm 0.5$/362 & 0.4517\,$\pm$\,0.0432 & 2.9405\,$\pm$\,0.2654 \\
   \midrule
   \multicolumn{5}{l}{\emph{Oracle editor (\SetPredictor{} target, policy-seeded)}} \\
   \quad LS on policy seed & 0.9948 & 362/362 & 0.1369 & 0.8854$^{\dagger}$ \\

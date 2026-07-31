@@ -99,7 +99,9 @@ EXEMPT_EXPLICIT = {
     "1.0092", "1.0885", "0.9689", "0.1664",
     # structural: seed label, polygon-size row headers, a chosen matched-budget anchor,
     # and the dataset-partition upper bound
-    "1234", "2000", "900", "480", "193", "250", "1.95",
+    # matched-budget anchors: chosen |S|/OPT levels (row labels), not measurements
+    "1.95", "1.70", "1.50", "1.30",
+    "1234", "2000", "8000", "900", "480", "193", "250",
     # the source library's own vertex range, a dataset description rather than a
     # measurement of our results, and not derivable from any stored artifact
     "2500",
@@ -220,8 +222,10 @@ def check_aggregates():
 def check_figures():
     """Figures newer than their data; sources live. Catches a figure rebuilt from
     stale data, and (with the visual review) the phantom legend entry."""
+    # fig_po_training was cut: its per-epoch source is a TRAINING prefix under
+    # approximate disc-vis coverage (see tools/extract_po_training_curves.py),
+    # not a held-out quantity, and the released policy had only four checkpoints.
     figs = {
-        "fig_po_training": ["paper/data/po_agp_training.json"],
         "fig_worked_example": ["paper/data/worked_examples.json"],
         "fig_embedding": ["paper/data/encoder_embedding_views.json"],
         "fig_distributions": ["paper/data/dist_dev_test.json",
