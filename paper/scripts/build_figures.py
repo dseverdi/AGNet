@@ -604,6 +604,76 @@ def fig_distributions() -> None:
     save(fig, "fig_distributions.pdf")
 
 
+def fig_operating_curve() -> None:
+    """The threshold knob as a 2x2 panel grid sharing t on the x-axis.
+
+    Replaces the 14-row tab_operating_curve. Top row is outcome (mean coverage,
+    0.95-gate count), bottom row is cost (|S|/n, |S|/OPT). Putting the two cost
+    metrics side by side is deliberate: they are proportional to within 2.3% over
+    the sweep (Pearson r = 0.9998, ratio 0.151-0.154), so the bottom row shows the
+    same curve at two scales and the caption says so -- a reader who thinks in
+    vertex fraction and one who thinks in approximation ratio each get their axis.
+
+    Coverage spans only 0.058, so that panel is zoomed and its band carries the
+    information: the seed spread grows from +-0.002 at t=0.05 to +-0.015 at t=0.80.
+
+    Bands are +-1 std over the four probe seeds {1234, 11, 22, 33}. The dashed line
+    is the policy seed, which is threshold-independent and so horizontal.
+    Source: paper/data/matched_budget/full_{seed}.json.
+    """
+    seeds = ("1234", "11", "22", "33")
+    per_t, policy = {}, None
+    for sd in seeds:
+        d = _maybe_load(f"matched_budget/full_{sd}.json")
+        if d is None:
+            print("skip fig_operating_curve: matched_budget/full_*.json not found")
+            return
+        if policy is None:
+            policy = d["seed"]
+        for key, c in d["cells"].items():
+            if key.endswith("|K=1"):
+                t = float(key.split("|")[0].split("=")[1])
+                per_t.setdefault(t, []).append(c)
+    ts = sorted(per_t)
+
+    def band(fn_):
+        mu, sd = [], []
+        for t in ts:
+            v = [fn_(c) for c in per_t[t]]
+            m = sum(v) / len(v)
+            mu.append(m)
+            sd.append((sum((x - m) ** 2 for x in v) / len(v)) ** 0.5)
+        return mu, sd
+
+    panels = [
+        (lambda c: c["cov"], "Mean coverage", policy["cov"]),
+        (lambda c: float(c["dist"]["n_cov_ge_095"]),
+         "$\\#\\{\\mathrm{Cov} \\geq 0.95\\}$",
+         float(policy["dist"]["n_cov_ge_095"])),
+        (lambda c: c["chv"], "Mean $|S|/n$", policy["chv"]),
+        (lambda c: c["opt"], "Mean $|S|/\\mathrm{OPT}$", policy["opt"]),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(7.4, 4.8), sharex=True)
+    for ax, (getter, ylab, ref) in zip(axes.flat, panels):
+        mu, sd = band(getter)
+        ax.fill_between(ts, [m - s for m, s in zip(mu, sd)],
+                        [m + s for m, s in zip(mu, sd)],
+                        color=COLORS["t020"], alpha=0.22, linewidth=0)
+        ax.plot(ts, mu, "-o", color=COLORS["t020"], markersize=3, linewidth=1.4,
+                label="probe")
+        ax.axhline(ref, color=COLORS["seed"], linestyle="--", linewidth=1.1,
+                   label="policy seed")
+        ax.axvline(0.20, color="0.65", linestyle=":", linewidth=0.9, zorder=0)
+        ax.set_ylabel(ylab)
+        ax.grid(alpha=0.3, linewidth=0.5)
+    for ax in axes[1]:
+        ax.set_xlabel("Threshold $t$")
+    axes[0, 0].legend(loc="lower left", frameon=False)
+    fig.tight_layout()
+    save(fig, "fig_operating_curve.pdf")
+
+
 def fig_mechanism() -> None:
     """1x3: K-invariance fixed point across coverage, |S|/n, and |S|/OPT.
 
@@ -835,3 +905,4 @@ if __name__ == "__main__":
     _run(fig_mechanism,      "fig_mechanism")
     _run(fig_embedding,      "fig_embedding")
     _run(fig_runtime,        "fig_runtime")
+    _run(fig_operating_curve, "fig_operating_curve")

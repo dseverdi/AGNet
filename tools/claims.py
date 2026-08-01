@@ -235,7 +235,7 @@ def _headline():
 def _dist_shift():
     dev, ne = poly("dist_dev_test.json"), poly("dist_dev_test_noenc.json")
     g = "tab_dist_shift.tex"
-    for key in ("seed", "probe_t020", "probe_t025", "probe_t030"):
+    for key in ("seed", "probe_t020"):
         add(id=f"dist_shift.{key}.ge099", target=g,
             sources=["paper/data/dist_dev_test.json"], n=362, run="policy1234",
             group="dist_shift",
@@ -341,33 +341,16 @@ def _interp(pts, x_i, y_i, target):
 
 
 def _operating_curve():
-    g = "tab_operating_curve.tex"
-    srcs = [f"paper/data/matched_budget/full_{s}.json" for s in ("1234", 11, 22, 33)]
-    cur = [_mb_curve("full", s) for s in ("1234", 11, 22, 33)]
-    full = [json.loads((D / "matched_budget" / f"full_{s}.json").read_text())
-            for s in ("1234", 11, 22, 33)]
-    pol = full[0]["seed"]
-    add(id="opcurve.policy.cov", target=g, sources=srcs, n=362, run="policy1234",
-        group="opcurve_policy", typeset=f"${pol['cov']:.4f}$")
-    add(id="opcurve.policy.chv", target=g, sources=srcs, n=362, run="policy1234",
-        group="opcurve_policy", typeset=f"${pol['chv']:.3f}$")
-    add(id="opcurve.policy.opt", target=g, sources=srcs, n=362, run="policy1234",
-        group="opcurve_policy", typeset=f"${pol['opt']:.2f}$")
-    add(id="opcurve.policy.gate", target=g, sources=srcs, n=362, run="policy1234",
-        group="opcurve_policy", typeset=f"${pol['dist']['n_cov_ge_095']}$")
-    for t in sorted(cur[0]):
-        cells = [d["cells"][f"t={t}|K=1"] for d in full]
-        add(id=f"opcurve.t{t}.opt", target=g, sources=srcs, n=362,
-            run="probe_seeds_1234_11_22_33", group="opcurve",
-            typeset=f"{mean(c[t][1] for c in cur):.2f}")
-        for nm, vals, nd in (("cov", [c["cov"] for c in cells], 4),
-                             ("chv", [c["chv"] for c in cells], 3),
-                             ("gate", [c["dist"]["n_cov_ge_095"] for c in cells], 1)):
-            mu, sd = mean(vals), pstd(vals)
-            ts = (f"${mu:.{nd}f}$" if sd < 0.5 * 10 ** (-nd)
-                  else f"${mu:.{nd}f} \\pm {sd:.{nd}f}$")
-            add(id=f"opcurve.t{t}.{nm}", target=g, sources=srcs, n=362,
-                run="probe_seeds_1234_11_22_33", group="opcurve", typeset=ts)
+    """Retired: tab_operating_curve became fig:operating_curve.
+
+    The 14x4 table is now a three-panel figure (t on x, mean +- std bands). Its 60
+    cells were registered here against tab_operating_curve.tex; check 1 tests text
+    presence in paper.tex or a table file and cannot read numbers rendered inside a
+    PDF, so those registrations are gone. The figure is guarded instead by check 7
+    (fig_operating_curve newer than its matched_budget/ sources) and the values the
+    prose still quotes stay registered in _remaining()/_final_gaps().
+    """
+    return
 
 
 def _matched_budget():
@@ -381,9 +364,13 @@ def _matched_budget():
             add(id=f"mb.a.{a}.t{t}.opt", target=g, sources=srcs, n=362,
                 run="probe_seeds_1234_11_22_33", group="mb_panel_a",
                 typeset=f"{mean(c[t][1] for c in cur[a]):.2f}")
+            # Register the full "$mean \pm std$" cell, as panel (b) does. Registering
+            # the mean alone left every seed-spread in panel (a) unverified, which is
+            # exactly the quantity the "strict and seed-stable" claim rests on.
             add(id=f"mb.a.{a}.t{t}.fail", target=g, sources=srcs, n=362,
                 run="probe_seeds_1234_11_22_33", group="mb_panel_a",
-                typeset=f"{mean(c[t][3] for c in cur[a]):.0f}")
+                typeset=f"${mean(c[t][3] for c in cur[a]):.0f} \\pm "
+                        f"{pstd([c[t][3] for c in cur[a]]):.0f}$")
     for anchor in (1.95, 1.7, 1.5, 1.3):
         for a in arms:
             v = [_interp(c.values(), 1, 3, anchor) for c in cur[a]]
@@ -793,6 +780,16 @@ def _discvis_quality():
             sources=["results/discvis_greedy_timing.json"], n=b["n_polys"],
             run="discvis_timing", group=f"discvis_quality_{n}",
             typeset=f"{b['exact_coverage_mean']:.3f}")
+        # the std is typeset alongside the mean; register it so it is not left
+        # riding on a coincidental collision with some other claim's value
+        add(id=f"dvq.{n}.exact_sd", target="tab_discvis_quality.tex",
+            sources=["results/discvis_greedy_timing.json"], n=b["n_polys"],
+            run="discvis_timing", group=f"discvis_quality_{n}",
+            typeset=f"{b['exact_coverage_std']:.3f}")
+        add(id=f"dvq.{n}.gap_sd", target="tab_discvis_quality.tex",
+            sources=["results/discvis_greedy_timing.json"], n=b["n_polys"],
+            run="discvis_timing", group=f"discvis_quality_{n}",
+            typeset=f"{b['gap_std']:.3f}")
 
 
 def _runtime_classical():
@@ -821,25 +818,20 @@ def _runtime_classical():
 def _minor_cells():
     """min-Cov and Wilson cells that no other group covers."""
     dev, ne = poly("dist_dev_test.json"), poly("dist_dev_test_noenc.json")
+    # t=0.25 / t=0.30 rows were dropped from tab_dist_shift once
+    # fig:operating_curve took over the threshold sweep.
     for lab, recs, key in (("seed", dev, "seed"), ("full", dev, "probe_t020"),
-                           ("t025", dev, "probe_t025"), ("t030", dev, "probe_t030"),
                            ("noenc", ne, "probe_t020")):
         add(id=f"dist_shift.{lab}.mincov", target="tab_dist_shift.tex",
             sources=["paper/data/dist_dev_test.json",
                      "paper/data/dist_dev_test_noenc.json"],
             n=362, run="policy1234", group="dist_shift_min",
             typeset=f"{min(r[key]['cov'] for r in recs):.3f}")
-    for lab, recs, key in (("seed", dev, "seed"), ("t025", dev, "probe_t025"),
-                           ("t030", dev, "probe_t030")):
+    for lab, recs, key in (("seed", dev, "seed"),):
         add(id=f"dist_shift.{lab}.eq1", target="tab_dist_shift.tex",
             sources=["paper/data/dist_dev_test.json"], n=362, run="policy1234",
             group="dist_shift_min",
             typeset=f"& {sum(1 for r in recs if r[key]['cov']>=0.99995)} &")
-    for lab, recs, key in (("t025", dev, "probe_t025"), ("t030", dev, "probe_t030")):
-        add(id=f"dist_shift.{lab}.ge0999", target="tab_dist_shift.tex",
-            sources=["paper/data/dist_dev_test.json"], n=362, run="policy1234",
-            group="dist_shift_min",
-            typeset=f"& {sum(1 for r in recs if r[key]['cov']>=0.999)} &")
     # tab_reinforce was cut: the PO/BT row's numbers matched no run on disk, and
     # no epoch-30 PO checkpoint exists to match the REINFORCE baselines' budget
     # (the one epoch-40 candidate is from a collapsed pre-fix run). The objective
@@ -1072,6 +1064,22 @@ def _final_gaps():
     add(id="dist_shift.noenc.ge0999", target="tab_dist_shift.tex", sources=Sd, n=362,
         run="policy1234", group="dist_shift_min",
         typeset=f"& {sum(1 for r in ne if r['probe_t020']['cov']>=0.999)} &")
+    # The full probe's own >=0.999 count was the one cell in this table with no
+    # registration: its value (128) collided with the exempt embedding dimension, so
+    # completeness never flagged it. Exemptions can shadow real measurements -- prefer
+    # registering a cell over trusting that some other numeral covers it.
+    add(id="dist_shift.probe_t020.ge0999", target="tab_dist_shift.tex", sources=Sd,
+        n=362, run="policy1234", group="dist_shift_min",
+        typeset=f"& {sum(1 for r in dev if r['probe_t020']['cov']>=0.999)} &")
+    # The $\ge 0.95$ gate column was unregistered against this table: its values
+    # (293/362, 345/362) are registered against tab_headline and against the
+    # invariance prose, and completeness pools numerals across targets, so the cells
+    # here were satisfied by a match somewhere else entirely.
+    for lab, recs, key in (("seed", dev, "seed"), ("full", dev, "probe_t020"),
+                           ("noenc", ne, "probe_t020")):
+        add(id=f"dist_shift.{lab}.gate", target="tab_dist_shift.tex", sources=Sd,
+            n=362, run="policy1234", group="dist_shift_gate",
+            typeset=f"{sum(1 for r in recs if r[key]['cov']>=0.95)}/362")
     add(id="prose.probe_below_gate", target="paper.tex", sources=Sd, n=362,
         run="policy1234", group="dist_shift_prose",
         typeset=f"${below(dev,'probe_t020')}$")
@@ -1110,8 +1118,10 @@ def _final_gaps():
         add(id=f"prose.pct_more_{tag}", target="paper.tex", sources=S, n=362,
             run="probe_seeds_1234_11_22_33", group=f"pct_more_{tag}",
             value=(r - 1) * 100, interval=want,
-            phrase=("roughly $45\\%$ more guards" if tag == "noenc"
-                    else "roughly $75\\%$ more"))
+            # The paper states these as multiples, not percentages; the phrase must
+            # match text that is actually in paper.tex or check 1 orphans the claim.
+            phrase=("about $1.45\\times$ the full probe's guards" if tag == "noenc"
+                    else "coordinates alone about $1.75\\times$"))
     # reward-estimator percentages
     rs = res("reward_estimator_agreement.json")
     sm = rs["summary"]
@@ -1163,22 +1173,11 @@ def _approximations():
         value=mean([_interp_mean_x(cur["noseed"], t) / _interp_mean_x(cur["full"], t)
                     for t in (50, 76, 100)]), interval=(1.05, 1.15),
         phrase="masking only the seed costs about $1.1\\times$")
-    add(id="approx.econ_lo", target="paper.tex", sources=S, n=362,
-        run="probe_seeds_1234_11_22_33", group="approx_regime",
-        value=m("full", 0.20, 1), interval=(1.55, 1.68),
-        phrase="economical regime ($|S|/\\OPT$ $1.6$--$1.9$)")
-    add(id="approx.econ_hi", target="paper.tex", sources=S, n=362,
-        run="probe_seeds_1234_11_22_33", group="approx_regime",
-        value=m("noseed", 0.20, 1), interval=(1.85, 1.98),
-        phrase="economical regime ($|S|/\\OPT$ $1.6$--$1.9$)")
-    add(id="approx.noenc_t020", target="paper.tex", sources=S, n=362,
-        run="probe_seeds_1234_11_22_33", group="approx_regime",
-        value=m("noenc", 0.20, 1), interval=(2.85, 3.0),
-        phrase="the others sit at $2.9\\times$ (seed only)")
-    add(id="approx.coords_t020", target="paper.tex", sources=S, n=362,
-        run="probe_seeds_1234_11_22_33", group="approx_regime",
-        value=m("coords", 0.20, 1), interval=(4.55, 4.70),
-        phrase="and $4.6\\times$ (neither)")
+    # The "economical regime ($|S|/\OPT$ 1.6--1.9)" sentence and the "$2.9\times$
+    # (seed only) / $4.6\times$ (neither)" gloss were removed from the paper; the four
+    # values they carried (1.62 / 1.94 / 2.94 / 4.64) are still verified against
+    # tab_ablation, tab_ablation_thresholds and tab_headline, so nothing goes
+    # unchecked here -- these four registrations were pointing at dead prose.
     tails = [ _interp(c.values(), 1, 3, 1.5) for c in cur["noenc"] ]
     ft = [ _interp(c.values(), 1, 3, 1.5) for c in cur["full"] ]
     add(id="approx.tail_ratio_hi", target="paper.tex", sources=S, n=362,
@@ -1191,6 +1190,10 @@ def _approximations():
         sources=["paper/data/probe_ladder.json"], n=None, run="architecture",
         group="params", value=(lad["full"]["n_params"] + 364162) / 1e6,
         interval=(0.82, 0.84), phrase="${\\approx}\\,0.83$M parameters")
+    add(id="approx.params_mb", target="paper.tex",
+        sources=["paper/data/probe_ladder.json"], n=None, run="architecture",
+        group="params", value=(lad["full"]["n_params"] + 364162) * 4 / 1e6,
+        interval=(3.25, 3.35), phrase="${\\approx}\\,3.3$~MB at single precision")
     # rounded ROC-AUC and the t=0.70 coverage
     lp = json.loads((D / "encoder_linear_probe.json").read_text())
     add(id="approx.roc084", target="paper.tex",
@@ -1203,7 +1206,9 @@ def _approximations():
         sources=[f"paper/data/matched_budget/full_{sd}.json" for sd in ("1234", 11, 22, 33)],
         n=362, run="probe_seeds_1234_11_22_33", group="approx_t070",
         value=mean(d["cells"]["t=0.7|K=1"]["cov"] for d in full), interval=(0.9655, 0.9670),
-        phrase="mean coverage $0.966$ against $0.969$")
+        # The paper now makes this claim qualitatively; the interval is what keeps the
+        # word "converged" honest (0.9664 probe against the seed's 0.9689).
+        phrase="the probe has converged to the policy seed on both axes")
 
 
 def build() -> list[Claim]:

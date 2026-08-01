@@ -46,8 +46,14 @@ MUTATIONS = [
     ("a table numeral edited",
      lambda: edit(REPO / "paper/tables/tab_headline.tex", "1.6208", "1.6308"),
      ["[1]"]),
+    # Anchor on a numeral that lives ONLY in prose (no table carries it), so this
+    # exercises the tex side of check 1 rather than a table's. The previous anchor
+    # ("$302$ of $362$") went stale when tab_dist_shift was refactored in dd53f14,
+    # which silently made the whole suite unrunnable -- if this raises "anchor not
+    # found", repoint it, do not delete the mutation.
     ("a prose numeral edited",
-     lambda: edit(REPO / "paper/paper.tex", "$302$ of $362$", "$305$ of $362$"),
+     lambda: edit(REPO / "paper/paper.tex", r"$312$ under a $45^\circ$",
+                  r"$315$ under a $45^\circ$"),
      ["[1]", "[2]"]),
     ("retracted phrase reinserted",
      lambda: edit(REPO / "paper/paper.tex",
@@ -74,9 +80,17 @@ MUTATIONS = [
     ("an input changed without rebuilding the pdf",
      lambda: edit(REPO / "paper/tables/tab_probe_ladder.tex", "0.923", "0.933"),
      ["[9]"]),
+    # A verbal claim can be deleted from the paper while its interval still passes,
+    # leaving the gate verifying a sentence no reader sees. Seven claims were orphaned
+    # this way before check 1 asserted phrase presence.
+    ("a verbal claim's phrase deleted from the paper",
+     lambda: edit(REPO / "paper/paper.tex",
+                  r"about $1.45\times$ the full probe's guards",
+                  r"appreciably more of the full probe's guards"),
+     ["[1]"]),
     ("claims in one group drawn from different populations",
      lambda: edit(REPO / "tools/claims.py",
-                  'n=a["n_polygons"], run="editor_t08", group="editor",\n'
+                  'n=a["n_polygons"], run="editor_t08_test362", group="editor",\n'
                   '        value=(1 - a["ed_size_mean"]',
                   'n=5, run="editor_smoke", group="editor",\n'
                   '        value=(1 - a["ed_size_mean"]'),

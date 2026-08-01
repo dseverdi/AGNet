@@ -78,6 +78,14 @@ def check_registry(cl):
             good = lo <= c.value <= hi
             (ok if good else bad)(
                 f"[1] {c.id}: {c.value:.4g} in [{lo},{hi}] -- \"{c.phrase}\"")
+            # An interval alone only asserts the measurement; without this the phrase
+            # can be deleted from the paper and the claim still "passes", verifying a
+            # sentence no reader will ever see. Seven claims were silently orphaned
+            # this way before the check existed.
+            if c.phrase:
+                present = c.phrase in hay or C.norm(c.phrase) in C.norm(hay)
+                (ok if present else bad)(
+                    f"[1] {c.id}: phrase present in {c.target} -- \"{c.phrase}\"")
         else:
             bad(f"[1] {c.id}: neither typeset nor interval")
 
@@ -232,6 +240,8 @@ def check_figures():
                               "paper/data/dist_test_OOD.json",
                               "paper/data/dist_ood_large.json"],
         "fig_mechanism": ["paper/data/setpred_iter_sweep.json"],
+        "fig_operating_curve": [f"paper/data/matched_budget/full_{s}.json"
+                                for s in ("1234", "11", "22", "33")],
     }
     for f, srcs in figs.items():
         pdf = REPO / "paper" / "gfx" / "setpred" / f"{f}.pdf"
