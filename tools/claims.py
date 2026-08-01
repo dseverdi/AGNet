@@ -465,6 +465,61 @@ def _policy_seeds():
 
 
 # ====================================================== hand-curated + prose sources
+def _feature_baseline():
+    """The feature-set control: coordinates / analytic geometry / encoder / both.
+
+    Recomputed from the raw per-fold ROC and PR values, never from the printed
+    table. The `embedding` arm must reproduce encoder_linear_probe's 0.8430 to four
+    decimals -- if the harness ever drifts, that arm stops matching and the whole
+    comparison is void, so it is registered against both files.
+    """
+    d = json.loads((D / "geometric_baseline_probe.json").read_text())
+    src = ["paper/data/geometric_baseline_probe.json"]
+    arms = {"coords": "coords", "geometry": "geometry",
+            "embedding": "embedding", "embgeo": "embedding+geometry"}
+    for tag, key in arms.items():
+        a = d["arms"][key]
+        for nm, mk, sk in (("roc", "roc_auc_mean", "roc_auc_std"),
+                           ("pr", "pr_auc_mean", "pr_auc_std")):
+            add(id=f"featbase.{tag}.{nm}", target="tab_feature_baseline.tex",
+                sources=src, n=d["n_polygons"], run="feature_baseline_cv5",
+                group="feature_baseline",
+                typeset=f"{mean([a[mk]]):.3f}\\,$\\pm$\\,{a[sk]:.3f}")
+    # the three figures the prose quotes
+    g, c, e = (d["arms"][k]["roc_auc_mean"] for k in ("geometry", "coords", "embedding"))
+    both = d["arms"]["embedding+geometry"]["roc_auc_mean"]
+    for tag, v in (("geometry", g), ("coords", c), ("embgeo", both)):
+        add(id=f"featbase.prose.{tag}", target="paper.tex", sources=src,
+            n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
+            typeset=f"${v:.3f}$")
+    add(id="featbase.pct_of_gain", target="paper.tex", sources=src,
+        n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
+        value=(g - c) / (e - c) * 100, interval=(68, 74),
+        phrase="about $71\\%$ of the encoder's gain")
+    # "an improvement in every fold" -- the claim that makes +0.03 more than noise
+    pf_e = d["arms"]["embedding"]["roc_auc_per_fold"]
+    pf_b = d["arms"]["embedding+geometry"]["roc_auc_per_fold"]
+    add(id="featbase.gain_every_fold", target="paper.tex", sources=src,
+        n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
+        value=float(sum(1 for a_, b_ in zip(pf_e, pf_b) if b_ > a_)), interval=(5, 5),
+        phrase="an improvement in every fold")
+    # The geometry gain vs what ATTENTION buys: mlp -> full, not linear -> full.
+    # The first draft compared it to linear -> full (+0.086) and the gate caught that
+    # the claim was false by -0.056 before it reached the PDF.
+    lad = json.loads((D / "probe_ladder.json").read_text())["rows"]
+    r = {x["name"]: x["roc_auc_mean"] for x in lad}
+    add(id="featbase.vs_attention_rungs", target="paper.tex", sources=src + [
+        "paper/data/probe_ladder.json"], n=d["n_polygons"],
+        run="feature_baseline_cv5", group="feature_baseline",
+        value=(both - e) / (r["full"] - r["mlp"]), interval=(2.0, 2.6),
+        phrase="more than twice what the two attention rungs")
+    # the dim column
+    for tag, key in arms.items():
+        add(id=f"featbase.{tag}.dim", target="tab_feature_baseline.tex", sources=src,
+            n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
+            typeset=f"& {d['arms'][key]['n_features']} &")
+
+
 def _probe_ladder():
     d = json.loads((D / "probe_ladder.json").read_text())
     for row in d["rows"]:
@@ -528,13 +583,26 @@ def _significance():
 
 def _invariance():
     s = json.loads((D / "invariance_test.json").read_text())["summary"]
-    for k in ("identity", "rot45", "rot90", "rot180", "mirror_x", "reindex"):
-        v = s[k]["n_polygons"] - s[k]["n_below_gate"]
-        # the identity baseline is written with its denominator, the rest bare
-        ts = f"${v}/362$" if k == "identity" else f"${v}$"
-        add(id=f"inv.{k}", target="paper.tex",
-            sources=["paper/data/invariance_test.json"], n=362, run="policy1234",
-            group="invariance", typeset=ts)
+    src = ["paper/data/invariance_test.json"]
+    gate = {k: s[k]["n_polygons"] - s[k]["n_below_gate"]
+            for k in ("identity", "rot45", "rot90", "rot180", "mirror_x", "reindex")}
+    # The paper quotes the identity baseline and the RANGE over the five transforms
+    # rather than listing each one. Registering only the two endpoints would leave the
+    # three interior transforms unverified -- a later change to rot90 could break
+    # "between 205 and 312" with nothing to catch it -- so the endpoints are registered
+    # as typeset strings AND every transform is bounds-checked against that range.
+    add(id="inv.identity", target="paper.tex", sources=src, n=362, run="policy1234",
+        group="invariance", typeset=f"${gate['identity']}/362$")
+    tr = {k: v for k, v in gate.items() if k != "identity"}
+    add(id="inv.range_lo", target="paper.tex", sources=src, n=362, run="policy1234",
+        group="invariance", typeset=f"${min(tr.values())}$")
+    add(id="inv.range_hi", target="paper.tex", sources=src, n=362, run="policy1234",
+        group="invariance", typeset=f"${max(tr.values())}$")
+    for k, v in tr.items():
+        add(id=f"inv.{k}_in_range", target="paper.tex", sources=src, n=362,
+            run="policy1234", group="invariance",
+            value=v, interval=(min(tr.values()), max(tr.values())),
+            phrase="between $205$ and $312$")
 
 
 def _canonical():
@@ -982,6 +1050,37 @@ def _po_training():
         run="policy_seed22_log_trainprefix", group="po_training",
         value=min(s["22"]["coverage_greedy"][-20:]), interval=(0.9995, 1.0005),
         phrase="coverage $1.000$")
+    # The seed-22 limitation paragraph previously described an under-guarding reward
+    # exploit ("under 2% of vertices", "epoch 2"). Both numbers contradicted these
+    # curves -- |S|/n never falls below 0.563 -- and neither was registered, so the
+    # gate never saw them. Registering every figure the paragraph now quotes.
+    ep, gr, cov = s["22"]["epochs"], s["22"]["guard_ratio_greedy"], s["22"]["coverage_greedy"]
+    # The per-epoch progression (0.563/0.928/0.996 at epochs 1/2/13) was condensed to
+    # "above 0.92 from the second epoch onwards"; that bound is what the claim now checks.
+    add(id="potrain.s22_gr_from_e2", target="paper.tex", sources=src, n=50,
+        run="policy_seed22_log_trainprefix", group="po_training_s22",
+        value=min(gr[ep.index(2):]), interval=(0.92, 1.0),
+        phrase="above $0.92$ from the second epoch onwards")
+    add(id="potrain.s22_last_epoch", target="paper.tex", sources=src, n=50,
+        run="policy_seed22_log_trainprefix", group="po_training_s22",
+        typeset=f"epoch ${ep[-1]}$")
+    # Reward at each run's endpoint under Eq.(reward): min(cov,tau) - lambda*|S|/n
+    # - rho*max(0, tau-cov), with tau=0.99, lambda=1.0, rho=3.0.
+    def _u(c, g):
+        return min(c, 0.99) - 1.0 * g - 3.0 * max(0.0, 0.99 - c)
+    for sd, nd in (("22", 3), ("11", 3), ("33", 3)):
+        c, g = s[sd]["coverage_greedy"][-1], s[sd]["guard_ratio_greedy"][-1]
+        add(id=f"potrain.{sd}_endpoint_reward", target="paper.tex", sources=src, n=50,
+            run=f"policy_seed{sd}_log_trainprefix", group="po_training_reward",
+            typeset=f"${fmt(_u(c, g), nd)}$" if _u(c, g) >= 0 else f"$-{fmt(-_u(c, g), nd)}$")
+    # raw-coverage argmax: the checkpoint a coverage-only rule would select
+    _am = max(range(len(cov)), key=lambda i: cov[i])
+    add(id="potrain.s22_rawcov_argmax", target="paper.tex", sources=src, n=50,
+        run="policy_seed22_log_trainprefix", group="po_training_s22",
+        typeset=f"epoch ${ep[_am]}$")
+    add(id="potrain.s22_rawcov_gr", target="paper.tex", sources=src, n=50,
+        run="policy_seed22_log_trainprefix", group="po_training_s22",
+        value=gr[_am] * 100, interval=(95.5, 96.9), phrase="$96\\%$ of the vertices")
 
 
 def _c4_drift():
@@ -1215,7 +1314,7 @@ def build() -> list[Claim]:
     CLAIMS.clear()
     for fn in (_headline, _dist_shift, _pareto, _ood, _large, _operating_curve,
                _matched_budget, _matched_budget_pseeds, _policy_seeds,
-               _probe_ladder, _decode_search, _runtime,
+               _probe_ladder, _feature_baseline, _decode_search, _runtime,
                _ablation_2x2, _policy_seeds_indist, _discvis_quality,
                _runtime_classical, _minor_cells, _remaining,
                _c4_drift, _po_training, _pos_weight, _discvis_correlations, _wilson_uppers, _final_gaps, _approximations,

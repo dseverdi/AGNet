@@ -102,7 +102,12 @@ EXEMPT_EXPLICIT = {
     # the partial correlations and the Wilson upper bounds.
     "0.582", "0.027", "0.843", "0.009",                        # linear probe (registered)
     "0.52", "91.9", "0.0003",                                  # reward estimator (registered)
-    "1.15", "0.97",                                            # Transformer trial, dev-time
+    # Transformer trial, dev-time (shorter budget, earlier protocol; no stored artifact).
+    # The trial's numeric operating point (1.15 vs the LSTM's 1.21) was dropped from the
+    # paper when the design-choice limitations were merged: 1.21 contradicted
+    # tab_headline's 1.09 and was classified only by coincidentally matching an unrelated
+    # matched-budget cell. Keep 0.97 listed; the comparison is now qualitative.
+    "0.97",
     "0.9994", "0.1524", "0.9948", "0.1369", "0.8854",          # classical rows (registered)
     "1.0092", "1.0885", "0.9689", "0.1664",
     # structural: seed label, polygon-size row headers, a chosen matched-budget anchor,
