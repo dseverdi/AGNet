@@ -359,7 +359,10 @@ def _matched_budget():
     srcs = [f"paper/data/matched_budget/{a}_{s}.json"
             for a in arms for s in ("1234", 11, 22, 33)]
     cur = {a: [_mb_curve(a, s) for s in ("1234", 11, 22, 33)] for a in arms}
-    for t in (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80):
+    # the full swept grid, matching GRID in build_matched_threshold_table.py:
+    # panel (a) prints every threshold it sweeps, so every one is registered
+    for t in (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40,
+              0.45, 0.50, 0.55, 0.60, 0.70, 0.80):
         for a in arms:
             add(id=f"mb.a.{a}.t{t}.opt", target=g, sources=srcs, n=362,
                 run="probe_seeds_1234_11_22_33", group="mb_panel_a",
@@ -388,7 +391,10 @@ def _matched_budget_pseeds():
     so it now shows one min--max range per policy. These claims therefore register
     the range endpoints, not each cell.
     """
-    g = "tab_ablation_thresholds.tex"
+    # Panel (c) was removed from the table (its columns were policies, not the
+    # four conditions the header names); the multiples are now quoted in the
+    # text of sec:res-headline-ablation, so these claims target paper.tex.
+    g = "paper.tex"
     tails = (30, 50, 76, 100)
     base = {a: [_mb_curve(a, s) for s in ("1234", 11, 22, 33)] for a in ("full", "noenc")}
     vals = []
@@ -399,22 +405,27 @@ def _matched_budget_pseeds():
             vals.append(mean(n_) / mean(f))
     src1234 = [f"paper/data/matched_budget/{a}_{s}.json"
                for a in ("full", "noenc") for s in ("1234", 11, 22, 33)]
-    add(id="mb.c.1234.range", target=g, sources=src1234, n=362,
-        run="policy1234", group="mb_panel_c",
-        typeset=f"$+{(min(vals)-1)*100:.0f}$--${(max(vals)-1)*100:.0f}\\%$")
-    for s in SEEDS:
-        fc = _mb_curve("full", f"pseed{s}", "matched_budget_pseeds").values()
-        nc = _mb_curve("noenc", f"pseed{s}", "matched_budget_pseeds").values()
-        v = [b_ / a_ for t in tails
-             for a_, b_ in [(_interp(fc, 3, 1, t), _interp(nc, 3, 1, t))] if a_ and b_]
-        add(id=f"mb.c.p{s}.range", target=g,
-            sources=[f"paper/data/matched_budget_pseeds/full_pseed{s}.json",
-                     f"paper/data/matched_budget_pseeds/noenc_pseed{s}.json"],
-            n=362, run=f"policy{s}", group="mb_panel_c",
-            typeset=f"$+{(min(v)-1)*100:.0f}$--${(max(v)-1)*100:.0f}\\%$")
+    # The per-policy percentages are no longer printed: the prose states them as
+    # magnitudes ("around a third", "close to four-fifths") because there is no
+    # table for them to be read from. Both bounds stay verified here.
+    allv = list(vals)
+    for s_ in SEEDS:
+        fc = _mb_curve("full", f"pseed{s_}", "matched_budget_pseeds").values()
+        nc = _mb_curve("noenc", f"pseed{s_}", "matched_budget_pseeds").values()
+        allv += [b_ / a_ for t in tails
+                 for a_, b_ in [(_interp(fc, 3, 1, t), _interp(nc, 3, 1, t))] if a_ and b_]
+    Sall = src1234 + [f"paper/data/matched_budget_pseeds/{a}_pseed{s_}.json"
+                      for a in ("full", "noenc") for s_ in SEEDS]
+    add(id="mb.c.min_extra", target="paper.tex", sources=Sall, n=362,
+        run="policies_1234_11_22_33", group="mb_panel_c",
+        value=(min(allv) - 1) * 100, interval=(28, 36),
+        phrase="from about $+30\\%$ to $+81\\%$ depending on the policy")
+    add(id="mb.c.max_extra", target="paper.tex", sources=Sall, n=362,
+        run="policies_1234_11_22_33", group="mb_panel_c",
+        value=(max(allv) - 1) * 100, interval=(72, 85),
+        phrase="from about $+30\\%$ to $+81\\%$ depending on the policy")
 
 
-# ============================================================== tab_policy_seeds
 def _policy_seeds():
     g = "tab_policy_seeds.tex"
     for s in SEEDS:
@@ -485,13 +496,12 @@ def _feature_baseline():
                 sources=src, n=d["n_polygons"], run="feature_baseline_cv5",
                 group="feature_baseline",
                 typeset=f"{mean([a[mk]]):.3f}\\,$\\pm$\\,{a[sk]:.3f}")
-    # the three figures the prose quotes
     g, c, e = (d["arms"][k]["roc_auc_mean"] for k in ("geometry", "coords", "embedding"))
     both = d["arms"]["embedding+geometry"]["roc_auc_mean"]
-    for tag, v in (("geometry", g), ("coords", c), ("embgeo", both)):
-        add(id=f"featbase.prose.{tag}", target="paper.tex", sources=src,
-            n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
-            typeset=f"${v:.3f}$")
+    # The prose used to restate 0.537 / 0.753 / 0.872 immediately above the table that
+    # shows them. It now states the relations instead, so only the DERIVED figures --
+    # the 71% share and the every-fold and vs-attention comparisons -- are registered
+    # against paper.tex; the levels themselves are checked in the table.
     add(id="featbase.pct_of_gain", target="paper.tex", sources=src,
         n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
         value=(g - c) / (e - c) * 100, interval=(68, 74),
@@ -502,7 +512,7 @@ def _feature_baseline():
     add(id="featbase.gain_every_fold", target="paper.tex", sources=src,
         n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
         value=float(sum(1 for a_, b_ in zip(pf_e, pf_b) if b_ > a_)), interval=(5, 5),
-        phrase="an improvement in every fold")
+        phrase="improves the readout in every fold")
     # The geometry gain vs what ATTENTION buys: mlp -> full, not linear -> full.
     # The first draft compared it to linear -> full (+0.086) and the gate caught that
     # the claim was false by -0.056 before it reached the PDF.
@@ -513,6 +523,16 @@ def _feature_baseline():
         run="feature_baseline_cv5", group="feature_baseline",
         value=(both - e) / (r["full"] - r["mlp"]), interval=(2.0, 2.6),
         phrase="more than twice what the two attention rungs")
+    # The Discussion attributes the rotation deficit to a missing interior-angle
+    # readout. That needs the angle-ALONE-on-top arm, not the all-ten arm -- the
+    # first draft cited the wrong one and the arm was run to back the sentence.
+    pf_ang = d["arms"]["embedding+angle_only"]["roc_auc_per_fold"]
+    add(id="featbase.angle_on_top_every_fold", target="paper.tex", sources=src,
+        n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
+        value=float(sum(1 for a_, b_ in zip(pf_e, pf_ang) if b_ > a_)),
+        interval=(5, 5),
+        phrase="appending the interior angle, a rigid-motion invariant, to the "
+               "embedding improves the readout")
     # the dim column
     for tag, key in arms.items():
         add(id=f"featbase.{tag}.dim", target="tab_feature_baseline.tex", sources=src,
@@ -666,14 +686,18 @@ def _supervised():
 
 
 def _linear_probe():
-    lp = json.loads((D / "encoder_linear_probe.json").read_text())
-    for k, key in (("roc", "roc_auc_mean"), ("rocsd", "roc_auc_std"),
-                   ("pr", "pr_auc_mean"), ("prsd", "pr_auc_std")):
-        nd = 3
-        add(id=f"linprobe.{k}", target="paper.tex",
-            sources=["paper/data/encoder_linear_probe.json"],
-            n=lp["n_polygons"], run="linear_probe_cv", group="linprobe",
-            typeset=f"{lp[key]:.{nd}f}")
+    """The cross-validated linear probe.
+
+    Its four figures used to be restated in a footnote and again in the Discussion.
+    Both now point at the encoder row of tab_feature_baseline, which carries the same
+    measurement, so registering them against paper.tex would only verify prose that
+    no longer exists. The qualitative form the text does still make -- "reaches
+    ROC-AUC approx 0.84" -- is `approx.roc084` below, which keeps this file live.
+
+    Note the two runs are re-derivations, not the same numbers: this file has
+    ROC 0.8430377, the feature-baseline harness 0.8429581, agreeing to three
+    decimals. Do not assert equality beyond the precision printed.
+    """
 
 
 def _reward_estimator():
@@ -743,7 +767,7 @@ def _verbal():
     add(id="v.coords_cost_multiple", target="paper.tex", sources=S, n=362,
         run="probe_seeds_1234_11_22_33", group="verbal_mb",
         value=mean(coords_mult), interval=(1.70, 1.80),
-        phrase="coordinates alone about $1.75\\times$")
+        phrase="coords-only about $1.75\\times$")
     add(id="v.probe_vs_ls", target="paper.tex",
         sources=["paper/data/baseline_classical.json"] + [f"paper/data/{f}" for f in DEV],
         n=362, run="probe_seeds_1234_11_22_33", group="verbal_ranking",
@@ -1042,14 +1066,11 @@ def _po_training():
     d = json.loads((D / "po_training_curves.json").read_text())
     src = ["paper/data/po_training_curves.json"]
     s = d["seeds"]
-    add(id="potrain.s22_sopt_tail", target="paper.tex", sources=src, n=50,
-        run="policy_seed22_log_trainprefix", group="po_training",
-        value=mean(s["22"]["size_over_opt_greedy"][-20:]), interval=(3.6, 4.0),
-        phrase="near $3.8\\times$ the optimum")
-    add(id="potrain.s22_cov_tail", target="paper.tex", sources=src, n=50,
-        run="policy_seed22_log_trainprefix", group="po_training",
-        value=min(s["22"]["coverage_greedy"][-20:]), interval=(0.9995, 1.0005),
-        phrase="coverage $1.000$")
+    # The saturation illustration in sec:method-pointer ("one seed settling at
+    # coverage 1.000 while its guard cost stays near 3.8x the optimum") was cut from
+    # the prose, so these two have nothing left to check. The underlying behaviour is
+    # still reported, and still verified, in the seed-22 paragraph of the Limitations
+    # (potrain.s22_gr_from_e2, potrain.*_endpoint_reward, potrain.s22_rawcov_*).
     # The seed-22 limitation paragraph previously described an under-guarding reward
     # exploit ("under 2% of vertices", "epoch 2"). Both numbers contradicted these
     # curves -- |S|/n never falls below 0.563 -- and neither was registered, so the
@@ -1179,15 +1200,21 @@ def _final_gaps():
         add(id=f"dist_shift.{lab}.gate", target="tab_dist_shift.tex", sources=Sd,
             n=362, run="policy1234", group="dist_shift_gate",
             typeset=f"{sum(1 for r in recs if r[key]['cov']>=0.95)}/362")
-    add(id="prose.probe_below_gate", target="paper.tex", sources=Sd, n=362,
+    # The prose used to close the McNemar sentence with "a net $69 \to 17$", which
+    # is just 362 minus the two gate counts the table already prints. Both marginals
+    # stay verified as dist_shift.{seed,full}.gate; what the prose keeps is the part
+    # the table cannot show -- the 57/5 discordant split behind the net figure.
+    # The count came back in the caveats paragraph, where "a handful" was used for
+    # seventeen polygons -- an understatement that flattered the full probe -- so it
+    # is spelled out and registered.
+    add(id="prose.full_below_gate_word", target="paper.tex", sources=Sd, n=362,
         run="policy1234", group="dist_shift_prose",
-        typeset=f"${below(dev,'probe_t020')}$")
-    # LS oracle mean exact coverage, quoted in the dagger footnote
-    cls = json.loads((D / "baseline_classical.json").read_text())
-    ls = cls["splits"]["dev_test"]["per_polygon"]["ls"]
-    add(id="prose.ls_mean_cov", target="paper.tex",
-        sources=["paper/data/baseline_classical.json"], n=362, run="classical",
-        group="ls_footnote", typeset=f"${mean(x['cov'] for x in ls):.3f}$")
+        value=float(below(dev, 'probe_t020')), interval=(17, 17),
+        phrase="leaves seventeen below it")
+    # The dagger footnote used to quote the LS oracle's mean exact coverage as
+    # "$0.995$", which is just tab_headline's 0.9948 rounded. The footnote now says
+    # "slightly undercovers" and lets the table's Mean cov column carry the value,
+    # which `headline.ls_cov` already verifies against the same raw records.
     # C2 percentages
     ood = poly("dist_test_OOD.json")
     add(id="prose.ood_policy_pct", target="paper.tex",
@@ -1220,7 +1247,7 @@ def _final_gaps():
             # The paper states these as multiples, not percentages; the phrase must
             # match text that is actually in paper.tex or check 1 orphans the claim.
             phrase=("about $1.45\\times$ the full probe's guards" if tag == "noenc"
-                    else "coordinates alone about $1.75\\times$"))
+                    else "coords-only about $1.75\\times$"))
     # reward-estimator percentages
     rs = res("reward_estimator_agreement.json")
     sm = rs["summary"]
@@ -1271,18 +1298,40 @@ def _approximations():
         run="probe_seeds_1234_11_22_33", group="approx_mult",
         value=mean([_interp_mean_x(cur["noseed"], t) / _interp_mean_x(cur["full"], t)
                     for t in (50, 76, 100)]), interval=(1.05, 1.15),
-        phrase="masking only the seed costs about $1.1\\times$")
+        phrase="no-seed about $1.1\\times$")
     # The "economical regime ($|S|/\OPT$ 1.6--1.9)" sentence and the "$2.9\times$
     # (seed only) / $4.6\times$ (neither)" gloss were removed from the paper; the four
     # values they carried (1.62 / 1.94 / 2.94 / 4.64) are still verified against
     # tab_ablation, tab_ablation_thresholds and tab_headline, so nothing goes
     # unchecked here -- these four registrations were pointing at dead prose.
-    tails = [ _interp(c.values(), 1, 3, 1.5) for c in cur["noenc"] ]
-    ft = [ _interp(c.values(), 1, 3, 1.5) for c in cur["full"] ]
-    add(id="approx.tail_ratio_hi", target="paper.tex", sources=S, n=362,
-        run="probe_seeds_1234_11_22_33", group="approx_tail_ratio",
-        value=max(t / f for t, f in zip(tails, ft) if t and f), interval=(1.9, 2.7),
-        phrase="the ablation leaving $1.5$ to $5.4\\times$ as many polygons")
+    # The "1.5 to 5.2x" range is over the THREE REPLICATION policies at all four
+    # budgets (eleven reachable cells) -- not, as this claim previously computed,
+    # over the released policy's probe seeds at the single budget 1.5. The old
+    # version checked 2.578 against (1.9, 2.7) and passed while guarding nothing in
+    # the sentence it was attached to; it also let a wrong upper figure (5.4 for a
+    # true 5.19) stand. Both endpoints are now recomputed from the cells quoted.
+    ratios = []
+    for sd in SEEDS:
+        fc = _mb_curve("full", f"pseed{sd}", "matched_budget_pseeds").values()
+        nc = _mb_curve("noenc", f"pseed{sd}", "matched_budget_pseeds").values()
+        for anc in (1.95, 1.70, 1.50, 1.30):
+            a_, b_ = _interp(fc, 1, 3, anc), _interp(nc, 1, 3, anc)
+            if a_ and b_:
+                ratios.append(b_ / a_)
+    Sp = [f"paper/data/matched_budget_pseeds/{a}_pseed{sd}.json"
+          for a in ("full", "noenc") for sd in SEEDS]
+    add(id="approx.tail_ratio_lo", target="paper.tex", sources=Sp, n=362,
+        run="policy_seeds_11_22_33", group="approx_tail_ratio",
+        value=min(ratios), interval=(1.45, 1.55),
+        phrase="compared at the same guard budget, the full probe leaves the shorter tail")
+    add(id="approx.tail_ratio_hi", target="paper.tex", sources=Sp, n=362,
+        run="policy_seeds_11_22_33", group="approx_tail_ratio",
+        value=max(ratios), interval=(5.15, 5.25),
+        phrase="the ablation leaves several times as many polygons")
+    add(id="approx.tail_ratio_cells", target="paper.tex", sources=Sp, n=362,
+        run="policy_seeds_11_22_33", group="approx_tail_ratio",
+        value=float(len(ratios)), interval=(11, 11),
+        phrase="compared at the same guard budget, the full probe leaves the shorter tail")
     # 0.83M total parameters = pointer + probe
     lad = {r["name"]: r for r in json.loads((D / "probe_ladder.json").read_text())["rows"]}
     add(id="approx.total_params", target="paper.tex",

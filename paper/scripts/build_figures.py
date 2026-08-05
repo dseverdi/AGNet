@@ -472,7 +472,10 @@ def fig_distributions() -> None:
             med.set_color("black")
 
     n_rows = 3 if have_large else 2
-    fig, axes = plt.subplots(n_rows, 3, figsize=(11, 3.2 * n_rows))
+    # Native width must match fig_operating_curve's 7.4in: both are placed at the
+    # same output width, so a wider canvas renders its tick labels smaller. At 11in
+    # this figure's text came out at 69% of the operating curve's.
+    fig, axes = plt.subplots(n_rows, 3, figsize=(7.4, 3.2 * n_rows))
     per_poly_rows = [
         ("In-distribution (test, 362 polygons)", d_in["polygons"], axes[0]),
         ("Out-of-distribution (ood, 2081 polygons)", d_ood["polygons"], axes[1]),

@@ -41,9 +41,12 @@ ARMS = [
     ("coords", r"coords-only"),
 ]
 
-# Panel (a): a common grid spanning every arm's useful range. The arms spend very
-# differently at any single t, which is the whole point of the table.
-GRID = [0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80]
+# Panel (a): the FULL swept grid, not a subset of it. Printing only every other
+# threshold hid the rows that bracket panel (b)'s anchors -- a reader looking for
+# |S|/OPT = 1.95 in the coords-only column found a 184-polygon gap where the real
+# sweep has a 107-polygon one, which made (b) look like it came from nowhere.
+GRID = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40,
+        0.45, 0.50, 0.55, 0.60, 0.70, 0.80]
 # Panel (b): cost anchors inside the band where the encoder-bearing arms overlap.
 # 1.95 is the highest anchor all four `full` seeds reach (their curves top out at
 # 1.97-2.04 at t=0.05), so every cell below is a four-seed mean, never three.
@@ -158,11 +161,11 @@ def main() -> None:
         rf"\multicolumn{{2}}{{c}}{{{lab}}}" for _, lab in ARMS) + r" \\")
     L.append("  " + " ".join(
         rf"\cmidrule(lr){{{2 + 2 * i}-{3 + 2 * i}}}" for i in range(len(ARMS))))
-    L.append(r"  $t$ & " + " & ".join(
+    L.append(r"   & " + " & ".join(
         [r"$|S|/\OPT$ & $\#$fail"] * len(ARMS)) + r" \\")
     L.append(r"  \midrule")
     L.append(rf"  \multicolumn{{{ncol}}}{{l}}"
-             r"{\emph{(a) swept operating curves}} \\")
+             r"{\emph{(a) swept operating curves}; rows are the threshold $t$} \\")
     for t in GRID:
         cells = []
         for arm, _ in ARMS:
@@ -171,39 +174,25 @@ def main() -> None:
         L.append(f"  {t:.2f} & " + " & ".join(cells) + r" \\")
     L.append(r"  \midrule")
     L.append(rf"  \multicolumn{{{ncol}}}{{l}}"
-             r"{\emph{(b) $\#$fail at matched guard budget} $|S|/\OPT$} \\")
+             r"{\emph{(b) $\#$fail at matched guard budget}; rows are $|S|/\OPT$} \\")
     for a in ANCHORS:
         cells = []
         for arm, _ in ARMS:
             vals = [tail_at_cost(arm, s, a) for s in SEEDS]
             vals = [v for v in vals if v is not None]
+            # Put the value in the arm's SECOND sub-column, the one the header
+            # calls #fail, rather than centring it across the (|S|/OPT, #fail)
+            # pair. Panel (a) reports the same quantity in that column; centring
+            # it here left the same number under neither header.
             if not vals:
-                cells.append(r"\multicolumn{2}{c}{---}")
+                cells.append(r"& & ---")
             else:
-                cells.append(rf"\multicolumn{{2}}{{c}}{{${np.mean(vals):.0f}"
-                             rf" \pm {np.std(vals):.0f}$}}")
-        L.append(f"  {a:.2f} & " + " & ".join(cells) + r" \\")
-    # Panel (c): does the matched-budget ordering survive a change of policy?
-    mult = encoder_cost_multiple()
-    if any(any(v is not None for v in r.values()) for r in mult.values()):
-        L.append(r"  \midrule")
-        # One number per policy, not a 4x4 grid: within a policy the multiple is
-        # near-constant across tail levels (spread <= 0.09), so the grid spent 16
-        # cells -- three of them empty -- to convey four values. Reported as the
-        # range over the reachable tail levels {30, 50, 76, 100}.
-        L.append(rf"  \multicolumn{{{ncol}}}{{l}}{{\emph{{(c) extra guards the"
-                 r" no-encoder probe needs to leave the same tail as the full probe}} \\")
-        L.append(r"  policy seed & " + " & ".join(
-            rf"\multicolumn{{2}}{{c}}{{{lab}}}" for lab in
-            ("1234$^{\\ast}$", "11", "22", "33")) + r" \\")
-        cells = []
-        for p in ["1234"] + PSEEDS:
-            vals = [mult[p][t] for t in TAILS if mult[p][t] is not None]
-            cells.append(
-                rf"\multicolumn{{2}}{{c}}{{$+{(min(vals) - 1) * 100:.0f}$--"
-                rf"${(max(vals) - 1) * 100:.0f}\%$}}"
-                if vals else r"\multicolumn{2}{c}{---}")
-        L.append(r"  extra guards & " + " & ".join(cells) + r" \\")
+                cells.append(rf"& & ${np.mean(vals):.0f} \pm {np.std(vals):.0f}$")
+        L.append(f"  {a:.2f} " + " ".join(cells) + r" \\")
+    # Panel (c) removed: it was indexed by POLICY, not by the four conditions
+    # this table's header names, so the header was wrong over it and it had to
+    # carry its own. The per-policy cost multiples are quoted in the text of
+    # sec:res-headline-ablation instead, where claims.py still verifies them.
     L.append(r"  \bottomrule")
     L.append(r"\end{tabular}")
     TABLE.write_text("\n".join(L) + "\n")

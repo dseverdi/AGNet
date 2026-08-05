@@ -3,26 +3,28 @@
   \toprule
   & \multicolumn{2}{c}{full} & \multicolumn{2}{c}{no-seed} & \multicolumn{2}{c}{no-encoder} & \multicolumn{2}{c}{coords-only} \\
   \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9}
-  $t$ & $|S|/\OPT$ & $\#$fail & $|S|/\OPT$ & $\#$fail & $|S|/\OPT$ & $\#$fail & $|S|/\OPT$ & $\#$fail \\
+   & $|S|/\OPT$ & $\#$fail & $|S|/\OPT$ & $\#$fail & $|S|/\OPT$ & $\#$fail & $|S|/\OPT$ & $\#$fail \\
   \midrule
-  \multicolumn{9}{l}{\emph{(a) swept operating curves}} \\
+  \multicolumn{9}{l}{\emph{(a) swept operating curves}; rows are the threshold $t$} \\
   0.05 & 2.01 & $28 \pm 7$ & 2.63 & $20 \pm 8$ & 5.17 & $0 \pm 0$ & 5.45 & $0 \pm 0$ \\
   0.10 & 1.81 & $40 \pm 4$ & 2.29 & $28 \pm 10$ & 4.40 & $2 \pm 1$ & 5.04 & $0 \pm 0$ \\
+  0.15 & 1.70 & $50 \pm 6$ & 2.09 & $37 \pm 13$ & 3.65 & $6 \pm 1$ & 4.81 & $1 \pm 1$ \\
   0.20 & 1.62 & $58 \pm 5$ & 1.94 & $46 \pm 13$ & 2.94 & $22 \pm 6$ & 4.64 & $1 \pm 1$ \\
+  0.25 & 1.56 & $65 \pm 4$ & 1.84 & $54 \pm 14$ & 2.27 & $63 \pm 16$ & 4.48 & $2 \pm 1$ \\
   0.30 & 1.50 & $74 \pm 4$ & 1.74 & $64 \pm 13$ & 1.77 & $126 \pm 22$ & 4.31 & $4 \pm 3$ \\
+  0.35 & 1.45 & $86 \pm 2$ & 1.66 & $75 \pm 14$ & 1.51 & $166 \pm 23$ & 4.06 & $8 \pm 2$ \\
   0.40 & 1.41 & $96 \pm 4$ & 1.58 & $87 \pm 15$ & 1.37 & $200 \pm 17$ & 3.68 & $18 \pm 6$ \\
+  0.45 & 1.36 & $109 \pm 6$ & 1.51 & $100 \pm 14$ & 1.27 & $222 \pm 14$ & 3.11 & $37 \pm 10$ \\
   0.50 & 1.32 & $119 \pm 7$ & 1.45 & $114 \pm 16$ & 1.21 & $239 \pm 12$ & 2.43 & $94 \pm 19$ \\
+  0.55 & 1.28 & $133 \pm 9$ & 1.39 & $130 \pm 16$ & 1.17 & $249 \pm 11$ & 1.79 & $202 \pm 31$ \\
   0.60 & 1.23 & $153 \pm 10$ & 1.33 & $150 \pm 20$ & 1.13 & $255 \pm 10$ & 1.25 & $278 \pm 27$ \\
+  0.70 & 1.13 & $202 \pm 13$ & 1.21 & $197 \pm 23$ & 1.09 & $270 \pm 10$ & 0.53 & $328 \pm 8$ \\
   0.80 & 0.98 & $269 \pm 18$ & 1.08 & $254 \pm 14$ & 1.06 & $284 \pm 8$ & 0.24 & $343 \pm 3$ \\
   \midrule
-  \multicolumn{9}{l}{\emph{(b) $\#$fail at matched guard budget} $|S|/\OPT$} \\
-  1.95 & \multicolumn{2}{c}{$32 \pm 5$} & \multicolumn{2}{c}{$43 \pm 1$} & \multicolumn{2}{c}{$101 \pm 14$} & \multicolumn{2}{c}{$175 \pm 12$} \\
-  1.70 & \multicolumn{2}{c}{$50 \pm 6$} & \multicolumn{2}{c}{$69 \pm 4$} & \multicolumn{2}{c}{$136 \pm 14$} & \multicolumn{2}{c}{$215 \pm 9$} \\
-  1.50 & \multicolumn{2}{c}{$76 \pm 7$} & \multicolumn{2}{c}{$101 \pm 5$} & \multicolumn{2}{c}{$170 \pm 10$} & \multicolumn{2}{c}{$245 \pm 8$} \\
-  1.30 & \multicolumn{2}{c}{$126 \pm 12$} & \multicolumn{2}{c}{$159 \pm 6$} & \multicolumn{2}{c}{$216 \pm 3$} & \multicolumn{2}{c}{$270 \pm 9$} \\
-  \midrule
-  \multicolumn{9}{l}{\emph{(c) extra guards the no-encoder probe needs to leave the same tail as the full probe}} \\
-  policy seed & \multicolumn{2}{c}{1234$^{\ast}$} & \multicolumn{2}{c}{11} & \multicolumn{2}{c}{22} & \multicolumn{2}{c}{33} \\
-  extra guards & \multicolumn{2}{c}{$+42$--$45\%$} & \multicolumn{2}{c}{$+33$--$34\%$} & \multicolumn{2}{c}{$+30$--$38\%$} & \multicolumn{2}{c}{$+72$--$81\%$} \\
+  \multicolumn{9}{l}{\emph{(b) $\#$fail at matched guard budget}; rows are $|S|/\OPT$} \\
+  1.95 & & $32 \pm 5$ & & $43 \pm 1$ & & $101 \pm 14$ & & $175 \pm 12$ \\
+  1.70 & & $50 \pm 6$ & & $69 \pm 4$ & & $136 \pm 14$ & & $215 \pm 9$ \\
+  1.50 & & $76 \pm 7$ & & $101 \pm 5$ & & $170 \pm 10$ & & $245 \pm 8$ \\
+  1.30 & & $126 \pm 12$ & & $159 \pm 6$ & & $216 \pm 3$ & & $270 \pm 9$ \\
   \bottomrule
 \end{tabular}

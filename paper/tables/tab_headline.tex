@@ -12,6 +12,6 @@
   \quad \SetPredictor{}, no-encoder ($t=0.20$) & 0.9976\,$\pm$\,0.0004 & $361.5 \pm 0.5$/362 & 0.4517\,$\pm$\,0.0432 & 2.9405\,$\pm$\,0.2654 \\
   \midrule
   \multicolumn{5}{l}{\emph{Oracle editor (\SetPredictor{} target, policy-seeded)}} \\
-  \quad LS on policy seed & 0.9948 & 362/362 & 0.1369 & 0.8854$^{\dagger}$ \\
+  \quad LS on policy seed & 0.9948 & 362/362 & 0.1369 & 0.8854\tablefootnote{The oracle editor halts at the disc-vis gate ($\tau = 0.99$) and slightly undercovers, so it spends fewer guards than the \emph{full-coverage} optimum, an artifact of the training reward, not a loose $\OPT$.} \\
   \bottomrule
 \end{tabular}

@@ -139,7 +139,13 @@ def main() -> None:
         if all(v is None for v in rs.values()):
             continue
         L.append(r"  \midrule")
-        L.append(rf"  \multicolumn{{13}}{{l}}{{\emph{{{label}}} (${n}$ polygons)}} \\")
+        # ood-large is the ONLY split in the paper where an |S|/OPT column is
+        # averaged over a subset (206 of 285). The caption says so, but a reader
+        # scanning rows has no cue, so the block label carries a dagger pointing
+        # there -- a marker, matching tab_headline's, not a prose row inside the
+        # tabular.
+        mark = r"$^{\dagger}$" if key == "ood_large" else ""
+        L.append(rf"  \multicolumn{{13}}{{l}}{{\emph{{{label}}}{mark} (${n}$ polygons)}} \\")
         # Policy 1234 is deliberately NOT tabulated here. With cov and |S|/OPT
         # present its rows became verbatim copies of the seed/probe rows in
         # tab_headline, tab_ood and tab_large; this table's job is policy-seed
