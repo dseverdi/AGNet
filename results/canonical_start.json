@@ -1,0 +1,9100 @@
+{
+  "threshold": 0.2,
+  "gate": 0.95,
+  "traj": "data/ls_trajectories_dev_test_clean.pkl",
+  "pointer_checkpoint": "checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt",
+  "probe_checkpoint": "checkpoints/set_predictor/standard/set_predictor_final.pt",
+  "canonical_rule": "argmin lexicographic (x,y) after per-axis min-max; roll so that vertex is at index 0",
+  "n_polygons": 362,
+  "q1": {
+    "checked": 362,
+    "exact": 362,
+    "fraction": 1.0,
+    "roll_amounts": "k in {0,1,2,n//4,n//3,n//2,2n//3,n-1} (deduped)",
+    "failures": []
+  },
+  "sanity": {
+    "seed_reproduced_native": 362,
+    "seed_mismatch_examples": [],
+    "canonical_argmin_ties": [],
+    "n_polys_with_shared_min_x": 343,
+    "canon_guardset_equals_native_guardset": 15,
+    "n_polys_already_canonical": 14
+  },
+  "summary": {
+    "native": {
+      "n_polygons": 362,
+      "n_ge_gate": 345,
+      "feasibility_rate": 0.953,
+      "mean_cov": 0.9915,
+      "min_cov": 0.8571,
+      "mean_S_over_n": 0.2394,
+      "mean_n_guards": 17.163,
+      "n_ge_gate_delta_vs_native": 0
+    },
+    "canon": {
+      "n_polygons": 362,
+      "n_ge_gate": 150,
+      "feasibility_rate": 0.4144,
+      "mean_cov": 0.9134,
+      "min_cov": 0.4984,
+      "mean_S_over_n": 0.1822,
+      "mean_n_guards": 13.202,
+      "n_ge_gate_delta_vs_native": -195
+    },
+    "canon_argmax": {
+      "n_polygons": 362,
+      "n_ge_gate": 350,
+      "feasibility_rate": 0.9669,
+      "mean_cov": 0.9907,
+      "min_cov": 0.3333,
+      "mean_S_over_n": 0.2687,
+      "mean_n_guards": 20.685,
+      "n_ge_gate_delta_vs_native": 5
+    },
+    "reindex_n3": {
+      "n_polygons": 362,
+      "n_ge_gate": 279,
+      "feasibility_rate": 0.7707,
+      "mean_cov": 0.9642,
+      "min_cov": 0.5626,
+      "mean_S_over_n": 0.2299,
+      "mean_n_guards": 16.865,
+      "n_ge_gate_delta_vs_native": -66
+    },
+    "rot90": {
+      "n_polygons": 362,
+      "n_ge_gate": 282,
+      "feasibility_rate": 0.779,
+      "mean_cov": 0.9647,
+      "min_cov": 0.3816,
+      "mean_S_over_n": 0.2335,
+      "mean_n_guards": 17.881,
+      "n_ge_gate_delta_vs_native": -63
+    },
+    "canon_rot90": {
+      "n_polygons": 362,
+      "n_ge_gate": 174,
+      "feasibility_rate": 0.4807,
+      "mean_cov": 0.9148,
+      "min_cov": 0.5315,
+      "mean_S_over_n": 0.1799,
+      "mean_n_guards": 12.854,
+      "n_ge_gate_delta_vs_native": -171
+    },
+    "rot180": {
+      "n_polygons": 362,
+      "n_ge_gate": 223,
+      "feasibility_rate": 0.616,
+      "mean_cov": 0.9446,
+      "min_cov": 0.3908,
+      "mean_S_over_n": 0.2331,
+      "mean_n_guards": 17.831,
+      "n_ge_gate_delta_vs_native": -122
+    },
+    "canon_rot180": {
+      "n_polygons": 362,
+      "n_ge_gate": 150,
+      "feasibility_rate": 0.4144,
+      "mean_cov": 0.906,
+      "min_cov": 0.0,
+      "mean_S_over_n": 0.1768,
+      "mean_n_guards": 12.627,
+      "n_ge_gate_delta_vs_native": -195
+    }
+  },
+  "matched_budget_summary": {
+    "native": {
+      "n_polygons": 362,
+      "n_ge_gate": 345,
+      "feasibility_rate": 0.953,
+      "mean_cov": 0.9915,
+      "min_cov": 0.8571,
+      "mean_S_over_n": 0.2394,
+      "n_ge_gate_delta_vs_native": 0
+    },
+    "canon": {
+      "n_polygons": 362,
+      "n_ge_gate": 258,
+      "feasibility_rate": 0.7127,
+      "mean_cov": 0.9565,
+      "min_cov": 0.5076,
+      "mean_S_over_n": 0.2394,
+      "n_ge_gate_delta_vs_native": -87
+    },
+    "canon_argmax": {
+      "n_polygons": 362,
+      "n_ge_gate": 346,
+      "feasibility_rate": 0.9558,
+      "mean_cov": 0.989,
+      "min_cov": 0.7057,
+      "mean_S_over_n": 0.2394,
+      "n_ge_gate_delta_vs_native": 1
+    },
+    "reindex_n3": {
+      "n_polygons": 362,
+      "n_ge_gate": 309,
+      "feasibility_rate": 0.8536,
+      "mean_cov": 0.9729,
+      "min_cov": 0.5397,
+      "mean_S_over_n": 0.2394,
+      "n_ge_gate_delta_vs_native": -36
+    }
+  },
+  "matched_budget_note": "every condition forced to m=|S_native| guards by taking its own top-m predicted vertices",
+  "below_gate": {
+    "native": [
+      {
+        "name": "rand-30-23",
+        "n": 30,
+        "cov": 0.9396,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-29",
+        "n": 30,
+        "cov": 0.9047,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-40-16",
+        "n": 40,
+        "cov": 0.9101,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-19",
+        "n": 40,
+        "cov": 0.8901,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-40-2",
+        "n": 40,
+        "cov": 0.9467,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-46-33",
+        "n": 46,
+        "cov": 0.9392,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-52-50",
+        "n": 52,
+        "cov": 0.9222,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-62-44",
+        "n": 62,
+        "cov": 0.9331,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-64-54",
+        "n": 64,
+        "cov": 0.9094,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-86-35",
+        "n": 86,
+        "cov": 0.9048,
+        "n_guards": 19
+      },
+      {
+        "name": "random-20-7",
+        "n": 20,
+        "cov": 0.8571,
+        "n_guards": 3
+      },
+      {
+        "name": "random-40-8",
+        "n": 40,
+        "cov": 0.9141,
+        "n_guards": 7
+      },
+      {
+        "name": "random-60-1",
+        "n": 60,
+        "cov": 0.9386,
+        "n_guards": 19
+      },
+      {
+        "name": "randsimple-20-16",
+        "n": 20,
+        "cov": 0.9247,
+        "n_guards": 4
+      },
+      {
+        "name": "randsimple-40-5",
+        "n": 40,
+        "cov": 0.9384,
+        "n_guards": 8
+      },
+      {
+        "name": "randsimple-40-8",
+        "n": 40,
+        "cov": 0.895,
+        "n_guards": 10
+      },
+      {
+        "name": "randsimple-80-12",
+        "n": 80,
+        "cov": 0.9099,
+        "n_guards": 21
+      }
+    ],
+    "canon": [
+      {
+        "name": "rand-30-11",
+        "n": 30,
+        "cov": 0.8457,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-30-20",
+        "n": 30,
+        "cov": 0.8842,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-30-23",
+        "n": 30,
+        "cov": 0.6667,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-25",
+        "n": 30,
+        "cov": 0.4984,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-30-26",
+        "n": 30,
+        "cov": 0.9313,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-27",
+        "n": 30,
+        "cov": 0.9116,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-28",
+        "n": 30,
+        "cov": 0.8929,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-30-29",
+        "n": 30,
+        "cov": 0.7887,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-30-5",
+        "n": 30,
+        "cov": 0.6747,
+        "n_guards": 2
+      },
+      {
+        "name": "rand-32-29",
+        "n": 32,
+        "cov": 0.7027,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-34-12",
+        "n": 34,
+        "cov": 0.5158,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-34-16",
+        "n": 34,
+        "cov": 0.6826,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-34-28",
+        "n": 34,
+        "cov": 0.7604,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-36-13",
+        "n": 36,
+        "cov": 0.8532,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-36-22",
+        "n": 36,
+        "cov": 0.8544,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-38-13",
+        "n": 38,
+        "cov": 0.9092,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-38-19",
+        "n": 38,
+        "cov": 0.9365,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-40-16",
+        "n": 40,
+        "cov": 0.6633,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-40-19",
+        "n": 40,
+        "cov": 0.5076,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-40-2",
+        "n": 40,
+        "cov": 0.9305,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-40-23",
+        "n": 40,
+        "cov": 0.8129,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-40-4",
+        "n": 40,
+        "cov": 0.8604,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-5",
+        "n": 40,
+        "cov": 0.8615,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-42-28",
+        "n": 42,
+        "cov": 0.8758,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-42-32",
+        "n": 42,
+        "cov": 0.7643,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-42-6",
+        "n": 42,
+        "cov": 0.6565,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-44-28",
+        "n": 44,
+        "cov": 0.8523,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-46-33",
+        "n": 46,
+        "cov": 0.8939,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-48-31",
+        "n": 48,
+        "cov": 0.8742,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-48-36",
+        "n": 48,
+        "cov": 0.9095,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-48-37",
+        "n": 48,
+        "cov": 0.8031,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-50-10",
+        "n": 50,
+        "cov": 0.9496,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-50-11",
+        "n": 50,
+        "cov": 0.911,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-50-4",
+        "n": 50,
+        "cov": 0.9391,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-50-41",
+        "n": 50,
+        "cov": 0.8668,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-50-47",
+        "n": 50,
+        "cov": 0.8662,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-50-7",
+        "n": 50,
+        "cov": 0.9421,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-50-8",
+        "n": 50,
+        "cov": 0.9088,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-52-21",
+        "n": 52,
+        "cov": 0.8226,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-52-22",
+        "n": 52,
+        "cov": 0.8853,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-52-33",
+        "n": 52,
+        "cov": 0.8832,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-52-50",
+        "n": 52,
+        "cov": 0.7141,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-52-7",
+        "n": 52,
+        "cov": 0.8834,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-54-19",
+        "n": 54,
+        "cov": 0.9074,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-54-36",
+        "n": 54,
+        "cov": 0.5934,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-54-8",
+        "n": 54,
+        "cov": 0.9023,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-56-15",
+        "n": 56,
+        "cov": 0.9059,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-56-18",
+        "n": 56,
+        "cov": 0.8457,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-56-32",
+        "n": 56,
+        "cov": 0.9054,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-56-55",
+        "n": 56,
+        "cov": 0.8407,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-56-7",
+        "n": 56,
+        "cov": 0.6658,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-56-8",
+        "n": 56,
+        "cov": 0.9043,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-58-12",
+        "n": 58,
+        "cov": 0.9169,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-58-15",
+        "n": 58,
+        "cov": 0.9067,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-58-21",
+        "n": 58,
+        "cov": 0.9091,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-58-41",
+        "n": 58,
+        "cov": 0.8597,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-60-10",
+        "n": 60,
+        "cov": 0.9155,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-60-11",
+        "n": 60,
+        "cov": 0.8891,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-60-16",
+        "n": 60,
+        "cov": 0.8692,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-60-22",
+        "n": 60,
+        "cov": 0.8606,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-60-24",
+        "n": 60,
+        "cov": 0.841,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-60-4",
+        "n": 60,
+        "cov": 0.9345,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-62-44",
+        "n": 62,
+        "cov": 0.9414,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-62-58",
+        "n": 62,
+        "cov": 0.9449,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-62-8",
+        "n": 62,
+        "cov": 0.8119,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-64-24",
+        "n": 64,
+        "cov": 0.7942,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-64-28",
+        "n": 64,
+        "cov": 0.858,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-64-30",
+        "n": 64,
+        "cov": 0.8566,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-64-47",
+        "n": 64,
+        "cov": 0.8484,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-66-27",
+        "n": 66,
+        "cov": 0.9242,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-66-29",
+        "n": 66,
+        "cov": 0.942,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-66-47",
+        "n": 66,
+        "cov": 0.935,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-66-51",
+        "n": 66,
+        "cov": 0.9226,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-68-24",
+        "n": 68,
+        "cov": 0.9134,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-68-29",
+        "n": 68,
+        "cov": 0.8981,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-68-54",
+        "n": 68,
+        "cov": 0.678,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-68-57",
+        "n": 68,
+        "cov": 0.9225,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-68-7",
+        "n": 68,
+        "cov": 0.8928,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-70-10",
+        "n": 70,
+        "cov": 0.9351,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-70-22",
+        "n": 70,
+        "cov": 0.9446,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-70-25",
+        "n": 70,
+        "cov": 0.8737,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-70-35",
+        "n": 70,
+        "cov": 0.8025,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-70-44",
+        "n": 70,
+        "cov": 0.8111,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-70-50",
+        "n": 70,
+        "cov": 0.8648,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-70-58",
+        "n": 70,
+        "cov": 0.9134,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-70-65",
+        "n": 70,
+        "cov": 0.9409,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-70-8",
+        "n": 70,
+        "cov": 0.8077,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-70-9",
+        "n": 70,
+        "cov": 0.8289,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-72-10",
+        "n": 72,
+        "cov": 0.9392,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-72-11",
+        "n": 72,
+        "cov": 0.7696,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-72-27",
+        "n": 72,
+        "cov": 0.9201,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-72-33",
+        "n": 72,
+        "cov": 0.9142,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-72-43",
+        "n": 72,
+        "cov": 0.9448,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-72-48",
+        "n": 72,
+        "cov": 0.9362,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-72-60",
+        "n": 72,
+        "cov": 0.8601,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-72-62",
+        "n": 72,
+        "cov": 0.7312,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-74-24",
+        "n": 74,
+        "cov": 0.7642,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-76-13",
+        "n": 76,
+        "cov": 0.6856,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-76-17",
+        "n": 76,
+        "cov": 0.8413,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-76-35",
+        "n": 76,
+        "cov": 0.7434,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-76-37",
+        "n": 76,
+        "cov": 0.8924,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-76-46",
+        "n": 76,
+        "cov": 0.9398,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-76-59",
+        "n": 76,
+        "cov": 0.8351,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-76-72",
+        "n": 76,
+        "cov": 0.8965,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-78-22",
+        "n": 78,
+        "cov": 0.9415,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-78-28",
+        "n": 78,
+        "cov": 0.926,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-78-31",
+        "n": 78,
+        "cov": 0.8736,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-78-5",
+        "n": 78,
+        "cov": 0.8743,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-78-51",
+        "n": 78,
+        "cov": 0.78,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-8-6",
+        "n": 8,
+        "cov": 0.7083,
+        "n_guards": 2
+      },
+      {
+        "name": "rand-80-1",
+        "n": 80,
+        "cov": 0.9168,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-80-2",
+        "n": 80,
+        "cov": 0.84,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-80-21",
+        "n": 80,
+        "cov": 0.9001,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-80-26",
+        "n": 80,
+        "cov": 0.9095,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-80-29",
+        "n": 80,
+        "cov": 0.8788,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-80-31",
+        "n": 80,
+        "cov": 0.7227,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-80-43",
+        "n": 80,
+        "cov": 0.9176,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-80-45",
+        "n": 80,
+        "cov": 0.752,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-80-60",
+        "n": 80,
+        "cov": 0.9058,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-80-71",
+        "n": 80,
+        "cov": 0.9318,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-80-8",
+        "n": 80,
+        "cov": 0.885,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-82-20",
+        "n": 82,
+        "cov": 0.8957,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-82-22",
+        "n": 82,
+        "cov": 0.9304,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-82-37",
+        "n": 82,
+        "cov": 0.9443,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-82-41",
+        "n": 82,
+        "cov": 0.9186,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-82-51",
+        "n": 82,
+        "cov": 0.9485,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-82-70",
+        "n": 82,
+        "cov": 0.7657,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-84-27",
+        "n": 84,
+        "cov": 0.9269,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-84-53",
+        "n": 84,
+        "cov": 0.8373,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-84-75",
+        "n": 84,
+        "cov": 0.7979,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-84-82",
+        "n": 84,
+        "cov": 0.9278,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-84-83",
+        "n": 84,
+        "cov": 0.8833,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-86-2",
+        "n": 86,
+        "cov": 0.937,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-86-35",
+        "n": 86,
+        "cov": 0.9048,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-86-43",
+        "n": 86,
+        "cov": 0.9398,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-86-52",
+        "n": 86,
+        "cov": 0.8325,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-88-15",
+        "n": 88,
+        "cov": 0.8476,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-88-42",
+        "n": 88,
+        "cov": 0.884,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-88-48",
+        "n": 88,
+        "cov": 0.6997,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-88-63",
+        "n": 88,
+        "cov": 0.7974,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-88-80",
+        "n": 88,
+        "cov": 0.8667,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-90-17",
+        "n": 90,
+        "cov": 0.8681,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-90-19",
+        "n": 90,
+        "cov": 0.8699,
+        "n_guards": 27
+      },
+      {
+        "name": "rand-90-29",
+        "n": 90,
+        "cov": 0.8924,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-90-51",
+        "n": 90,
+        "cov": 0.9493,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-90-52",
+        "n": 90,
+        "cov": 0.9475,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-90-53",
+        "n": 90,
+        "cov": 0.9024,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-90-56",
+        "n": 90,
+        "cov": 0.944,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-90-57",
+        "n": 90,
+        "cov": 0.8621,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-90-75",
+        "n": 90,
+        "cov": 0.8586,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-90-86",
+        "n": 90,
+        "cov": 0.9371,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-92-16",
+        "n": 92,
+        "cov": 0.9119,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-92-32",
+        "n": 92,
+        "cov": 0.9205,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-92-48",
+        "n": 92,
+        "cov": 0.9116,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-92-51",
+        "n": 92,
+        "cov": 0.9497,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-92-62",
+        "n": 92,
+        "cov": 0.8708,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-92-7",
+        "n": 92,
+        "cov": 0.7133,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-92-85",
+        "n": 92,
+        "cov": 0.919,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-94-12",
+        "n": 94,
+        "cov": 0.8671,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-94-20",
+        "n": 94,
+        "cov": 0.9358,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-94-23",
+        "n": 94,
+        "cov": 0.8818,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-94-30",
+        "n": 94,
+        "cov": 0.869,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-94-54",
+        "n": 94,
+        "cov": 0.8136,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-94-57",
+        "n": 94,
+        "cov": 0.8601,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-96-12",
+        "n": 96,
+        "cov": 0.8743,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-96-13",
+        "n": 96,
+        "cov": 0.9195,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-96-23",
+        "n": 96,
+        "cov": 0.9324,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-96-32",
+        "n": 96,
+        "cov": 0.9243,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-96-48",
+        "n": 96,
+        "cov": 0.8862,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-96-59",
+        "n": 96,
+        "cov": 0.7813,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-96-72",
+        "n": 96,
+        "cov": 0.8684,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-96-92",
+        "n": 96,
+        "cov": 0.8966,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-98-11",
+        "n": 98,
+        "cov": 0.9465,
+        "n_guards": 27
+      },
+      {
+        "name": "rand-98-13",
+        "n": 98,
+        "cov": 0.9197,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-98-15",
+        "n": 98,
+        "cov": 0.9478,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-98-2",
+        "n": 98,
+        "cov": 0.8533,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-98-38",
+        "n": 98,
+        "cov": 0.9135,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-98-39",
+        "n": 98,
+        "cov": 0.9303,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-98-79",
+        "n": 98,
+        "cov": 0.9483,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-98-95",
+        "n": 98,
+        "cov": 0.9331,
+        "n_guards": 27
+      },
+      {
+        "name": "random-100-29",
+        "n": 100,
+        "cov": 0.9465,
+        "n_guards": 23
+      },
+      {
+        "name": "random-20-27",
+        "n": 20,
+        "cov": 0.9467,
+        "n_guards": 5
+      },
+      {
+        "name": "random-40-15",
+        "n": 40,
+        "cov": 0.922,
+        "n_guards": 6
+      },
+      {
+        "name": "random-40-18",
+        "n": 40,
+        "cov": 0.9125,
+        "n_guards": 5
+      },
+      {
+        "name": "random-40-6",
+        "n": 40,
+        "cov": 0.9026,
+        "n_guards": 8
+      },
+      {
+        "name": "random-40-7",
+        "n": 40,
+        "cov": 0.9025,
+        "n_guards": 4
+      },
+      {
+        "name": "random-40-8",
+        "n": 40,
+        "cov": 0.5581,
+        "n_guards": 3
+      },
+      {
+        "name": "random-60-1",
+        "n": 60,
+        "cov": 0.949,
+        "n_guards": 15
+      },
+      {
+        "name": "random-60-10",
+        "n": 60,
+        "cov": 0.7121,
+        "n_guards": 12
+      },
+      {
+        "name": "random-60-13",
+        "n": 60,
+        "cov": 0.7952,
+        "n_guards": 6
+      },
+      {
+        "name": "random-60-9",
+        "n": 60,
+        "cov": 0.8122,
+        "n_guards": 10
+      },
+      {
+        "name": "random-80-11",
+        "n": 80,
+        "cov": 0.8867,
+        "n_guards": 23
+      },
+      {
+        "name": "random-80-13",
+        "n": 80,
+        "cov": 0.9368,
+        "n_guards": 17
+      },
+      {
+        "name": "random-80-16",
+        "n": 80,
+        "cov": 0.8784,
+        "n_guards": 13
+      },
+      {
+        "name": "random-80-28",
+        "n": 80,
+        "cov": 0.9297,
+        "n_guards": 14
+      },
+      {
+        "name": "random-80-9",
+        "n": 80,
+        "cov": 0.9228,
+        "n_guards": 16
+      },
+      {
+        "name": "randsimple-100-1",
+        "n": 100,
+        "cov": 0.9463,
+        "n_guards": 28
+      },
+      {
+        "name": "randsimple-100-3",
+        "n": 100,
+        "cov": 0.9285,
+        "n_guards": 26
+      },
+      {
+        "name": "randsimple-20-16",
+        "n": 20,
+        "cov": 0.9462,
+        "n_guards": 3
+      },
+      {
+        "name": "randsimple-40-13",
+        "n": 40,
+        "cov": 0.712,
+        "n_guards": 4
+      },
+      {
+        "name": "randsimple-40-19",
+        "n": 40,
+        "cov": 0.821,
+        "n_guards": 8
+      },
+      {
+        "name": "randsimple-40-5",
+        "n": 40,
+        "cov": 0.8603,
+        "n_guards": 8
+      },
+      {
+        "name": "randsimple-40-8",
+        "n": 40,
+        "cov": 0.8304,
+        "n_guards": 6
+      },
+      {
+        "name": "randsimple-60-14",
+        "n": 60,
+        "cov": 0.8704,
+        "n_guards": 12
+      },
+      {
+        "name": "randsimple-60-5",
+        "n": 60,
+        "cov": 0.8959,
+        "n_guards": 14
+      },
+      {
+        "name": "randsimple-60-9",
+        "n": 60,
+        "cov": 0.9148,
+        "n_guards": 15
+      },
+      {
+        "name": "randsimple-80-12",
+        "n": 80,
+        "cov": 0.8421,
+        "n_guards": 21
+      },
+      {
+        "name": "randsimple-80-13",
+        "n": 80,
+        "cov": 0.88,
+        "n_guards": 22
+      },
+      {
+        "name": "randvon-20-19",
+        "n": 20,
+        "cov": 0.9106,
+        "n_guards": 1
+      },
+      {
+        "name": "randvon-20-23",
+        "n": 20,
+        "cov": 0.9182,
+        "n_guards": 2
+      },
+      {
+        "name": "simple-100-5",
+        "n": 100,
+        "cov": 0.8838,
+        "n_guards": 26
+      },
+      {
+        "name": "simple-50-1",
+        "n": 50,
+        "cov": 0.9193,
+        "n_guards": 11
+      }
+    ],
+    "canon_argmax": [
+      {
+        "name": "rand-32-29",
+        "n": 32,
+        "cov": 0.9426,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-40-19",
+        "n": 40,
+        "cov": 0.945,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-46-33",
+        "n": 46,
+        "cov": 0.9359,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-8-6",
+        "n": 8,
+        "cov": 0.3333,
+        "n_guards": 1
+      },
+      {
+        "name": "random-20-7",
+        "n": 20,
+        "cov": 0.7619,
+        "n_guards": 3
+      },
+      {
+        "name": "random-40-8",
+        "n": 40,
+        "cov": 0.9207,
+        "n_guards": 8
+      },
+      {
+        "name": "random-60-1",
+        "n": 60,
+        "cov": 0.9386,
+        "n_guards": 18
+      },
+      {
+        "name": "randsimple-40-13",
+        "n": 40,
+        "cov": 0.9422,
+        "n_guards": 8
+      },
+      {
+        "name": "randsimple-40-5",
+        "n": 40,
+        "cov": 0.7474,
+        "n_guards": 7
+      },
+      {
+        "name": "randsimple-40-8",
+        "n": 40,
+        "cov": 0.895,
+        "n_guards": 10
+      },
+      {
+        "name": "randsimple-80-12",
+        "n": 80,
+        "cov": 0.9099,
+        "n_guards": 21
+      },
+      {
+        "name": "simple-50-7",
+        "n": 50,
+        "cov": 0.9423,
+        "n_guards": 13
+      }
+    ],
+    "reindex_n3": [
+      {
+        "name": "rand-30-20",
+        "n": 30,
+        "cov": 0.7582,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-23",
+        "n": 30,
+        "cov": 0.9414,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-29",
+        "n": 30,
+        "cov": 0.7911,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-30-5",
+        "n": 30,
+        "cov": 0.7903,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-32-29",
+        "n": 32,
+        "cov": 0.9426,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-34-16",
+        "n": 34,
+        "cov": 0.7127,
+        "n_guards": 2
+      },
+      {
+        "name": "rand-34-28",
+        "n": 34,
+        "cov": 0.8963,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-36-22",
+        "n": 36,
+        "cov": 0.8058,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-38-13",
+        "n": 38,
+        "cov": 0.9313,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-38-19",
+        "n": 38,
+        "cov": 0.877,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-38-7",
+        "n": 38,
+        "cov": 0.743,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-40-16",
+        "n": 40,
+        "cov": 0.6633,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-40-20",
+        "n": 40,
+        "cov": 0.9204,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-40-4",
+        "n": 40,
+        "cov": 0.7835,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-44-28",
+        "n": 44,
+        "cov": 0.9129,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-46-33",
+        "n": 46,
+        "cov": 0.9392,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-50-11",
+        "n": 50,
+        "cov": 0.8947,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-50-7",
+        "n": 50,
+        "cov": 0.9253,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-50-8",
+        "n": 50,
+        "cov": 0.9088,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-50-9",
+        "n": 50,
+        "cov": 0.8922,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-52-21",
+        "n": 52,
+        "cov": 0.9448,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-52-50",
+        "n": 52,
+        "cov": 0.9103,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-52-7",
+        "n": 52,
+        "cov": 0.7219,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-54-19",
+        "n": 54,
+        "cov": 0.7778,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-54-27",
+        "n": 54,
+        "cov": 0.9481,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-54-36",
+        "n": 54,
+        "cov": 0.8366,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-56-55",
+        "n": 56,
+        "cov": 0.8544,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-56-7",
+        "n": 56,
+        "cov": 0.874,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-60-10",
+        "n": 60,
+        "cov": 0.9265,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-60-22",
+        "n": 60,
+        "cov": 0.8473,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-62-22",
+        "n": 62,
+        "cov": 0.9451,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-62-44",
+        "n": 62,
+        "cov": 0.8758,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-62-58",
+        "n": 62,
+        "cov": 0.9449,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-62-8",
+        "n": 62,
+        "cov": 0.611,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-64-54",
+        "n": 64,
+        "cov": 0.9122,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-66-27",
+        "n": 66,
+        "cov": 0.7818,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-68-24",
+        "n": 68,
+        "cov": 0.7688,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-68-29",
+        "n": 68,
+        "cov": 0.9134,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-70-10",
+        "n": 70,
+        "cov": 0.9254,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-70-44",
+        "n": 70,
+        "cov": 0.9213,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-72-11",
+        "n": 72,
+        "cov": 0.8054,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-72-27",
+        "n": 72,
+        "cov": 0.8907,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-72-60",
+        "n": 72,
+        "cov": 0.9395,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-72-65",
+        "n": 72,
+        "cov": 0.9399,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-78-5",
+        "n": 78,
+        "cov": 0.8623,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-8-6",
+        "n": 8,
+        "cov": 0.6667,
+        "n_guards": 2
+      },
+      {
+        "name": "rand-80-17",
+        "n": 80,
+        "cov": 0.9421,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-80-26",
+        "n": 80,
+        "cov": 0.8781,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-80-60",
+        "n": 80,
+        "cov": 0.8458,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-82-37",
+        "n": 82,
+        "cov": 0.9207,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-82-51",
+        "n": 82,
+        "cov": 0.9499,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-84-25",
+        "n": 84,
+        "cov": 0.9215,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-84-27",
+        "n": 84,
+        "cov": 0.9269,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-84-82",
+        "n": 84,
+        "cov": 0.9496,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-86-35",
+        "n": 86,
+        "cov": 0.9389,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-88-42",
+        "n": 88,
+        "cov": 0.9432,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-88-48",
+        "n": 88,
+        "cov": 0.93,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-90-19",
+        "n": 90,
+        "cov": 0.9441,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-90-52",
+        "n": 90,
+        "cov": 0.9432,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-90-7",
+        "n": 90,
+        "cov": 0.8898,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-90-86",
+        "n": 90,
+        "cov": 0.9499,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-92-16",
+        "n": 92,
+        "cov": 0.9119,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-94-12",
+        "n": 94,
+        "cov": 0.9333,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-94-15",
+        "n": 94,
+        "cov": 0.8372,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-94-20",
+        "n": 94,
+        "cov": 0.8837,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-94-54",
+        "n": 94,
+        "cov": 0.8862,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-94-57",
+        "n": 94,
+        "cov": 0.9309,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-94-92",
+        "n": 94,
+        "cov": 0.8943,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-96-12",
+        "n": 96,
+        "cov": 0.9476,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-98-11",
+        "n": 98,
+        "cov": 0.9465,
+        "n_guards": 27
+      },
+      {
+        "name": "rand-98-79",
+        "n": 98,
+        "cov": 0.9421,
+        "n_guards": 25
+      },
+      {
+        "name": "random-100-29",
+        "n": 100,
+        "cov": 0.9465,
+        "n_guards": 23
+      },
+      {
+        "name": "random-60-1",
+        "n": 60,
+        "cov": 0.9326,
+        "n_guards": 17
+      },
+      {
+        "name": "random-60-9",
+        "n": 60,
+        "cov": 0.5626,
+        "n_guards": 6
+      },
+      {
+        "name": "random-80-11",
+        "n": 80,
+        "cov": 0.8413,
+        "n_guards": 19
+      },
+      {
+        "name": "random-80-16",
+        "n": 80,
+        "cov": 0.8784,
+        "n_guards": 13
+      },
+      {
+        "name": "randsimple-100-1",
+        "n": 100,
+        "cov": 0.9353,
+        "n_guards": 24
+      },
+      {
+        "name": "randsimple-100-29",
+        "n": 100,
+        "cov": 0.9481,
+        "n_guards": 18
+      },
+      {
+        "name": "randsimple-20-16",
+        "n": 20,
+        "cov": 0.9462,
+        "n_guards": 3
+      },
+      {
+        "name": "randsimple-40-13",
+        "n": 40,
+        "cov": 0.9422,
+        "n_guards": 8
+      },
+      {
+        "name": "randsimple-40-8",
+        "n": 40,
+        "cov": 0.876,
+        "n_guards": 11
+      },
+      {
+        "name": "randsimple-60-5",
+        "n": 60,
+        "cov": 0.8219,
+        "n_guards": 11
+      },
+      {
+        "name": "randsimple-80-12",
+        "n": 80,
+        "cov": 0.948,
+        "n_guards": 19
+      }
+    ],
+    "rot90": [
+      {
+        "name": "rand-30-11",
+        "n": 30,
+        "cov": 0.8819,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-25",
+        "n": 30,
+        "cov": 0.7854,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-30-28",
+        "n": 30,
+        "cov": 0.661,
+        "n_guards": 2
+      },
+      {
+        "name": "rand-30-5",
+        "n": 30,
+        "cov": 0.9274,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-32-29",
+        "n": 32,
+        "cov": 0.7471,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-34-16",
+        "n": 34,
+        "cov": 0.8433,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-34-28",
+        "n": 34,
+        "cov": 0.9007,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-36-22",
+        "n": 36,
+        "cov": 0.948,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-4",
+        "n": 40,
+        "cov": 0.7079,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-40-5",
+        "n": 40,
+        "cov": 0.8968,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-42-9",
+        "n": 42,
+        "cov": 0.9143,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-44-29",
+        "n": 44,
+        "cov": 0.9436,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-48-46",
+        "n": 48,
+        "cov": 0.9273,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-48-9",
+        "n": 48,
+        "cov": 0.7806,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-50-10",
+        "n": 50,
+        "cov": 0.9498,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-50-11",
+        "n": 50,
+        "cov": 0.936,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-50-19",
+        "n": 50,
+        "cov": 0.9231,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-50-26",
+        "n": 50,
+        "cov": 0.8318,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-50-4",
+        "n": 50,
+        "cov": 0.895,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-50-41",
+        "n": 50,
+        "cov": 0.85,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-50-44",
+        "n": 50,
+        "cov": 0.9422,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-50-47",
+        "n": 50,
+        "cov": 0.941,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-50-9",
+        "n": 50,
+        "cov": 0.8973,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-54-19",
+        "n": 54,
+        "cov": 0.9487,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-54-27",
+        "n": 54,
+        "cov": 0.9225,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-54-34",
+        "n": 54,
+        "cov": 0.9408,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-56-55",
+        "n": 56,
+        "cov": 0.8905,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-60-10",
+        "n": 60,
+        "cov": 0.836,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-60-19",
+        "n": 60,
+        "cov": 0.8171,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-62-22",
+        "n": 62,
+        "cov": 0.9455,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-62-58",
+        "n": 62,
+        "cov": 0.8047,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-64-28",
+        "n": 64,
+        "cov": 0.9447,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-66-51",
+        "n": 66,
+        "cov": 0.9452,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-68-54",
+        "n": 68,
+        "cov": 0.9287,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-68-6",
+        "n": 68,
+        "cov": 0.9481,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-68-62",
+        "n": 68,
+        "cov": 0.8689,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-70-35",
+        "n": 70,
+        "cov": 0.9362,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-70-50",
+        "n": 70,
+        "cov": 0.912,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-70-8",
+        "n": 70,
+        "cov": 0.8491,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-76-13",
+        "n": 76,
+        "cov": 0.9485,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-76-17",
+        "n": 76,
+        "cov": 0.9464,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-76-25",
+        "n": 76,
+        "cov": 0.848,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-76-35",
+        "n": 76,
+        "cov": 0.8761,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-82-20",
+        "n": 82,
+        "cov": 0.9089,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-82-37",
+        "n": 82,
+        "cov": 0.9424,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-82-51",
+        "n": 82,
+        "cov": 0.7709,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-82-70",
+        "n": 82,
+        "cov": 0.9471,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-84-65",
+        "n": 84,
+        "cov": 0.8701,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-86-43",
+        "n": 86,
+        "cov": 0.9178,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-88-37",
+        "n": 88,
+        "cov": 0.8448,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-88-61",
+        "n": 88,
+        "cov": 0.8944,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-88-80",
+        "n": 88,
+        "cov": 0.9207,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-90-52",
+        "n": 90,
+        "cov": 0.8878,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-90-53",
+        "n": 90,
+        "cov": 0.8939,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-90-56",
+        "n": 90,
+        "cov": 0.8786,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-90-75",
+        "n": 90,
+        "cov": 0.8406,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-90-84",
+        "n": 90,
+        "cov": 0.9255,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-92-32",
+        "n": 92,
+        "cov": 0.7617,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-92-7",
+        "n": 92,
+        "cov": 0.919,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-94-20",
+        "n": 94,
+        "cov": 0.9467,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-94-30",
+        "n": 94,
+        "cov": 0.9434,
+        "n_guards": 27
+      },
+      {
+        "name": "rand-94-92",
+        "n": 94,
+        "cov": 0.941,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-96-72",
+        "n": 96,
+        "cov": 0.7848,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-98-15",
+        "n": 98,
+        "cov": 0.9341,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-98-2",
+        "n": 98,
+        "cov": 0.9484,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-98-47",
+        "n": 98,
+        "cov": 0.8738,
+        "n_guards": 20
+      },
+      {
+        "name": "random-100-28",
+        "n": 100,
+        "cov": 0.8682,
+        "n_guards": 17
+      },
+      {
+        "name": "random-20-22",
+        "n": 20,
+        "cov": 0.3816,
+        "n_guards": 1
+      },
+      {
+        "name": "random-20-27",
+        "n": 20,
+        "cov": 0.7694,
+        "n_guards": 2
+      },
+      {
+        "name": "random-40-15",
+        "n": 40,
+        "cov": 0.9385,
+        "n_guards": 10
+      },
+      {
+        "name": "random-40-7",
+        "n": 40,
+        "cov": 0.7518,
+        "n_guards": 4
+      },
+      {
+        "name": "random-40-8",
+        "n": 40,
+        "cov": 0.9319,
+        "n_guards": 10
+      },
+      {
+        "name": "random-60-9",
+        "n": 60,
+        "cov": 0.9207,
+        "n_guards": 18
+      },
+      {
+        "name": "random-80-9",
+        "n": 80,
+        "cov": 0.8908,
+        "n_guards": 12
+      },
+      {
+        "name": "randsimple-40-13",
+        "n": 40,
+        "cov": 0.9306,
+        "n_guards": 10
+      },
+      {
+        "name": "randsimple-40-19",
+        "n": 40,
+        "cov": 0.9354,
+        "n_guards": 7
+      },
+      {
+        "name": "randsimple-60-5",
+        "n": 60,
+        "cov": 0.6713,
+        "n_guards": 11
+      },
+      {
+        "name": "randsimple-80-12",
+        "n": 80,
+        "cov": 0.9245,
+        "n_guards": 23
+      },
+      {
+        "name": "randsimple-80-13",
+        "n": 80,
+        "cov": 0.8203,
+        "n_guards": 19
+      },
+      {
+        "name": "simple-100-9",
+        "n": 100,
+        "cov": 0.9435,
+        "n_guards": 33
+      }
+    ],
+    "canon_rot90": [
+      {
+        "name": "rand-30-20",
+        "n": 30,
+        "cov": 0.752,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-23",
+        "n": 30,
+        "cov": 0.9477,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-30-26",
+        "n": 30,
+        "cov": 0.7093,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-30-28",
+        "n": 30,
+        "cov": 0.7288,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-34-28",
+        "n": 34,
+        "cov": 0.8687,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-36-13",
+        "n": 36,
+        "cov": 0.8956,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-38-13",
+        "n": 38,
+        "cov": 0.7206,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-38-19",
+        "n": 38,
+        "cov": 0.8233,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-40-16",
+        "n": 40,
+        "cov": 0.8235,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-19",
+        "n": 40,
+        "cov": 0.8342,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-2",
+        "n": 40,
+        "cov": 0.9279,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-20",
+        "n": 40,
+        "cov": 0.8705,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-23",
+        "n": 40,
+        "cov": 0.9079,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-40-5",
+        "n": 40,
+        "cov": 0.8133,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-42-28",
+        "n": 42,
+        "cov": 0.8801,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-42-32",
+        "n": 42,
+        "cov": 0.9287,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-42-6",
+        "n": 42,
+        "cov": 0.9386,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-42-9",
+        "n": 42,
+        "cov": 0.8724,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-44-28",
+        "n": 44,
+        "cov": 0.5947,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-44-29",
+        "n": 44,
+        "cov": 0.91,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-46-27",
+        "n": 46,
+        "cov": 0.8308,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-46-3",
+        "n": 46,
+        "cov": 0.8481,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-46-33",
+        "n": 46,
+        "cov": 0.8557,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-48-36",
+        "n": 48,
+        "cov": 0.8954,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-48-46",
+        "n": 48,
+        "cov": 0.9273,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-48-9",
+        "n": 48,
+        "cov": 0.8248,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-50-10",
+        "n": 50,
+        "cov": 0.744,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-50-11",
+        "n": 50,
+        "cov": 0.6039,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-50-19",
+        "n": 50,
+        "cov": 0.5315,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-50-20",
+        "n": 50,
+        "cov": 0.8007,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-50-26",
+        "n": 50,
+        "cov": 0.6547,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-50-4",
+        "n": 50,
+        "cov": 0.8853,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-50-41",
+        "n": 50,
+        "cov": 0.9319,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-50-44",
+        "n": 50,
+        "cov": 0.845,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-50-47",
+        "n": 50,
+        "cov": 0.9318,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-50-7",
+        "n": 50,
+        "cov": 0.94,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-50-9",
+        "n": 50,
+        "cov": 0.8357,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-52-33",
+        "n": 52,
+        "cov": 0.6336,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-52-50",
+        "n": 52,
+        "cov": 0.841,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-52-7",
+        "n": 52,
+        "cov": 0.9404,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-54-19",
+        "n": 54,
+        "cov": 0.6466,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-54-8",
+        "n": 54,
+        "cov": 0.9348,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-56-15",
+        "n": 56,
+        "cov": 0.9317,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-56-16",
+        "n": 56,
+        "cov": 0.8747,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-56-18",
+        "n": 56,
+        "cov": 0.6462,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-56-32",
+        "n": 56,
+        "cov": 0.9075,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-56-55",
+        "n": 56,
+        "cov": 0.8905,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-56-7",
+        "n": 56,
+        "cov": 0.8107,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-58-12",
+        "n": 58,
+        "cov": 0.8018,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-58-2",
+        "n": 58,
+        "cov": 0.9305,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-58-21",
+        "n": 58,
+        "cov": 0.8196,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-58-41",
+        "n": 58,
+        "cov": 0.9229,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-58-57",
+        "n": 58,
+        "cov": 0.8971,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-60-10",
+        "n": 60,
+        "cov": 0.9221,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-60-11",
+        "n": 60,
+        "cov": 0.9359,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-60-16",
+        "n": 60,
+        "cov": 0.6835,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-60-19",
+        "n": 60,
+        "cov": 0.9213,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-60-22",
+        "n": 60,
+        "cov": 0.7484,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-60-24",
+        "n": 60,
+        "cov": 0.9316,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-60-59",
+        "n": 60,
+        "cov": 0.7264,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-62-22",
+        "n": 62,
+        "cov": 0.877,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-62-44",
+        "n": 62,
+        "cov": 0.8645,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-62-49",
+        "n": 62,
+        "cov": 0.9449,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-62-8",
+        "n": 62,
+        "cov": 0.9318,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-64-24",
+        "n": 64,
+        "cov": 0.7802,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-64-28",
+        "n": 64,
+        "cov": 0.9373,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-64-30",
+        "n": 64,
+        "cov": 0.945,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-64-54",
+        "n": 64,
+        "cov": 0.8698,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-66-29",
+        "n": 66,
+        "cov": 0.939,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-66-47",
+        "n": 66,
+        "cov": 0.828,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-66-51",
+        "n": 66,
+        "cov": 0.937,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-68-18",
+        "n": 68,
+        "cov": 0.9337,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-68-24",
+        "n": 68,
+        "cov": 0.8941,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-68-29",
+        "n": 68,
+        "cov": 0.8547,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-68-54",
+        "n": 68,
+        "cov": 0.8797,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-68-57",
+        "n": 68,
+        "cov": 0.7879,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-68-6",
+        "n": 68,
+        "cov": 0.9428,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-68-7",
+        "n": 68,
+        "cov": 0.9231,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-70-10",
+        "n": 70,
+        "cov": 0.833,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-70-25",
+        "n": 70,
+        "cov": 0.9398,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-70-35",
+        "n": 70,
+        "cov": 0.9173,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-70-44",
+        "n": 70,
+        "cov": 0.9489,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-70-50",
+        "n": 70,
+        "cov": 0.5964,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-70-58",
+        "n": 70,
+        "cov": 0.8352,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-70-65",
+        "n": 70,
+        "cov": 0.848,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-72-27",
+        "n": 72,
+        "cov": 0.7427,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-72-33",
+        "n": 72,
+        "cov": 0.904,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-72-43",
+        "n": 72,
+        "cov": 0.9102,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-74-18",
+        "n": 74,
+        "cov": 0.6873,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-74-48",
+        "n": 74,
+        "cov": 0.9234,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-76-17",
+        "n": 76,
+        "cov": 0.7676,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-76-37",
+        "n": 76,
+        "cov": 0.8411,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-76-46",
+        "n": 76,
+        "cov": 0.8763,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-76-59",
+        "n": 76,
+        "cov": 0.9458,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-78-22",
+        "n": 78,
+        "cov": 0.9371,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-78-28",
+        "n": 78,
+        "cov": 0.8839,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-78-40",
+        "n": 78,
+        "cov": 0.8591,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-78-51",
+        "n": 78,
+        "cov": 0.7766,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-78-9",
+        "n": 78,
+        "cov": 0.9402,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-80-17",
+        "n": 80,
+        "cov": 0.7916,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-80-2",
+        "n": 80,
+        "cov": 0.8122,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-80-21",
+        "n": 80,
+        "cov": 0.9498,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-80-26",
+        "n": 80,
+        "cov": 0.9086,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-80-45",
+        "n": 80,
+        "cov": 0.9468,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-80-60",
+        "n": 80,
+        "cov": 0.9021,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-80-71",
+        "n": 80,
+        "cov": 0.8732,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-82-1",
+        "n": 82,
+        "cov": 0.9321,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-82-12",
+        "n": 82,
+        "cov": 0.9498,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-82-20",
+        "n": 82,
+        "cov": 0.9078,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-82-22",
+        "n": 82,
+        "cov": 0.8468,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-82-37",
+        "n": 82,
+        "cov": 0.6458,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-82-51",
+        "n": 82,
+        "cov": 0.718,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-82-70",
+        "n": 82,
+        "cov": 0.8654,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-84-25",
+        "n": 84,
+        "cov": 0.8641,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-84-53",
+        "n": 84,
+        "cov": 0.9471,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-84-63",
+        "n": 84,
+        "cov": 0.7597,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-84-65",
+        "n": 84,
+        "cov": 0.878,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-84-82",
+        "n": 84,
+        "cov": 0.8708,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-86-2",
+        "n": 86,
+        "cov": 0.911,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-86-35",
+        "n": 86,
+        "cov": 0.9247,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-86-43",
+        "n": 86,
+        "cov": 0.8352,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-86-52",
+        "n": 86,
+        "cov": 0.7628,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-88-37",
+        "n": 88,
+        "cov": 0.7558,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-88-42",
+        "n": 88,
+        "cov": 0.8336,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-88-48",
+        "n": 88,
+        "cov": 0.9454,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-88-61",
+        "n": 88,
+        "cov": 0.865,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-88-80",
+        "n": 88,
+        "cov": 0.8622,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-90-12",
+        "n": 90,
+        "cov": 0.9393,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-90-20",
+        "n": 90,
+        "cov": 0.8752,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-90-29",
+        "n": 90,
+        "cov": 0.8914,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-90-51",
+        "n": 90,
+        "cov": 0.8559,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-90-53",
+        "n": 90,
+        "cov": 0.8899,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-90-56",
+        "n": 90,
+        "cov": 0.7928,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-90-7",
+        "n": 90,
+        "cov": 0.9442,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-90-75",
+        "n": 90,
+        "cov": 0.8676,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-90-84",
+        "n": 90,
+        "cov": 0.7738,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-90-86",
+        "n": 90,
+        "cov": 0.9443,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-92-16",
+        "n": 92,
+        "cov": 0.8311,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-92-32",
+        "n": 92,
+        "cov": 0.7511,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-92-40",
+        "n": 92,
+        "cov": 0.8988,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-92-48",
+        "n": 92,
+        "cov": 0.7438,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-92-51",
+        "n": 92,
+        "cov": 0.9089,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-92-7",
+        "n": 92,
+        "cov": 0.9412,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-92-85",
+        "n": 92,
+        "cov": 0.7062,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-94-12",
+        "n": 94,
+        "cov": 0.8103,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-94-15",
+        "n": 94,
+        "cov": 0.8427,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-94-30",
+        "n": 94,
+        "cov": 0.8846,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-94-54",
+        "n": 94,
+        "cov": 0.8054,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-94-92",
+        "n": 94,
+        "cov": 0.8654,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-96-12",
+        "n": 96,
+        "cov": 0.8523,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-96-59",
+        "n": 96,
+        "cov": 0.8249,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-96-72",
+        "n": 96,
+        "cov": 0.6722,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-96-92",
+        "n": 96,
+        "cov": 0.9435,
+        "n_guards": 31
+      },
+      {
+        "name": "rand-96-94",
+        "n": 96,
+        "cov": 0.8816,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-98-11",
+        "n": 98,
+        "cov": 0.894,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-98-15",
+        "n": 98,
+        "cov": 0.8345,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-98-2",
+        "n": 98,
+        "cov": 0.9484,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-98-38",
+        "n": 98,
+        "cov": 0.9087,
+        "n_guards": 27
+      },
+      {
+        "name": "rand-98-47",
+        "n": 98,
+        "cov": 0.789,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-98-67",
+        "n": 98,
+        "cov": 0.6637,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-98-79",
+        "n": 98,
+        "cov": 0.8786,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-98-95",
+        "n": 98,
+        "cov": 0.8802,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-98-98",
+        "n": 98,
+        "cov": 0.9025,
+        "n_guards": 23
+      },
+      {
+        "name": "random-100-28",
+        "n": 100,
+        "cov": 0.9291,
+        "n_guards": 20
+      },
+      {
+        "name": "random-20-27",
+        "n": 20,
+        "cov": 0.7694,
+        "n_guards": 2
+      },
+      {
+        "name": "random-20-7",
+        "n": 20,
+        "cov": 0.6922,
+        "n_guards": 2
+      },
+      {
+        "name": "random-40-15",
+        "n": 40,
+        "cov": 0.8759,
+        "n_guards": 5
+      },
+      {
+        "name": "random-40-6",
+        "n": 40,
+        "cov": 0.9058,
+        "n_guards": 5
+      },
+      {
+        "name": "random-40-7",
+        "n": 40,
+        "cov": 0.9212,
+        "n_guards": 8
+      },
+      {
+        "name": "random-40-8",
+        "n": 40,
+        "cov": 0.9448,
+        "n_guards": 7
+      },
+      {
+        "name": "random-60-1",
+        "n": 60,
+        "cov": 0.8324,
+        "n_guards": 9
+      },
+      {
+        "name": "random-60-13",
+        "n": 60,
+        "cov": 0.93,
+        "n_guards": 13
+      },
+      {
+        "name": "random-80-11",
+        "n": 80,
+        "cov": 0.859,
+        "n_guards": 20
+      },
+      {
+        "name": "random-80-18",
+        "n": 80,
+        "cov": 0.9297,
+        "n_guards": 22
+      },
+      {
+        "name": "random-80-28",
+        "n": 80,
+        "cov": 0.9475,
+        "n_guards": 21
+      },
+      {
+        "name": "random-80-9",
+        "n": 80,
+        "cov": 0.8821,
+        "n_guards": 12
+      },
+      {
+        "name": "randsimple-100-1",
+        "n": 100,
+        "cov": 0.8677,
+        "n_guards": 26
+      },
+      {
+        "name": "randsimple-100-3",
+        "n": 100,
+        "cov": 0.8502,
+        "n_guards": 26
+      },
+      {
+        "name": "randsimple-20-16",
+        "n": 20,
+        "cov": 0.8556,
+        "n_guards": 4
+      },
+      {
+        "name": "randsimple-40-13",
+        "n": 40,
+        "cov": 0.8953,
+        "n_guards": 9
+      },
+      {
+        "name": "randsimple-40-19",
+        "n": 40,
+        "cov": 0.7517,
+        "n_guards": 5
+      },
+      {
+        "name": "randsimple-60-14",
+        "n": 60,
+        "cov": 0.6847,
+        "n_guards": 9
+      },
+      {
+        "name": "randsimple-60-9",
+        "n": 60,
+        "cov": 0.9187,
+        "n_guards": 12
+      },
+      {
+        "name": "randsimple-80-12",
+        "n": 80,
+        "cov": 0.8497,
+        "n_guards": 18
+      },
+      {
+        "name": "randvon-20-23",
+        "n": 20,
+        "cov": 0.6731,
+        "n_guards": 1
+      },
+      {
+        "name": "simple-100-5",
+        "n": 100,
+        "cov": 0.9205,
+        "n_guards": 24
+      },
+      {
+        "name": "simple-100-9",
+        "n": 100,
+        "cov": 0.9489,
+        "n_guards": 25
+      },
+      {
+        "name": "simple-50-7",
+        "n": 50,
+        "cov": 0.8655,
+        "n_guards": 9
+      }
+    ],
+    "rot180": [
+      {
+        "name": "rand-30-20",
+        "n": 30,
+        "cov": 0.9364,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-30-23",
+        "n": 30,
+        "cov": 0.7788,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-30-25",
+        "n": 30,
+        "cov": 0.8502,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-30-29",
+        "n": 30,
+        "cov": 0.9282,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-30-5",
+        "n": 30,
+        "cov": 0.6384,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-36-22",
+        "n": 36,
+        "cov": 0.8411,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-40-16",
+        "n": 40,
+        "cov": 0.8998,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-40-2",
+        "n": 40,
+        "cov": 0.8238,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-40-23",
+        "n": 40,
+        "cov": 0.9123,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-4",
+        "n": 40,
+        "cov": 0.8272,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-40-5",
+        "n": 40,
+        "cov": 0.8031,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-42-32",
+        "n": 42,
+        "cov": 0.8731,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-42-6",
+        "n": 42,
+        "cov": 0.8616,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-42-9",
+        "n": 42,
+        "cov": 0.9122,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-44-28",
+        "n": 44,
+        "cov": 0.8312,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-44-29",
+        "n": 44,
+        "cov": 0.8993,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-44-30",
+        "n": 44,
+        "cov": 0.7475,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-48-31",
+        "n": 48,
+        "cov": 0.8734,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-48-37",
+        "n": 48,
+        "cov": 0.7879,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-48-46",
+        "n": 48,
+        "cov": 0.9206,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-48-9",
+        "n": 48,
+        "cov": 0.9254,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-50-11",
+        "n": 50,
+        "cov": 0.7513,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-50-26",
+        "n": 50,
+        "cov": 0.9236,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-50-47",
+        "n": 50,
+        "cov": 0.9011,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-50-7",
+        "n": 50,
+        "cov": 0.9207,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-50-9",
+        "n": 50,
+        "cov": 0.8789,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-52-50",
+        "n": 52,
+        "cov": 0.6582,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-54-34",
+        "n": 54,
+        "cov": 0.9371,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-54-8",
+        "n": 54,
+        "cov": 0.8842,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-56-15",
+        "n": 56,
+        "cov": 0.8277,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-56-16",
+        "n": 56,
+        "cov": 0.8414,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-56-32",
+        "n": 56,
+        "cov": 0.8788,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-56-55",
+        "n": 56,
+        "cov": 0.9431,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-56-7",
+        "n": 56,
+        "cov": 0.9485,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-56-8",
+        "n": 56,
+        "cov": 0.8888,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-58-12",
+        "n": 58,
+        "cov": 0.9392,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-58-15",
+        "n": 58,
+        "cov": 0.9463,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-58-21",
+        "n": 58,
+        "cov": 0.9,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-58-57",
+        "n": 58,
+        "cov": 0.9371,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-60-16",
+        "n": 60,
+        "cov": 0.7893,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-60-19",
+        "n": 60,
+        "cov": 0.9166,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-60-22",
+        "n": 60,
+        "cov": 0.9295,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-60-24",
+        "n": 60,
+        "cov": 0.9073,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-60-4",
+        "n": 60,
+        "cov": 0.929,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-60-54",
+        "n": 60,
+        "cov": 0.8409,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-62-8",
+        "n": 62,
+        "cov": 0.7665,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-64-24",
+        "n": 64,
+        "cov": 0.7653,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-64-47",
+        "n": 64,
+        "cov": 0.8792,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-66-27",
+        "n": 66,
+        "cov": 0.93,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-66-29",
+        "n": 66,
+        "cov": 0.9045,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-66-61",
+        "n": 66,
+        "cov": 0.3908,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-68-24",
+        "n": 68,
+        "cov": 0.834,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-68-62",
+        "n": 68,
+        "cov": 0.7322,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-68-7",
+        "n": 68,
+        "cov": 0.9409,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-70-35",
+        "n": 70,
+        "cov": 0.9353,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-70-44",
+        "n": 70,
+        "cov": 0.8227,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-70-65",
+        "n": 70,
+        "cov": 0.8724,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-70-8",
+        "n": 70,
+        "cov": 0.9172,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-70-9",
+        "n": 70,
+        "cov": 0.8813,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-72-1",
+        "n": 72,
+        "cov": 0.9221,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-72-11",
+        "n": 72,
+        "cov": 0.9385,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-72-33",
+        "n": 72,
+        "cov": 0.911,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-72-43",
+        "n": 72,
+        "cov": 0.9419,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-72-62",
+        "n": 72,
+        "cov": 0.8426,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-72-71",
+        "n": 72,
+        "cov": 0.9368,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-74-18",
+        "n": 74,
+        "cov": 0.8975,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-74-24",
+        "n": 74,
+        "cov": 0.8504,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-76-37",
+        "n": 76,
+        "cov": 0.9249,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-76-46",
+        "n": 76,
+        "cov": 0.931,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-76-59",
+        "n": 76,
+        "cov": 0.9306,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-76-72",
+        "n": 76,
+        "cov": 0.9418,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-78-28",
+        "n": 78,
+        "cov": 0.8885,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-78-5",
+        "n": 78,
+        "cov": 0.7179,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-78-51",
+        "n": 78,
+        "cov": 0.9121,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-78-9",
+        "n": 78,
+        "cov": 0.7559,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-80-1",
+        "n": 80,
+        "cov": 0.8948,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-80-17",
+        "n": 80,
+        "cov": 0.946,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-80-21",
+        "n": 80,
+        "cov": 0.8966,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-80-26",
+        "n": 80,
+        "cov": 0.8715,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-80-29",
+        "n": 80,
+        "cov": 0.8383,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-80-60",
+        "n": 80,
+        "cov": 0.8504,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-80-8",
+        "n": 80,
+        "cov": 0.8226,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-82-1",
+        "n": 82,
+        "cov": 0.9366,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-82-20",
+        "n": 82,
+        "cov": 0.8254,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-82-70",
+        "n": 82,
+        "cov": 0.9152,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-84-25",
+        "n": 84,
+        "cov": 0.9091,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-84-82",
+        "n": 84,
+        "cov": 0.8841,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-84-83",
+        "n": 84,
+        "cov": 0.9206,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-86-2",
+        "n": 86,
+        "cov": 0.8874,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-86-52",
+        "n": 86,
+        "cov": 0.9394,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-88-15",
+        "n": 88,
+        "cov": 0.8516,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-88-37",
+        "n": 88,
+        "cov": 0.9413,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-88-42",
+        "n": 88,
+        "cov": 0.9487,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-88-48",
+        "n": 88,
+        "cov": 0.9004,
+        "n_guards": 27
+      },
+      {
+        "name": "rand-88-61",
+        "n": 88,
+        "cov": 0.8804,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-88-63",
+        "n": 88,
+        "cov": 0.8339,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-88-80",
+        "n": 88,
+        "cov": 0.9302,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-88-88",
+        "n": 88,
+        "cov": 0.908,
+        "n_guards": 28
+      },
+      {
+        "name": "rand-90-17",
+        "n": 90,
+        "cov": 0.9341,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-90-19",
+        "n": 90,
+        "cov": 0.9325,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-90-20",
+        "n": 90,
+        "cov": 0.9286,
+        "n_guards": 30
+      },
+      {
+        "name": "rand-90-51",
+        "n": 90,
+        "cov": 0.9197,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-90-54",
+        "n": 90,
+        "cov": 0.8451,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-90-57",
+        "n": 90,
+        "cov": 0.8689,
+        "n_guards": 29
+      },
+      {
+        "name": "rand-90-7",
+        "n": 90,
+        "cov": 0.9206,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-90-75",
+        "n": 90,
+        "cov": 0.9383,
+        "n_guards": 28
+      },
+      {
+        "name": "rand-90-84",
+        "n": 90,
+        "cov": 0.848,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-92-16",
+        "n": 92,
+        "cov": 0.8655,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-92-40",
+        "n": 92,
+        "cov": 0.9222,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-92-51",
+        "n": 92,
+        "cov": 0.9227,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-94-12",
+        "n": 94,
+        "cov": 0.9317,
+        "n_guards": 37
+      },
+      {
+        "name": "rand-94-15",
+        "n": 94,
+        "cov": 0.8733,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-94-23",
+        "n": 94,
+        "cov": 0.9482,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-94-57",
+        "n": 94,
+        "cov": 0.89,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-94-92",
+        "n": 94,
+        "cov": 0.9321,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-96-12",
+        "n": 96,
+        "cov": 0.9232,
+        "n_guards": 38
+      },
+      {
+        "name": "rand-96-13",
+        "n": 96,
+        "cov": 0.8823,
+        "n_guards": 27
+      },
+      {
+        "name": "rand-96-23",
+        "n": 96,
+        "cov": 0.9449,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-96-92",
+        "n": 96,
+        "cov": 0.9154,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-98-13",
+        "n": 98,
+        "cov": 0.767,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-98-47",
+        "n": 98,
+        "cov": 0.8473,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-98-79",
+        "n": 98,
+        "cov": 0.8636,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-98-95",
+        "n": 98,
+        "cov": 0.8796,
+        "n_guards": 22
+      },
+      {
+        "name": "random-40-15",
+        "n": 40,
+        "cov": 0.9078,
+        "n_guards": 9
+      },
+      {
+        "name": "random-40-18",
+        "n": 40,
+        "cov": 0.9157,
+        "n_guards": 9
+      },
+      {
+        "name": "random-40-8",
+        "n": 40,
+        "cov": 0.9271,
+        "n_guards": 8
+      },
+      {
+        "name": "random-60-10",
+        "n": 60,
+        "cov": 0.9242,
+        "n_guards": 11
+      },
+      {
+        "name": "random-60-13",
+        "n": 60,
+        "cov": 0.8565,
+        "n_guards": 12
+      },
+      {
+        "name": "random-80-11",
+        "n": 80,
+        "cov": 0.9076,
+        "n_guards": 24
+      },
+      {
+        "name": "random-80-16",
+        "n": 80,
+        "cov": 0.9223,
+        "n_guards": 19
+      },
+      {
+        "name": "random-80-18",
+        "n": 80,
+        "cov": 0.8492,
+        "n_guards": 15
+      },
+      {
+        "name": "random-80-28",
+        "n": 80,
+        "cov": 0.8756,
+        "n_guards": 12
+      },
+      {
+        "name": "randsimple-100-22",
+        "n": 100,
+        "cov": 0.744,
+        "n_guards": 22
+      },
+      {
+        "name": "randsimple-60-14",
+        "n": 60,
+        "cov": 0.7815,
+        "n_guards": 13
+      },
+      {
+        "name": "randsimple-60-5",
+        "n": 60,
+        "cov": 0.9379,
+        "n_guards": 14
+      },
+      {
+        "name": "randsimple-80-12",
+        "n": 80,
+        "cov": 0.9116,
+        "n_guards": 19
+      },
+      {
+        "name": "randsimple-80-13",
+        "n": 80,
+        "cov": 0.9379,
+        "n_guards": 19
+      },
+      {
+        "name": "randvon-20-23",
+        "n": 20,
+        "cov": 0.9265,
+        "n_guards": 2
+      },
+      {
+        "name": "simple-50-7",
+        "n": 50,
+        "cov": 0.9151,
+        "n_guards": 11
+      }
+    ],
+    "canon_rot180": [
+      {
+        "name": "rand-30-11",
+        "n": 30,
+        "cov": 0.8565,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-16",
+        "n": 30,
+        "cov": 0.9006,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-30-26",
+        "n": 30,
+        "cov": 0.7019,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-30-27",
+        "n": 30,
+        "cov": 0.8975,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-30-28",
+        "n": 30,
+        "cov": 0.4717,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-30-5",
+        "n": 30,
+        "cov": 0.7102,
+        "n_guards": 3
+      },
+      {
+        "name": "rand-36-13",
+        "n": 36,
+        "cov": 0.9001,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-38-13",
+        "n": 38,
+        "cov": 0.9088,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-38-19",
+        "n": 38,
+        "cov": 0.9126,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-38-38",
+        "n": 38,
+        "cov": 0.8617,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-38-7",
+        "n": 38,
+        "cov": 0.6448,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-40-23",
+        "n": 40,
+        "cov": 0.9421,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-40-4",
+        "n": 40,
+        "cov": 0.8619,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-40-40",
+        "n": 40,
+        "cov": 0.9321,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-40-5",
+        "n": 40,
+        "cov": 0.8897,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-42-28",
+        "n": 42,
+        "cov": 0.9149,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-42-32",
+        "n": 42,
+        "cov": 0.845,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-42-6",
+        "n": 42,
+        "cov": 0.6655,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-42-9",
+        "n": 42,
+        "cov": 0.9099,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-44-28",
+        "n": 44,
+        "cov": 0.8925,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-44-29",
+        "n": 44,
+        "cov": 0.9167,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-44-30",
+        "n": 44,
+        "cov": 0.5342,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-46-27",
+        "n": 46,
+        "cov": 0.7287,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-46-33",
+        "n": 46,
+        "cov": 0.9281,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-48-13",
+        "n": 48,
+        "cov": 0.9329,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-48-31",
+        "n": 48,
+        "cov": 0.8734,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-48-36",
+        "n": 48,
+        "cov": 0.7063,
+        "n_guards": 4
+      },
+      {
+        "name": "rand-48-37",
+        "n": 48,
+        "cov": 0.9338,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-48-46",
+        "n": 48,
+        "cov": 0.765,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-48-9",
+        "n": 48,
+        "cov": 0.8665,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-50-10",
+        "n": 50,
+        "cov": 0.6791,
+        "n_guards": 7
+      },
+      {
+        "name": "rand-50-11",
+        "n": 50,
+        "cov": 0.8698,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-50-20",
+        "n": 50,
+        "cov": 0.7922,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-50-26",
+        "n": 50,
+        "cov": 0.9422,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-50-4",
+        "n": 50,
+        "cov": 0.9279,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-50-44",
+        "n": 50,
+        "cov": 0.9134,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-50-47",
+        "n": 50,
+        "cov": 0.9045,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-50-9",
+        "n": 50,
+        "cov": 0.749,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-52-21",
+        "n": 52,
+        "cov": 0.7907,
+        "n_guards": 8
+      },
+      {
+        "name": "rand-52-50",
+        "n": 52,
+        "cov": 0.905,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-52-7",
+        "n": 52,
+        "cov": 0.9102,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-54-19",
+        "n": 54,
+        "cov": 0.8237,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-54-27",
+        "n": 54,
+        "cov": 0.7697,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-54-36",
+        "n": 54,
+        "cov": 0.6846,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-54-8",
+        "n": 54,
+        "cov": 0.8193,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-56-15",
+        "n": 56,
+        "cov": 0.8562,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-56-16",
+        "n": 56,
+        "cov": 0.9361,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-56-18",
+        "n": 56,
+        "cov": 0.8991,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-56-32",
+        "n": 56,
+        "cov": 0.916,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-56-55",
+        "n": 56,
+        "cov": 0.815,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-56-7",
+        "n": 56,
+        "cov": 0.9485,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-56-8",
+        "n": 56,
+        "cov": 0.8499,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-58-15",
+        "n": 58,
+        "cov": 0.849,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-58-21",
+        "n": 58,
+        "cov": 0.9297,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-58-41",
+        "n": 58,
+        "cov": 0.7919,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-58-57",
+        "n": 58,
+        "cov": 0.8744,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-60-10",
+        "n": 60,
+        "cov": 0.8658,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-60-11",
+        "n": 60,
+        "cov": 0.8221,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-60-16",
+        "n": 60,
+        "cov": 0.8252,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-60-19",
+        "n": 60,
+        "cov": 0.9141,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-60-22",
+        "n": 60,
+        "cov": 0.8603,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-60-24",
+        "n": 60,
+        "cov": 0.8523,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-60-4",
+        "n": 60,
+        "cov": 0.9425,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-62-22",
+        "n": 62,
+        "cov": 0.8137,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-62-8",
+        "n": 62,
+        "cov": 0.7665,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-64-24",
+        "n": 64,
+        "cov": 0.7353,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-64-28",
+        "n": 64,
+        "cov": 0.897,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-64-30",
+        "n": 64,
+        "cov": 0.9371,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-64-47",
+        "n": 64,
+        "cov": 0.8914,
+        "n_guards": 9
+      },
+      {
+        "name": "rand-64-54",
+        "n": 64,
+        "cov": 0.9127,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-66-27",
+        "n": 66,
+        "cov": 0.9159,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-66-29",
+        "n": 66,
+        "cov": 0.8945,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-66-47",
+        "n": 66,
+        "cov": 0.7729,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-66-61",
+        "n": 66,
+        "cov": 0.3797,
+        "n_guards": 6
+      },
+      {
+        "name": "rand-68-18",
+        "n": 68,
+        "cov": 0.9467,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-68-24",
+        "n": 68,
+        "cov": 0.7939,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-68-29",
+        "n": 68,
+        "cov": 0.9215,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-68-54",
+        "n": 68,
+        "cov": 0.901,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-68-6",
+        "n": 68,
+        "cov": 0.9074,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-68-68",
+        "n": 68,
+        "cov": 0.9248,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-70-10",
+        "n": 70,
+        "cov": 0.9493,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-70-25",
+        "n": 70,
+        "cov": 0.906,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-70-35",
+        "n": 70,
+        "cov": 0.705,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-70-44",
+        "n": 70,
+        "cov": 0.9007,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-70-50",
+        "n": 70,
+        "cov": 0.933,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-70-65",
+        "n": 70,
+        "cov": 0.7784,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-70-8",
+        "n": 70,
+        "cov": 0.9155,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-70-9",
+        "n": 70,
+        "cov": 0.6814,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-72-1",
+        "n": 72,
+        "cov": 0.9243,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-72-10",
+        "n": 72,
+        "cov": 0.9165,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-72-27",
+        "n": 72,
+        "cov": 0.9131,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-72-33",
+        "n": 72,
+        "cov": 0.7581,
+        "n_guards": 5
+      },
+      {
+        "name": "rand-72-48",
+        "n": 72,
+        "cov": 0.9063,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-72-62",
+        "n": 72,
+        "cov": 0.9037,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-74-18",
+        "n": 74,
+        "cov": 0.816,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-74-24",
+        "n": 74,
+        "cov": 0.8445,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-74-48",
+        "n": 74,
+        "cov": 0.8934,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-76-17",
+        "n": 76,
+        "cov": 0.8512,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-76-25",
+        "n": 76,
+        "cov": 0.851,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-76-35",
+        "n": 76,
+        "cov": 0.9314,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-76-37",
+        "n": 76,
+        "cov": 0.9495,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-76-59",
+        "n": 76,
+        "cov": 0.9199,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-76-72",
+        "n": 76,
+        "cov": 0.8648,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-78-22",
+        "n": 78,
+        "cov": 0.9329,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-78-28",
+        "n": 78,
+        "cov": 0.9431,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-78-31",
+        "n": 78,
+        "cov": 0.9399,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-78-40",
+        "n": 78,
+        "cov": 0.9205,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-78-5",
+        "n": 78,
+        "cov": 0.7264,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-78-51",
+        "n": 78,
+        "cov": 0.872,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-78-9",
+        "n": 78,
+        "cov": 0.7555,
+        "n_guards": 12
+      },
+      {
+        "name": "rand-8-6",
+        "n": 8,
+        "cov": 0.6667,
+        "n_guards": 1
+      },
+      {
+        "name": "rand-80-1",
+        "n": 80,
+        "cov": 0.9114,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-80-17",
+        "n": 80,
+        "cov": 0.8806,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-80-2",
+        "n": 80,
+        "cov": 0.8519,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-80-21",
+        "n": 80,
+        "cov": 0.7023,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-80-26",
+        "n": 80,
+        "cov": 0.8895,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-80-29",
+        "n": 80,
+        "cov": 0.8851,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-80-31",
+        "n": 80,
+        "cov": 0.9368,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-80-43",
+        "n": 80,
+        "cov": 0.9166,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-80-45",
+        "n": 80,
+        "cov": 0.8116,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-80-60",
+        "n": 80,
+        "cov": 0.8285,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-80-8",
+        "n": 80,
+        "cov": 0.7461,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-82-1",
+        "n": 82,
+        "cov": 0.8755,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-82-13",
+        "n": 82,
+        "cov": 0.9116,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-82-20",
+        "n": 82,
+        "cov": 0.8546,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-82-22",
+        "n": 82,
+        "cov": 0.901,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-82-37",
+        "n": 82,
+        "cov": 0.8646,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-82-41",
+        "n": 82,
+        "cov": 0.8069,
+        "n_guards": 10
+      },
+      {
+        "name": "rand-82-70",
+        "n": 82,
+        "cov": 0.9119,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-84-25",
+        "n": 84,
+        "cov": 0.8949,
+        "n_guards": 11
+      },
+      {
+        "name": "rand-84-27",
+        "n": 84,
+        "cov": 0.9412,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-84-63",
+        "n": 84,
+        "cov": 0.8692,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-84-65",
+        "n": 84,
+        "cov": 0.8582,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-84-75",
+        "n": 84,
+        "cov": 0.863,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-84-82",
+        "n": 84,
+        "cov": 0.7726,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-84-83",
+        "n": 84,
+        "cov": 0.8397,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-88-15",
+        "n": 88,
+        "cov": 0.8542,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-88-37",
+        "n": 88,
+        "cov": 0.9399,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-88-42",
+        "n": 88,
+        "cov": 0.9451,
+        "n_guards": 18
+      },
+      {
+        "name": "rand-88-48",
+        "n": 88,
+        "cov": 0.7981,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-88-63",
+        "n": 88,
+        "cov": 0.91,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-88-80",
+        "n": 88,
+        "cov": 0.882,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-88-88",
+        "n": 88,
+        "cov": 0.8394,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-90-12",
+        "n": 90,
+        "cov": 0.8711,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-90-17",
+        "n": 90,
+        "cov": 0.8211,
+        "n_guards": 14
+      },
+      {
+        "name": "rand-90-19",
+        "n": 90,
+        "cov": 0.9046,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-90-20",
+        "n": 90,
+        "cov": 0.83,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-90-29",
+        "n": 90,
+        "cov": 0.9301,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-90-51",
+        "n": 90,
+        "cov": 0.8403,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-90-52",
+        "n": 90,
+        "cov": 0.8204,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-90-53",
+        "n": 90,
+        "cov": 0.8806,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-90-57",
+        "n": 90,
+        "cov": 0.88,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-90-7",
+        "n": 90,
+        "cov": 0.9131,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-90-75",
+        "n": 90,
+        "cov": 0.9203,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-90-84",
+        "n": 90,
+        "cov": 0.9492,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-90-86",
+        "n": 90,
+        "cov": 0.8621,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-92-32",
+        "n": 92,
+        "cov": 0.8803,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-92-48",
+        "n": 92,
+        "cov": 0.9431,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-92-51",
+        "n": 92,
+        "cov": 0.8434,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-94-12",
+        "n": 94,
+        "cov": 0.9076,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-94-20",
+        "n": 94,
+        "cov": 0.9309,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-94-23",
+        "n": 94,
+        "cov": 0.8985,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-94-30",
+        "n": 94,
+        "cov": 0.932,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-94-54",
+        "n": 94,
+        "cov": 0.8492,
+        "n_guards": 26
+      },
+      {
+        "name": "rand-94-57",
+        "n": 94,
+        "cov": 0.8956,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-94-92",
+        "n": 94,
+        "cov": 0.746,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-96-12",
+        "n": 96,
+        "cov": 0.9201,
+        "n_guards": 22
+      },
+      {
+        "name": "rand-96-13",
+        "n": 96,
+        "cov": 0.6363,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-96-23",
+        "n": 96,
+        "cov": 0.9101,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-96-32",
+        "n": 96,
+        "cov": 0.8914,
+        "n_guards": 21
+      },
+      {
+        "name": "rand-96-48",
+        "n": 96,
+        "cov": 0.8925,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-96-59",
+        "n": 96,
+        "cov": 0.8689,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-96-72",
+        "n": 96,
+        "cov": 0.794,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-96-92",
+        "n": 96,
+        "cov": 0.9214,
+        "n_guards": 15
+      },
+      {
+        "name": "rand-96-94",
+        "n": 96,
+        "cov": 0.9355,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-98-11",
+        "n": 98,
+        "cov": 0.938,
+        "n_guards": 13
+      },
+      {
+        "name": "rand-98-13",
+        "n": 98,
+        "cov": 0.6457,
+        "n_guards": 16
+      },
+      {
+        "name": "rand-98-38",
+        "n": 98,
+        "cov": 0.8984,
+        "n_guards": 17
+      },
+      {
+        "name": "rand-98-39",
+        "n": 98,
+        "cov": 0.9327,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-98-47",
+        "n": 98,
+        "cov": 0.8278,
+        "n_guards": 24
+      },
+      {
+        "name": "rand-98-63",
+        "n": 98,
+        "cov": 0.9372,
+        "n_guards": 25
+      },
+      {
+        "name": "rand-98-67",
+        "n": 98,
+        "cov": 0.9205,
+        "n_guards": 23
+      },
+      {
+        "name": "rand-98-79",
+        "n": 98,
+        "cov": 0.8809,
+        "n_guards": 20
+      },
+      {
+        "name": "rand-98-95",
+        "n": 98,
+        "cov": 0.7611,
+        "n_guards": 19
+      },
+      {
+        "name": "rand-98-98",
+        "n": 98,
+        "cov": 0.872,
+        "n_guards": 21
+      },
+      {
+        "name": "random-100-29",
+        "n": 100,
+        "cov": 0.9233,
+        "n_guards": 22
+      },
+      {
+        "name": "random-20-22",
+        "n": 20,
+        "cov": 0.8882,
+        "n_guards": 4
+      },
+      {
+        "name": "random-40-15",
+        "n": 40,
+        "cov": 0.7236,
+        "n_guards": 4
+      },
+      {
+        "name": "random-40-18",
+        "n": 40,
+        "cov": 0.9338,
+        "n_guards": 7
+      },
+      {
+        "name": "random-40-6",
+        "n": 40,
+        "cov": 0.9241,
+        "n_guards": 7
+      },
+      {
+        "name": "random-60-1",
+        "n": 60,
+        "cov": 0.8364,
+        "n_guards": 12
+      },
+      {
+        "name": "random-60-10",
+        "n": 60,
+        "cov": 0.9242,
+        "n_guards": 10
+      },
+      {
+        "name": "random-60-13",
+        "n": 60,
+        "cov": 0.8183,
+        "n_guards": 9
+      },
+      {
+        "name": "random-60-16",
+        "n": 60,
+        "cov": 0.9333,
+        "n_guards": 12
+      },
+      {
+        "name": "random-60-9",
+        "n": 60,
+        "cov": 0.8272,
+        "n_guards": 11
+      },
+      {
+        "name": "random-80-11",
+        "n": 80,
+        "cov": 0.8624,
+        "n_guards": 18
+      },
+      {
+        "name": "random-80-18",
+        "n": 80,
+        "cov": 0.8807,
+        "n_guards": 13
+      },
+      {
+        "name": "random-80-28",
+        "n": 80,
+        "cov": 0.86,
+        "n_guards": 11
+      },
+      {
+        "name": "randsimple-100-22",
+        "n": 100,
+        "cov": 0.744,
+        "n_guards": 22
+      },
+      {
+        "name": "randsimple-100-29",
+        "n": 100,
+        "cov": 0.7315,
+        "n_guards": 21
+      },
+      {
+        "name": "randsimple-100-3",
+        "n": 100,
+        "cov": 0.8852,
+        "n_guards": 26
+      },
+      {
+        "name": "randsimple-40-13",
+        "n": 40,
+        "cov": 0.6583,
+        "n_guards": 6
+      },
+      {
+        "name": "randsimple-40-5",
+        "n": 40,
+        "cov": 0.7553,
+        "n_guards": 5
+      },
+      {
+        "name": "randsimple-60-14",
+        "n": 60,
+        "cov": 0.7773,
+        "n_guards": 13
+      },
+      {
+        "name": "randsimple-60-5",
+        "n": 60,
+        "cov": 0.9498,
+        "n_guards": 15
+      },
+      {
+        "name": "randsimple-60-9",
+        "n": 60,
+        "cov": 0.6387,
+        "n_guards": 11
+      },
+      {
+        "name": "randsimple-80-12",
+        "n": 80,
+        "cov": 0.9116,
+        "n_guards": 19
+      },
+      {
+        "name": "randsimple-80-13",
+        "n": 80,
+        "cov": 0.9489,
+        "n_guards": 17
+      },
+      {
+        "name": "randvon-40-28",
+        "n": 40,
+        "cov": 0.0,
+        "n_guards": 0
+      },
+      {
+        "name": "simple-100-9",
+        "n": 100,
+        "cov": 0.9341,
+        "n_guards": 21
+      },
+      {
+        "name": "simple-50-1",
+        "n": 50,
+        "cov": 0.641,
+        "n_guards": 5
+      },
+      {
+        "name": "simple-50-7",
+        "n": 50,
+        "cov": 0.8694,
+        "n_guards": 10
+      }
+    ]
+  },
+  "per_polygon_coverage": {
+    "native": [
+      1.0,
+      0.999238,
+      1.0,
+      0.93956,
+      0.99881,
+      0.995307,
+      0.996066,
+      1.0,
+      0.904695,
+      0.96371,
+      1.0,
+      1.0,
+      1.0,
+      0.95912,
+      0.991667,
+      0.991409,
+      0.992537,
+      0.984733,
+      0.997963,
+      0.991588,
+      0.910082,
+      0.890092,
+      0.946742,
+      1.0,
+      0.994152,
+      1.0,
+      0.999816,
+      0.989297,
+      0.999209,
+      1.0,
+      0.989583,
+      1.0,
+      0.994922,
+      0.991294,
+      0.993354,
+      1.0,
+      1.0,
+      0.939226,
+      1.0,
+      0.995807,
+      0.966958,
+      0.998567,
+      0.997174,
+      0.98946,
+      0.999423,
+      0.96,
+      1.0,
+      0.994697,
+      0.998751,
+      0.994258,
+      0.984615,
+      0.996767,
+      0.999411,
+      0.988005,
+      0.990694,
+      0.999658,
+      0.987867,
+      0.997191,
+      0.995249,
+      0.999588,
+      0.922153,
+      0.990549,
+      0.999285,
+      0.994647,
+      0.996051,
+      1.0,
+      0.998519,
+      0.993313,
+      0.997815,
+      0.999771,
+      0.999005,
+      0.977837,
+      0.991876,
+      1.0,
+      0.999431,
+      0.987711,
+      1.0,
+      0.995228,
+      1.0,
+      1.0,
+      0.985524,
+      0.994813,
+      0.997204,
+      0.998851,
+      0.998333,
+      0.999613,
+      1.0,
+      0.999194,
+      0.988506,
+      0.991755,
+      0.997614,
+      0.933132,
+      0.999846,
+      0.996133,
+      0.996223,
+      0.999673,
+      0.998551,
+      0.999339,
+      1.0,
+      0.909412,
+      0.999834,
+      0.996783,
+      0.994913,
+      0.998068,
+      0.998672,
+      0.998739,
+      0.991354,
+      0.99791,
+      1.0,
+      0.995767,
+      0.9996,
+      1.0,
+      0.980023,
+      0.999674,
+      0.990019,
+      0.992327,
+      0.998701,
+      0.995893,
+      0.989726,
+      0.997959,
+      0.999636,
+      0.993918,
+      1.0,
+      0.992983,
+      1.0,
+      1.0,
+      1.0,
+      0.990344,
+      0.975965,
+      0.996529,
+      0.999669,
+      0.997082,
+      0.965664,
+      0.990544,
+      0.993942,
+      0.997748,
+      0.990891,
+      0.999673,
+      0.959158,
+      0.996954,
+      0.997539,
+      1.0,
+      1.0,
+      0.996601,
+      0.995507,
+      0.995114,
+      0.999213,
+      0.996283,
+      0.998364,
+      0.999434,
+      1.0,
+      0.999812,
+      0.997348,
+      0.995258,
+      0.99924,
+      1.0,
+      1.0,
+      0.998709,
+      0.984484,
+      1.0,
+      0.984722,
+      0.997943,
+      0.998928,
+      0.996492,
+      0.97966,
+      0.99354,
+      0.994098,
+      1.0,
+      0.991739,
+      0.993964,
+      0.999561,
+      0.991581,
+      1.0,
+      1.0,
+      0.999757,
+      0.999134,
+      1.0,
+      1.0,
+      0.99915,
+      1.0,
+      0.999932,
+      0.995724,
+      0.994602,
+      0.996845,
+      0.994674,
+      0.997361,
+      0.9964,
+      0.999488,
+      0.90479,
+      1.0,
+      0.985156,
+      0.998936,
+      0.995309,
+      0.998707,
+      0.978205,
+      0.991609,
+      0.998377,
+      0.996728,
+      0.998532,
+      0.991565,
+      1.0,
+      0.999773,
+      1.0,
+      0.996086,
+      0.991643,
+      0.998742,
+      0.997924,
+      0.999869,
+      1.0,
+      0.999403,
+      0.993954,
+      0.993493,
+      0.997133,
+      0.99874,
+      0.998383,
+      0.99864,
+      0.998946,
+      1.0,
+      0.990556,
+      0.999804,
+      0.999755,
+      0.999239,
+      0.998601,
+      0.994159,
+      1.0,
+      0.985091,
+      0.995514,
+      0.990009,
+      1.0,
+      0.998784,
+      0.998632,
+      0.996634,
+      1.0,
+      0.999596,
+      0.99633,
+      1.0,
+      1.0,
+      0.998244,
+      1.0,
+      1.0,
+      0.996718,
+      0.994547,
+      0.999569,
+      1.0,
+      0.99913,
+      0.995657,
+      0.983469,
+      0.989431,
+      0.998871,
+      1.0,
+      1.0,
+      0.994025,
+      1.0,
+      0.982456,
+      0.97093,
+      0.857143,
+      0.954188,
+      0.972358,
+      0.99912,
+      0.999234,
+      0.914124,
+      0.938562,
+      0.999364,
+      0.974245,
+      0.999677,
+      1.0,
+      0.973582,
+      0.998518,
+      0.992104,
+      1.0,
+      0.9861,
+      0.998199,
+      0.999227,
+      0.994949,
+      0.996505,
+      0.965087,
+      0.924721,
+      0.987619,
+      0.957667,
+      0.938354,
+      0.894967,
+      1.0,
+      0.996664,
+      0.999775,
+      0.909867,
+      0.973282,
+      0.99902,
+      0.995654,
+      0.999605,
+      0.998713,
+      0.996427,
+      0.997299,
+      0.999516,
+      0.996009,
+      0.995028,
+      0.998433,
+      0.998019,
+      0.996769,
+      0.995548,
+      0.998183,
+      0.997372,
+      0.998223,
+      0.999819,
+      0.9986,
+      0.99734,
+      0.99888,
+      0.991751,
+      0.998954,
+      0.999082,
+      0.997963,
+      0.994146,
+      0.999049,
+      0.992077,
+      0.997655,
+      0.99793,
+      0.998013,
+      0.996763,
+      0.998372,
+      0.997654,
+      0.997475,
+      0.998538,
+      0.994545,
+      1.0,
+      0.999698,
+      0.998035,
+      0.998775,
+      0.99852,
+      0.999514,
+      1.0,
+      0.999407,
+      0.999644,
+      0.998359,
+      0.99389,
+      0.999442,
+      0.999508,
+      0.998646,
+      0.98279,
+      0.996096,
+      0.999209,
+      0.99839,
+      0.998806,
+      0.996349,
+      0.996451,
+      0.999172,
+      0.99631,
+      0.999217,
+      0.999789,
+      0.998661,
+      0.999353,
+      0.996981,
+      0.999006,
+      0.998782,
+      0.999195,
+      0.979893,
+      0.999514,
+      0.99862,
+      0.996774,
+      0.996522,
+      0.982932,
+      0.998076,
+      0.96093,
+      1.0
+    ],
+    "canon": [
+      0.845652,
+      0.989329,
+      0.884157,
+      0.666667,
+      0.498413,
+      0.931278,
+      0.911568,
+      0.892925,
+      0.788732,
+      0.674731,
+      0.702703,
+      0.515805,
+      0.682609,
+      0.760371,
+      0.853241,
+      0.854381,
+      0.909204,
+      0.93655,
+      0.989025,
+      0.974709,
+      0.663316,
+      0.507636,
+      0.930485,
+      0.95097,
+      0.81285,
+      0.860351,
+      0.991986,
+      0.861484,
+      0.875844,
+      0.76433,
+      0.656451,
+      0.972934,
+      0.852344,
+      0.968905,
+      0.96181,
+      0.970785,
+      0.998646,
+      0.893855,
+      0.994536,
+      0.874214,
+      0.909545,
+      0.803088,
+      0.982277,
+      0.975993,
+      0.949621,
+      0.911009,
+      0.994853,
+      0.989653,
+      0.991992,
+      0.981688,
+      0.939071,
+      0.866824,
+      0.997203,
+      0.866199,
+      0.942132,
+      0.908766,
+      0.967767,
+      0.822632,
+      0.885321,
+      0.883211,
+      0.714079,
+      0.883371,
+      0.907403,
+      0.978987,
+      0.976219,
+      0.593379,
+      0.902311,
+      0.905903,
+      0.971154,
+      0.845729,
+      0.905437,
+      0.84072,
+      0.665806,
+      0.904288,
+      0.916916,
+      0.906702,
+      0.994738,
+      0.90913,
+      0.859703,
+      0.966521,
+      0.915458,
+      0.889075,
+      0.86923,
+      0.976993,
+      0.860643,
+      0.841038,
+      0.934548,
+      0.97714,
+      0.972701,
+      0.978868,
+      0.964733,
+      0.941436,
+      0.963117,
+      0.94488,
+      0.811916,
+      0.794199,
+      0.857959,
+      0.856576,
+      0.84841,
+      0.963129,
+      0.924203,
+      0.941958,
+      0.935002,
+      0.922641,
+      0.974623,
+      0.967237,
+      0.913356,
+      0.898088,
+      0.677987,
+      0.922516,
+      0.963587,
+      0.971808,
+      0.964884,
+      0.892773,
+      0.935088,
+      0.944608,
+      0.873712,
+      0.80254,
+      0.811137,
+      0.864825,
+      0.913447,
+      0.940882,
+      0.807712,
+      0.828939,
+      0.956187,
+      0.939158,
+      0.769556,
+      0.920074,
+      0.914213,
+      0.944842,
+      0.936192,
+      0.86015,
+      0.731189,
+      0.969976,
+      0.965639,
+      0.955303,
+      0.98276,
+      0.764163,
+      0.958079,
+      0.685633,
+      0.841275,
+      0.966518,
+      0.743393,
+      0.892439,
+      0.939752,
+      0.967275,
+      0.835106,
+      0.896516,
+      0.941541,
+      0.926046,
+      0.873649,
+      0.975361,
+      0.874323,
+      0.779992,
+      0.962245,
+      0.708333,
+      1.0,
+      0.916779,
+      0.963252,
+      0.840002,
+      0.900054,
+      0.909536,
+      0.878796,
+      0.722699,
+      0.917555,
+      0.75202,
+      0.905797,
+      0.931763,
+      0.885008,
+      0.969471,
+      0.987071,
+      0.974622,
+      0.895732,
+      0.930369,
+      0.944275,
+      0.918642,
+      0.948476,
+      0.765665,
+      0.989426,
+      0.926888,
+      0.837332,
+      0.95328,
+      0.976159,
+      0.797913,
+      0.92777,
+      0.883321,
+      0.979502,
+      0.936955,
+      0.90479,
+      0.939816,
+      0.832492,
+      0.84764,
+      0.988681,
+      0.884025,
+      0.699694,
+      0.95119,
+      0.797437,
+      0.866745,
+      0.957024,
+      0.982192,
+      0.868107,
+      0.86986,
+      0.976638,
+      0.892416,
+      0.949329,
+      0.94754,
+      0.902354,
+      0.988119,
+      0.943979,
+      0.862142,
+      0.95821,
+      0.858612,
+      0.964847,
+      0.937142,
+      0.911897,
+      0.920533,
+      0.95731,
+      0.911635,
+      0.949692,
+      0.87079,
+      0.713259,
+      0.919006,
+      0.867105,
+      0.984474,
+      0.935822,
+      0.881792,
+      0.869002,
+      0.813636,
+      0.860108,
+      0.985331,
+      0.874344,
+      0.919507,
+      0.932383,
+      0.924325,
+      0.88617,
+      0.781312,
+      0.86841,
+      0.896565,
+      0.971082,
+      0.946538,
+      0.919726,
+      0.947751,
+      0.85332,
+      0.913478,
+      0.930333,
+      0.982167,
+      0.957363,
+      0.991433,
+      0.948349,
+      0.93305,
+      0.98977,
+      0.95546,
+      0.946523,
+      0.969298,
+      0.946705,
+      1.0,
+      0.921969,
+      0.912491,
+      0.902599,
+      0.902533,
+      0.558138,
+      0.949029,
+      0.712143,
+      0.795212,
+      0.966191,
+      0.812218,
+      0.88674,
+      0.936834,
+      0.878398,
+      0.997531,
+      0.929748,
+      0.922813,
+      0.946345,
+      0.987287,
+      0.953677,
+      0.928465,
+      0.946172,
+      0.71203,
+      0.820976,
+      0.860259,
+      0.830371,
+      0.870414,
+      0.895857,
+      0.914823,
+      0.842056,
+      0.879959,
+      0.997137,
+      0.995836,
+      0.999605,
+      0.996785,
+      0.999326,
+      0.994202,
+      0.97854,
+      0.999302,
+      0.995028,
+      0.998761,
+      0.996507,
+      0.993697,
+      0.995548,
+      0.998183,
+      0.998908,
+      0.998863,
+      0.998282,
+      0.994212,
+      0.992927,
+      0.999533,
+      0.991751,
+      0.995808,
+      0.998086,
+      0.998898,
+      0.98978,
+      0.970939,
+      0.992077,
+      0.998588,
+      0.995833,
+      0.998058,
+      0.998199,
+      0.997597,
+      0.999786,
+      0.993557,
+      0.997531,
+      0.999673,
+      0.998775,
+      0.910642,
+      0.998035,
+      0.918199,
+      0.99852,
+      0.998406,
+      0.996167,
+      0.999326,
+      0.999853,
+      0.992799,
+      0.98256,
+      0.999442,
+      0.999508,
+      0.998745,
+      0.997576,
+      0.999496,
+      0.999209,
+      0.987403,
+      0.995568,
+      0.997196,
+      0.996451,
+      0.99081,
+      0.99524,
+      0.990437,
+      0.999762,
+      0.996344,
+      0.997281,
+      0.994757,
+      0.993696,
+      0.989143,
+      0.998076,
+      0.979893,
+      0.998698,
+      0.998498,
+      0.995135,
+      0.883828,
+      0.957634,
+      0.919323,
+      0.952487,
+      0.984158
+    ],
+    "canon_argmax": [
+      1.0,
+      0.999238,
+      1.0,
+      0.985348,
+      0.99881,
+      0.995307,
+      0.996066,
+      1.0,
+      0.973944,
+      0.961021,
+      0.942568,
+      0.999394,
+      1.0,
+      0.977987,
+      0.992308,
+      0.991409,
+      0.992537,
+      0.984733,
+      0.986452,
+      1.0,
+      0.972428,
+      0.944956,
+      0.973593,
+      1.0,
+      0.976771,
+      0.969308,
+      0.999816,
+      0.996942,
+      0.999209,
+      0.968254,
+      0.995265,
+      0.978102,
+      0.994922,
+      0.997512,
+      0.999489,
+      0.975575,
+      0.997235,
+      0.935859,
+      1.0,
+      0.995742,
+      0.966958,
+      0.998567,
+      0.985514,
+      0.988229,
+      1.0,
+      0.96,
+      1.0,
+      0.994697,
+      0.998751,
+      1.0,
+      0.984615,
+      0.995946,
+      0.999411,
+      0.990345,
+      0.990694,
+      0.996268,
+      0.99328,
+      0.997191,
+      0.998951,
+      1.0,
+      0.991718,
+      0.994755,
+      0.992489,
+      0.995206,
+      0.990608,
+      1.0,
+      0.996402,
+      0.993313,
+      0.997815,
+      0.99978,
+      0.991068,
+      0.968141,
+      0.996009,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      0.979035,
+      0.998148,
+      1.0,
+      0.997423,
+      0.995822,
+      0.998173,
+      0.993861,
+      0.990667,
+      0.998935,
+      0.988024,
+      1.0,
+      0.987787,
+      0.991755,
+      1.0,
+      0.986182,
+      0.999846,
+      0.998982,
+      0.995421,
+      0.999673,
+      0.988406,
+      0.989135,
+      1.0,
+      0.999283,
+      0.999834,
+      0.988236,
+      0.994913,
+      0.998325,
+      0.998672,
+      0.994478,
+      0.989193,
+      0.99791,
+      1.0,
+      0.992063,
+      0.9996,
+      1.0,
+      0.991586,
+      0.982031,
+      0.988483,
+      0.998721,
+      0.98602,
+      0.989356,
+      0.993151,
+      1.0,
+      1.0,
+      0.987926,
+      0.999577,
+      1.0,
+      1.0,
+      0.998513,
+      1.0,
+      0.994755,
+      0.975965,
+      0.996529,
+      0.999669,
+      0.999595,
+      0.963693,
+      0.988009,
+      0.995697,
+      0.999736,
+      0.994939,
+      0.997467,
+      0.954867,
+      0.996954,
+      0.999988,
+      1.0,
+      1.0,
+      0.996601,
+      0.998963,
+      0.999822,
+      0.997579,
+      1.0,
+      0.996615,
+      0.999434,
+      1.0,
+      0.993185,
+      0.985788,
+      0.995258,
+      0.99924,
+      0.333333,
+      1.0,
+      0.998709,
+      0.998833,
+      1.0,
+      0.98457,
+      0.99997,
+      0.997243,
+      0.996083,
+      0.999836,
+      0.997505,
+      0.997802,
+      0.999281,
+      0.992032,
+      0.993964,
+      0.99953,
+      0.996526,
+      1.0,
+      0.999833,
+      0.999757,
+      0.999134,
+      1.0,
+      1.0,
+      0.999691,
+      0.999955,
+      0.999932,
+      0.995051,
+      0.998315,
+      0.996845,
+      0.99476,
+      0.999613,
+      0.999834,
+      0.999488,
+      0.997838,
+      1.0,
+      0.994391,
+      0.998754,
+      0.996198,
+      0.998707,
+      0.978205,
+      0.9945,
+      0.998293,
+      0.998753,
+      0.997172,
+      0.991565,
+      1.0,
+      0.988647,
+      1.0,
+      0.996086,
+      0.998607,
+      0.999528,
+      0.998356,
+      0.999869,
+      1.0,
+      0.999403,
+      0.99433,
+      0.995324,
+      0.999096,
+      0.994287,
+      1.0,
+      0.99864,
+      0.999922,
+      1.0,
+      0.998524,
+      0.999804,
+      0.999755,
+      0.998779,
+      0.998427,
+      0.994091,
+      1.0,
+      0.985091,
+      0.995514,
+      0.990217,
+      1.0,
+      0.998784,
+      0.998753,
+      0.996634,
+      1.0,
+      0.999804,
+      1.0,
+      1.0,
+      1.0,
+      0.998244,
+      1.0,
+      1.0,
+      0.996718,
+      0.994547,
+      0.996723,
+      0.999648,
+      0.998945,
+      0.99601,
+      0.981715,
+      0.989431,
+      0.998871,
+      1.0,
+      0.994368,
+      0.994025,
+      1.0,
+      1.0,
+      1.0,
+      0.761905,
+      0.999873,
+      0.998593,
+      0.999824,
+      0.989934,
+      0.920688,
+      0.938562,
+      0.999395,
+      0.974245,
+      0.997093,
+      1.0,
+      0.951134,
+      0.997176,
+      0.999886,
+      1.0,
+      0.987811,
+      0.99514,
+      0.991143,
+      0.994949,
+      0.999572,
+      0.981627,
+      0.954049,
+      0.942158,
+      1.0,
+      0.747397,
+      0.894967,
+      0.996761,
+      0.998717,
+      0.9958,
+      0.909867,
+      0.972577,
+      0.999816,
+      0.999976,
+      0.99999,
+      0.999097,
+      0.99991,
+      0.999846,
+      0.999823,
+      0.999836,
+      0.999255,
+      0.99961,
+      0.999995,
+      0.999671,
+      0.999505,
+      0.999909,
+      0.999944,
+      0.999858,
+      0.999927,
+      0.999948,
+      0.999641,
+      0.999014,
+      0.999949,
+      0.999629,
+      0.999753,
+      0.999929,
+      0.999929,
+      0.999867,
+      0.999956,
+      0.999902,
+      0.999977,
+      0.999976,
+      0.999972,
+      0.999963,
+      0.999858,
+      0.999716,
+      0.999966,
+      0.99963,
+      0.999694,
+      0.999934,
+      0.999951,
+      1.0,
+      1.0,
+      0.999448,
+      0.999883,
+      0.995582,
+      0.999823,
+      0.995808,
+      0.99999,
+      0.999991,
+      0.999984,
+      0.999992,
+      0.999821,
+      0.999689,
+      0.999968,
+      0.999682,
+      0.999908,
+      0.999885,
+      0.997575,
+      0.999962,
+      0.998464,
+      0.999519,
+      0.999789,
+      0.99998,
+      0.99931,
+      0.998647,
+      0.999979,
+      0.999647,
+      0.999845,
+      0.999748,
+      0.999947,
+      0.999392,
+      0.999963,
+      0.993649,
+      0.994633,
+      1.0,
+      0.942307,
+      1.0
+    ],
+    "reindex_n3": [
+      0.981522,
+      0.996951,
+      0.758242,
+      0.941392,
+      1.0,
+      0.975955,
+      0.969143,
+      0.981132,
+      0.79108,
+      0.790323,
+      0.942568,
+      0.967727,
+      0.712721,
+      0.896327,
+      0.991667,
+      0.805842,
+      0.931343,
+      0.876999,
+      0.989025,
+      0.743007,
+      0.663316,
+      0.981976,
+      0.999658,
+      0.92037,
+      0.963938,
+      0.783482,
+      1.0,
+      0.989526,
+      0.96519,
+      0.974531,
+      0.993786,
+      0.972934,
+      0.912891,
+      0.991294,
+      0.97473,
+      0.977012,
+      0.980648,
+      0.939226,
+      0.994536,
+      0.994235,
+      0.992045,
+      0.997766,
+      0.999348,
+      0.980132,
+      0.989043,
+      0.894662,
+      1.0,
+      0.997664,
+      0.993314,
+      0.954198,
+      0.951694,
+      0.996767,
+      0.966592,
+      0.990345,
+      0.925314,
+      0.908766,
+      0.892183,
+      0.94481,
+      0.975942,
+      0.972306,
+      0.910326,
+      0.721935,
+      0.777843,
+      0.948103,
+      0.989083,
+      0.836617,
+      0.950198,
+      0.993502,
+      0.989948,
+      0.994462,
+      0.975938,
+      0.854415,
+      0.874021,
+      0.956825,
+      0.990343,
+      0.987405,
+      0.999012,
+      0.987628,
+      0.952246,
+      0.966521,
+      0.92654,
+      1.0,
+      0.998173,
+      0.962927,
+      0.847321,
+      0.998795,
+      0.986028,
+      0.999677,
+      0.993966,
+      0.996614,
+      0.945077,
+      0.875775,
+      0.999846,
+      0.94488,
+      0.610955,
+      0.968382,
+      0.997101,
+      0.986961,
+      0.954791,
+      0.912154,
+      0.781773,
+      0.978206,
+      0.997567,
+      0.996581,
+      0.987609,
+      0.988877,
+      0.768765,
+      0.913374,
+      1.0,
+      0.988497,
+      0.999661,
+      0.984575,
+      0.995215,
+      0.996745,
+      0.925359,
+      0.986807,
+      0.981778,
+      0.981653,
+      0.921333,
+      0.992889,
+      0.999327,
+      1.0,
+      0.967096,
+      0.992983,
+      0.99784,
+      0.998513,
+      0.805432,
+      0.890712,
+      0.962372,
+      0.994885,
+      0.999,
+      0.939469,
+      0.950137,
+      0.939878,
+      0.993204,
+      0.990101,
+      0.994939,
+      0.976428,
+      0.997931,
+      0.998123,
+      0.989649,
+      0.993652,
+      1.0,
+      1.0,
+      0.962776,
+      0.999702,
+      0.95207,
+      0.9698,
+      0.989948,
+      0.992386,
+      0.953374,
+      0.999209,
+      0.862275,
+      0.963451,
+      0.983991,
+      0.666667,
+      1.0,
+      0.998709,
+      0.942101,
+      0.971743,
+      0.992401,
+      0.878129,
+      0.998315,
+      1.0,
+      0.991972,
+      0.954575,
+      0.845808,
+      1.0,
+      0.992816,
+      1.0,
+      0.99953,
+      0.995367,
+      0.995415,
+      0.98388,
+      0.92072,
+      0.999134,
+      0.949852,
+      0.989178,
+      0.921482,
+      0.926888,
+      0.997602,
+      0.990605,
+      0.99364,
+      0.966022,
+      0.949554,
+      0.96459,
+      0.999834,
+      0.984858,
+      0.93891,
+      1.0,
+      0.999434,
+      0.973769,
+      0.993732,
+      0.943186,
+      0.929956,
+      0.991098,
+      0.991639,
+      0.997055,
+      0.997172,
+      0.980169,
+      0.977234,
+      0.94413,
+      0.978101,
+      0.998785,
+      0.96172,
+      0.943215,
+      1.0,
+      0.987526,
+      0.994952,
+      0.998783,
+      0.889759,
+      0.97044,
+      0.966265,
+      0.94989,
+      0.911897,
+      0.998474,
+      0.995723,
+      0.998218,
+      0.99122,
+      0.993245,
+      0.980326,
+      0.986933,
+      0.933343,
+      0.837185,
+      0.883703,
+      1.0,
+      0.994664,
+      0.88621,
+      0.930908,
+      0.894325,
+      0.947574,
+      0.999762,
+      1.0,
+      0.990678,
+      0.967518,
+      0.999905,
+      0.981963,
+      0.998099,
+      0.982512,
+      0.946538,
+      0.999774,
+      0.993307,
+      1.0,
+      0.99782,
+      0.999514,
+      0.999345,
+      0.998296,
+      0.997303,
+      0.942144,
+      0.964578,
+      0.991391,
+      0.981487,
+      0.946523,
+      1.0,
+      0.976744,
+      1.0,
+      0.980874,
+      0.985467,
+      0.999413,
+      0.992931,
+      0.959459,
+      0.932646,
+      0.998526,
+      0.995511,
+      0.994337,
+      0.562588,
+      0.841283,
+      0.972511,
+      0.878398,
+      0.98648,
+      0.973797,
+      0.968226,
+      0.93526,
+      0.992264,
+      0.948116,
+      0.978863,
+      0.946172,
+      0.942158,
+      0.982539,
+      0.951839,
+      0.876031,
+      0.998534,
+      0.821859,
+      0.997149,
+      0.947997,
+      1.0,
+      0.999427,
+      0.99961,
+      0.9995,
+      0.999142,
+      0.99594,
+      0.980786,
+      0.999889,
+      0.999923,
+      0.998602,
+      0.99604,
+      0.99786,
+      0.999261,
+      0.999466,
+      0.999934,
+      0.998658,
+      0.998538,
+      0.999443,
+      0.99325,
+      0.999641,
+      0.994801,
+      0.999949,
+      0.996087,
+      0.999764,
+      0.999519,
+      0.996784,
+      0.998696,
+      0.999059,
+      0.998443,
+      0.998227,
+      0.996816,
+      0.99994,
+      0.998947,
+      0.999768,
+      0.997475,
+      0.994503,
+      0.999673,
+      0.998775,
+      0.997864,
+      0.999308,
+      0.997702,
+      0.994471,
+      0.998294,
+      0.99584,
+      0.995582,
+      0.999912,
+      0.999583,
+      0.981358,
+      0.993526,
+      0.999838,
+      0.999513,
+      0.999794,
+      0.999909,
+      0.998786,
+      0.999975,
+      0.979236,
+      0.997726,
+      0.997407,
+      0.999559,
+      0.998826,
+      0.999889,
+      0.999677,
+      0.99609,
+      0.998081,
+      0.998647,
+      0.999842,
+      0.996744,
+      0.999732,
+      0.99976,
+      0.999558,
+      0.998846,
+      0.994618,
+      0.962304,
+      0.994633,
+      0.998051,
+      0.962278,
+      1.0
+    ],
+    "rot90": [
+      0.881884,
+      0.997967,
+      0.993223,
+      1.0,
+      0.785444,
+      0.998446,
+      0.989583,
+      0.660961,
+      1.0,
+      0.927419,
+      0.747104,
+      0.96079,
+      0.843251,
+      0.900658,
+      0.983333,
+      0.947995,
+      0.985075,
+      0.964377,
+      0.994575,
+      0.994755,
+      0.992822,
+      0.991447,
+      0.992481,
+      0.987621,
+      0.97807,
+      0.707882,
+      0.966714,
+      0.896789,
+      0.966245,
+      0.951279,
+      0.986742,
+      0.914316,
+      0.995294,
+      0.943615,
+      0.97294,
+      0.977387,
+      0.960233,
+      0.978114,
+      0.957663,
+      0.981132,
+      0.991679,
+      0.954571,
+      0.927277,
+      0.780629,
+      0.949827,
+      0.936004,
+      0.961121,
+      0.923053,
+      0.999439,
+      0.831838,
+      0.894974,
+      0.85,
+      0.942182,
+      0.940986,
+      0.987947,
+      0.997382,
+      0.897275,
+      0.991593,
+      0.997706,
+      0.966136,
+      0.970497,
+      0.98833,
+      0.948657,
+      0.922483,
+      0.940773,
+      0.991521,
+      0.980324,
+      0.996752,
+      0.969591,
+      0.998734,
+      0.991746,
+      0.890477,
+      0.975207,
+      0.978775,
+      0.987796,
+      0.997764,
+      0.980786,
+      0.990086,
+      0.98534,
+      0.950311,
+      0.836011,
+      0.988991,
+      0.985439,
+      0.81714,
+      0.98826,
+      0.99316,
+      0.984,
+      0.998925,
+      0.968247,
+      0.973498,
+      0.94549,
+      0.997685,
+      0.991254,
+      0.804698,
+      0.992416,
+      0.995534,
+      0.944741,
+      1.0,
+      0.999912,
+      0.966518,
+      0.962822,
+      0.991273,
+      0.960651,
+      0.945182,
+      0.987765,
+      0.993968,
+      1.0,
+      0.950286,
+      0.928724,
+      0.990123,
+      0.948106,
+      0.868902,
+      1.0,
+      0.957366,
+      0.99831,
+      0.979547,
+      0.986185,
+      0.936209,
+      0.977332,
+      0.911968,
+      0.954311,
+      0.994498,
+      0.849136,
+      0.990409,
+      0.996479,
+      0.999867,
+      0.99868,
+      0.999417,
+      0.994112,
+      0.972217,
+      0.991734,
+      0.989915,
+      0.997738,
+      0.991379,
+      0.992081,
+      0.992634,
+      0.991144,
+      0.96218,
+      0.999792,
+      0.948461,
+      0.946361,
+      0.848041,
+      0.876067,
+      0.9919,
+      0.993536,
+      0.997001,
+      1.0,
+      0.996666,
+      1.0,
+      0.983404,
+      0.992052,
+      0.974021,
+      0.979749,
+      0.980043,
+      1.0,
+      1.0,
+      1.0,
+      0.989033,
+      0.994093,
+      0.994273,
+      0.982815,
+      0.995312,
+      0.99746,
+      0.990168,
+      0.991399,
+      0.998553,
+      0.993407,
+      0.99991,
+      0.991085,
+      0.987995,
+      0.951336,
+      0.999957,
+      0.908916,
+      0.986951,
+      0.942404,
+      0.989935,
+      0.770917,
+      0.947074,
+      0.998866,
+      0.986564,
+      0.993022,
+      0.989443,
+      0.87005,
+      0.995623,
+      0.998538,
+      0.996055,
+      0.968456,
+      0.993694,
+      0.997105,
+      0.91775,
+      0.995192,
+      0.992667,
+      0.844794,
+      0.991197,
+      1.0,
+      0.894376,
+      0.991224,
+      0.920724,
+      0.994889,
+      0.987543,
+      0.952049,
+      0.988515,
+      0.9903,
+      0.95229,
+      0.999188,
+      0.887754,
+      0.89391,
+      0.999047,
+      0.878637,
+      0.975575,
+      0.993925,
+      0.840596,
+      0.925533,
+      1.0,
+      0.995189,
+      0.761743,
+      1.0,
+      0.954025,
+      0.999225,
+      0.999824,
+      0.918987,
+      0.997776,
+      0.990275,
+      0.989954,
+      0.946656,
+      0.983113,
+      0.943401,
+      0.957613,
+      0.975499,
+      0.94105,
+      0.995731,
+      0.987428,
+      0.973351,
+      0.991019,
+      0.984935,
+      0.959906,
+      0.784796,
+      0.998713,
+      0.997466,
+      0.995755,
+      0.987861,
+      0.934073,
+      0.948431,
+      0.99978,
+      0.973062,
+      0.873777,
+      0.995604,
+      1.0,
+      0.986343,
+      0.991335,
+      0.999374,
+      0.868177,
+      0.967166,
+      0.381579,
+      0.76938,
+      0.97619,
+      0.938452,
+      0.992683,
+      0.99061,
+      0.751764,
+      0.931892,
+      0.994438,
+      0.991483,
+      0.992206,
+      0.978252,
+      0.92067,
+      0.988658,
+      0.989639,
+      0.999886,
+      0.987585,
+      0.988278,
+      0.890845,
+      0.998964,
+      0.977841,
+      0.990108,
+      0.986148,
+      0.963617,
+      0.93059,
+      0.935439,
+      0.952188,
+      0.966691,
+      0.986604,
+      0.67129,
+      0.999859,
+      0.924498,
+      0.820287,
+      0.99974,
+      0.999935,
+      0.999377,
+      0.999944,
+      0.999788,
+      0.999774,
+      0.999403,
+      0.99988,
+      0.99852,
+      0.999868,
+      0.999988,
+      1.0,
+      0.998452,
+      0.991974,
+      0.999887,
+      0.999803,
+      0.999958,
+      0.999536,
+      0.999978,
+      0.999928,
+      0.998638,
+      0.999846,
+      0.999968,
+      0.999877,
+      0.999802,
+      0.999826,
+      0.999327,
+      0.999682,
+      0.999915,
+      0.999873,
+      0.99993,
+      0.999922,
+      0.999921,
+      0.999328,
+      0.999297,
+      0.99926,
+      0.992647,
+      0.99837,
+      0.998349,
+      0.967831,
+      0.99944,
+      0.998052,
+      0.979861,
+      0.999407,
+      0.999533,
+      0.999924,
+      0.998955,
+      0.985324,
+      0.998843,
+      0.999905,
+      0.999937,
+      0.999956,
+      0.999677,
+      0.998615,
+      0.988967,
+      0.999521,
+      0.988029,
+      0.998121,
+      0.999946,
+      0.999923,
+      0.999786,
+      0.999739,
+      0.999891,
+      0.999614,
+      0.99994,
+      0.999964,
+      0.999961,
+      0.997936,
+      0.999911,
+      0.999762,
+      0.999114,
+      0.996476,
+      0.943461,
+      0.950567,
+      0.993573,
+      0.958904
+    ],
+    "canon_rot90": [
+      0.978261,
+      0.966855,
+      0.751962,
+      0.947686,
+      0.957341,
+      0.709257,
+      0.989583,
+      0.728774,
+      0.970657,
+      0.991935,
+      0.956347,
+      0.976042,
+      0.953913,
+      0.868711,
+      0.895556,
+      0.966838,
+      0.720593,
+      0.823267,
+      0.967527,
+      0.992657,
+      0.823504,
+      0.834183,
+      0.927945,
+      0.870529,
+      0.907895,
+      0.96317,
+      0.981818,
+      0.813341,
+      0.880072,
+      0.928675,
+      0.938636,
+      0.872436,
+      0.594744,
+      0.909974,
+      0.997699,
+      0.830795,
+      0.848068,
+      0.855661,
+      0.952874,
+      0.998008,
+      0.895422,
+      1.0,
+      0.927277,
+      0.824834,
+      0.744041,
+      0.60391,
+      0.957722,
+      0.531464,
+      0.800729,
+      0.654689,
+      0.885348,
+      0.931861,
+      0.844969,
+      0.931818,
+      0.939969,
+      0.978003,
+      0.835692,
+      0.981507,
+      0.951835,
+      0.633558,
+      0.841016,
+      0.940431,
+      0.646567,
+      0.995616,
+      0.994365,
+      0.996555,
+      0.934835,
+      0.931658,
+      0.874709,
+      0.646203,
+      0.907461,
+      0.890477,
+      0.810677,
+      0.959795,
+      0.80177,
+      0.959614,
+      0.930527,
+      0.819621,
+      0.922857,
+      0.897088,
+      0.922127,
+      0.935944,
+      0.68346,
+      0.921263,
+      0.748356,
+      0.931626,
+      0.964728,
+      0.963166,
+      0.726389,
+      1.0,
+      0.87701,
+      0.86449,
+      0.944938,
+      0.970893,
+      0.931835,
+      0.780184,
+      0.937329,
+      0.944974,
+      0.992496,
+      0.869781,
+      0.96614,
+      0.938984,
+      0.827982,
+      0.937021,
+      0.995195,
+      0.933712,
+      0.894141,
+      0.854735,
+      0.879734,
+      0.787871,
+      0.94285,
+      0.964499,
+      0.991718,
+      0.923111,
+      0.83305,
+      0.970668,
+      0.939755,
+      0.91726,
+      0.94891,
+      0.596441,
+      0.835246,
+      0.847974,
+      0.962427,
+      0.954334,
+      1.0,
+      1.0,
+      0.954607,
+      0.74268,
+      0.904026,
+      0.910167,
+      0.952413,
+      0.980047,
+      0.975055,
+      0.982181,
+      0.964928,
+      0.68728,
+      0.986083,
+      0.989822,
+      0.923381,
+      0.963374,
+      0.767603,
+      0.963381,
+      0.951884,
+      0.841081,
+      0.876349,
+      0.987242,
+      0.945752,
+      0.984134,
+      0.937083,
+      0.883938,
+      0.954095,
+      0.859144,
+      0.984438,
+      0.776632,
+      0.940204,
+      1.0,
+      1.0,
+      0.958381,
+      0.791629,
+      0.812173,
+      0.949777,
+      0.908622,
+      0.950575,
+      0.960556,
+      0.969536,
+      0.946826,
+      0.902147,
+      0.873235,
+      0.994881,
+      0.932088,
+      0.949824,
+      0.988519,
+      0.907767,
+      0.846789,
+      0.645781,
+      0.978084,
+      0.718,
+      0.865358,
+      0.864117,
+      0.962604,
+      0.947115,
+      0.759692,
+      0.877986,
+      0.971904,
+      0.870779,
+      0.981392,
+      0.953189,
+      0.910971,
+      0.924745,
+      0.835247,
+      0.762826,
+      0.964775,
+      0.755847,
+      0.833636,
+      0.945401,
+      0.864952,
+      0.966868,
+      0.862227,
+      0.971568,
+      0.939322,
+      0.994766,
+      0.994667,
+      0.875197,
+      0.891442,
+      0.855944,
+      0.980139,
+      0.889922,
+      0.980137,
+      0.792799,
+      0.96121,
+      0.944227,
+      0.867582,
+      0.773807,
+      0.94429,
+      0.83105,
+      0.751065,
+      0.898787,
+      0.743818,
+      0.908915,
+      0.975988,
+      0.941151,
+      0.706177,
+      0.81028,
+      0.842678,
+      0.990666,
+      0.959961,
+      0.884577,
+      0.805358,
+      0.955649,
+      0.865399,
+      0.852268,
+      0.975061,
+      0.955822,
+      0.990317,
+      0.965613,
+      0.824882,
+      0.672205,
+      0.943516,
+      0.881616,
+      0.894047,
+      0.976664,
+      0.834538,
+      0.948431,
+      0.908663,
+      0.978102,
+      0.789028,
+      0.976011,
+      0.663675,
+      0.878582,
+      0.880206,
+      0.902546,
+      0.92906,
+      0.984003,
+      1.0,
+      0.76938,
+      0.692177,
+      0.875888,
+      0.982736,
+      0.905768,
+      0.921207,
+      0.944779,
+      0.832359,
+      0.987277,
+      0.929961,
+      0.98547,
+      0.970106,
+      0.859026,
+      0.99213,
+      0.982157,
+      0.92973,
+      0.947495,
+      0.882145,
+      0.86773,
+      0.962003,
+      0.951332,
+      0.850179,
+      0.855645,
+      0.895321,
+      0.751736,
+      0.994906,
+      0.966691,
+      0.684731,
+      0.992081,
+      0.918725,
+      0.849694,
+      0.958226,
+      0.995904,
+      0.996919,
+      0.99969,
+      0.994888,
+      0.999303,
+      0.995845,
+      0.996301,
+      0.995385,
+      0.99786,
+      0.996674,
+      0.997362,
+      0.989759,
+      0.996647,
+      0.978346,
+      0.999069,
+      0.998961,
+      0.994841,
+      0.988957,
+      0.995448,
+      0.992959,
+      0.998506,
+      0.997332,
+      0.985324,
+      0.998434,
+      0.998741,
+      0.991305,
+      0.993726,
+      0.998965,
+      0.991873,
+      0.995426,
+      0.998111,
+      0.99839,
+      0.994915,
+      0.999487,
+      0.997231,
+      0.99926,
+      0.999081,
+      0.997947,
+      0.984124,
+      0.673144,
+      0.99804,
+      0.980556,
+      0.997424,
+      0.99651,
+      0.99993,
+      0.990656,
+      0.995898,
+      0.990574,
+      0.998843,
+      0.999608,
+      0.980586,
+      0.974203,
+      0.996081,
+      0.996761,
+      0.995114,
+      0.994446,
+      0.996158,
+      0.999183,
+      0.993376,
+      0.999472,
+      0.998501,
+      0.99877,
+      0.990561,
+      0.99756,
+      0.987825,
+      0.956315,
+      0.997891,
+      0.997753,
+      0.998954,
+      0.998953,
+      0.998261,
+      0.92051,
+      0.948942,
+      0.981974,
+      0.865533,
+      0.956153
+    ],
+    "rot180": [
+      0.983696,
+      0.981718,
+      0.936355,
+      0.778846,
+      0.850198,
+      0.977723,
+      1.0,
+      1.0,
+      0.928169,
+      0.638441,
+      0.958816,
+      0.99875,
+      0.959627,
+      0.990633,
+      0.991667,
+      0.841065,
+      0.977695,
+      0.971756,
+      0.991129,
+      0.961451,
+      0.899846,
+      0.976079,
+      0.823789,
+      0.993951,
+      0.912281,
+      0.827232,
+      0.979848,
+      0.803058,
+      0.962025,
+      0.873142,
+      0.861585,
+      0.91218,
+      0.831193,
+      0.899254,
+      0.747495,
+      0.999042,
+      0.998646,
+      0.971681,
+      0.972305,
+      0.873366,
+      0.95451,
+      0.787879,
+      0.920552,
+      0.925426,
+      0.991696,
+      0.751313,
+      0.984171,
+      0.956776,
+      0.975464,
+      0.923596,
+      0.988889,
+      0.996767,
+      0.967538,
+      0.90107,
+      0.920685,
+      0.976154,
+      0.878863,
+      0.987667,
+      0.955271,
+      0.961779,
+      0.658178,
+      0.956063,
+      0.953137,
+      0.975698,
+      0.937053,
+      0.997394,
+      0.884198,
+      0.827653,
+      0.841361,
+      0.998557,
+      0.878823,
+      0.943056,
+      0.948462,
+      0.88885,
+      0.939181,
+      0.946339,
+      0.995848,
+      0.899968,
+      0.99537,
+      0.937122,
+      0.989691,
+      0.993884,
+      0.789296,
+      0.916642,
+      0.929511,
+      0.907303,
+      0.92896,
+      0.84086,
+      0.980049,
+      0.975654,
+      0.989462,
+      0.956734,
+      0.984774,
+      0.959001,
+      0.766452,
+      0.765261,
+      0.966244,
+      0.972506,
+      0.879222,
+      0.993442,
+      0.929964,
+      0.904531,
+      0.980769,
+      0.995305,
+      0.390847,
+      0.960772,
+      0.834006,
+      0.982247,
+      0.960641,
+      0.974774,
+      0.999707,
+      0.732187,
+      0.963414,
+      0.940874,
+      0.956516,
+      0.999714,
+      1.0,
+      0.935335,
+      0.822659,
+      0.990816,
+      0.953064,
+      0.872351,
+      0.917212,
+      0.881284,
+      0.922091,
+      0.993627,
+      0.938458,
+      0.995338,
+      0.911009,
+      0.941889,
+      0.964966,
+      0.966934,
+      0.842565,
+      0.964597,
+      0.936813,
+      0.897512,
+      0.984818,
+      0.850437,
+      0.970298,
+      0.989794,
+      0.991744,
+      0.961445,
+      0.983607,
+      0.924902,
+      0.930979,
+      0.987562,
+      0.930587,
+      0.94176,
+      0.99918,
+      0.888512,
+      0.986081,
+      0.950382,
+      0.717936,
+      0.91207,
+      0.755869,
+      1.0,
+      1.0,
+      0.894827,
+      0.946037,
+      0.976086,
+      0.896638,
+      0.871524,
+      0.838257,
+      0.981368,
+      0.991001,
+      0.96586,
+      0.850423,
+      0.971249,
+      0.822552,
+      0.93664,
+      0.994503,
+      0.971266,
+      0.825412,
+      0.98731,
+      0.981625,
+      0.975338,
+      0.968356,
+      0.915217,
+      0.909127,
+      0.986379,
+      0.954391,
+      0.994649,
+      0.96533,
+      0.995465,
+      0.884072,
+      0.92063,
+      0.983386,
+      0.887361,
+      0.99718,
+      0.974602,
+      0.939395,
+      0.851572,
+      0.941334,
+      0.948696,
+      0.900417,
+      0.880357,
+      0.833901,
+      0.930151,
+      0.907969,
+      0.9781,
+      0.934093,
+      0.93248,
+      0.928577,
+      0.95726,
+      0.919688,
+      0.985654,
+      0.981612,
+      0.845105,
+      0.978615,
+      0.868893,
+      0.920557,
+      0.938255,
+      0.848037,
+      0.975366,
+      0.865452,
+      0.969546,
+      0.922154,
+      0.969503,
+      0.922709,
+      0.99325,
+      0.966761,
+      0.984268,
+      0.931714,
+      0.873255,
+      0.971574,
+      0.948225,
+      0.997553,
+      0.97957,
+      0.890004,
+      0.932063,
+      0.92321,
+      0.882309,
+      0.94486,
+      0.963357,
+      0.982947,
+      0.976511,
+      0.957399,
+      0.915409,
+      0.951759,
+      0.951755,
+      0.766975,
+      0.975173,
+      0.999724,
+      0.999011,
+      0.960382,
+      0.847273,
+      0.989843,
+      0.974914,
+      0.863629,
+      0.879573,
+      0.97306,
+      0.97866,
+      0.970071,
+      1.0,
+      0.994186,
+      1.0,
+      0.907783,
+      0.915743,
+      0.950117,
+      0.999617,
+      0.927097,
+      0.963786,
+      0.924214,
+      0.856524,
+      0.970391,
+      0.964407,
+      0.907602,
+      0.99972,
+      0.922309,
+      0.849202,
+      0.875632,
+      0.975643,
+      0.987409,
+      0.743985,
+      0.974343,
+      0.990308,
+      0.95583,
+      0.98962,
+      0.994184,
+      0.981352,
+      0.994222,
+      0.781461,
+      0.937912,
+      1.0,
+      0.911622,
+      0.937859,
+      0.999974,
+      0.999779,
+      0.999882,
+      0.99992,
+      0.999617,
+      0.999682,
+      0.999997,
+      0.999844,
+      0.999983,
+      0.999957,
+      0.999773,
+      0.999819,
+      0.999902,
+      0.999947,
+      0.999634,
+      0.999806,
+      0.999369,
+      0.998652,
+      0.999976,
+      0.999942,
+      0.999991,
+      0.999834,
+      0.999786,
+      0.999927,
+      0.999886,
+      0.999892,
+      0.99979,
+      0.999947,
+      0.999692,
+      0.999295,
+      0.999941,
+      0.999862,
+      0.999845,
+      0.99913,
+      0.998947,
+      0.999325,
+      0.998775,
+      0.998579,
+      0.998316,
+      0.926471,
+      0.99944,
+      0.991486,
+      0.996362,
+      0.998939,
+      0.999622,
+      1.0,
+      0.998631,
+      0.991573,
+      0.999351,
+      0.997743,
+      0.999857,
+      0.999717,
+      0.999127,
+      0.999762,
+      0.997645,
+      0.999953,
+      0.999006,
+      0.999302,
+      0.999382,
+      0.999986,
+      0.999958,
+      0.999956,
+      0.994404,
+      0.997629,
+      0.999959,
+      0.999759,
+      0.999366,
+      0.999919,
+      0.999724,
+      0.999817,
+      0.996546,
+      0.992999,
+      0.998636,
+      0.998207,
+      0.915108,
+      0.977524
+    ],
+    "canon_rot180": [
+      0.856522,
+      0.900602,
+      0.96978,
+      0.987417,
+      0.994048,
+      0.70191,
+      0.897493,
+      0.471698,
+      0.975352,
+      0.710215,
+      0.993243,
+      0.98625,
+      0.95942,
+      0.988208,
+      0.900069,
+      0.98866,
+      0.90876,
+      0.912559,
+      0.861703,
+      0.644814,
+      0.97963,
+      0.962599,
+      0.963033,
+      0.972716,
+      0.942105,
+      0.861886,
+      0.932121,
+      0.88969,
+      0.914909,
+      0.845047,
+      0.665472,
+      0.909854,
+      0.892543,
+      0.916667,
+      0.534219,
+      0.728736,
+      0.997195,
+      0.928134,
+      0.932886,
+      0.873366,
+      0.706331,
+      0.933768,
+      0.765023,
+      0.866501,
+      0.679066,
+      0.869832,
+      0.984952,
+      0.967123,
+      0.792249,
+      0.942203,
+      0.927869,
+      0.996528,
+      0.913428,
+      0.904496,
+      0.96712,
+      0.983003,
+      0.748978,
+      0.790663,
+      0.983831,
+      0.959245,
+      0.905021,
+      0.910156,
+      0.823666,
+      0.769724,
+      0.960656,
+      0.684647,
+      0.819326,
+      0.856157,
+      0.936131,
+      0.899116,
+      0.915979,
+      0.814975,
+      0.948462,
+      0.849891,
+      0.974277,
+      0.848952,
+      0.985123,
+      0.929742,
+      0.791928,
+      0.874359,
+      0.865759,
+      0.822057,
+      0.825218,
+      0.914095,
+      0.860326,
+      0.852315,
+      0.94252,
+      0.995073,
+      0.998768,
+      0.979019,
+      0.81366,
+      0.956684,
+      0.970473,
+      0.960426,
+      0.766452,
+      0.735294,
+      0.897043,
+      0.937087,
+      0.891399,
+      0.912672,
+      0.915921,
+      0.894516,
+      0.772893,
+      0.959121,
+      0.379739,
+      0.946719,
+      0.793865,
+      0.921508,
+      0.901022,
+      0.975945,
+      0.907425,
+      0.973747,
+      0.924772,
+      0.976312,
+      0.949317,
+      0.99091,
+      0.905977,
+      0.704962,
+      0.900685,
+      0.932993,
+      0.953747,
+      0.778368,
+      0.915479,
+      0.681422,
+      0.924341,
+      0.916546,
+      0.995216,
+      0.913081,
+      0.758095,
+      0.989595,
+      0.906251,
+      0.983628,
+      0.903717,
+      0.95501,
+      0.961648,
+      0.816025,
+      0.954241,
+      0.844453,
+      0.893355,
+      0.97149,
+      0.85123,
+      0.851011,
+      0.93136,
+      0.949451,
+      0.982623,
+      0.977961,
+      0.919906,
+      0.864843,
+      0.932852,
+      0.943065,
+      0.939897,
+      0.920511,
+      0.726404,
+      0.871987,
+      0.755477,
+      0.666667,
+      1.0,
+      0.911446,
+      0.880553,
+      0.851874,
+      0.70228,
+      0.889515,
+      0.885141,
+      0.93683,
+      0.916628,
+      0.811594,
+      0.828541,
+      0.986044,
+      0.746121,
+      0.875486,
+      0.954524,
+      0.91158,
+      0.854614,
+      0.901034,
+      0.864598,
+      0.806903,
+      0.966699,
+      0.911873,
+      0.894916,
+      0.941209,
+      0.980862,
+      0.869191,
+      0.858223,
+      0.862986,
+      0.772645,
+      0.839669,
+      0.979786,
+      0.964692,
+      0.952172,
+      0.951588,
+      0.968632,
+      0.854164,
+      0.939853,
+      0.945072,
+      0.798144,
+      0.961015,
+      0.910024,
+      0.882028,
+      0.839383,
+      0.871058,
+      0.821091,
+      0.904571,
+      0.83003,
+      0.930081,
+      0.8403,
+      0.820421,
+      0.880643,
+      0.958288,
+      0.958197,
+      0.87997,
+      0.91308,
+      0.920343,
+      0.949216,
+      0.862051,
+      0.983796,
+      0.880339,
+      0.985187,
+      0.943088,
+      0.84337,
+      0.972908,
+      0.970154,
+      0.972802,
+      0.907608,
+      0.950726,
+      0.930915,
+      0.898529,
+      0.93197,
+      0.849167,
+      0.895622,
+      0.746016,
+      0.920114,
+      0.6363,
+      0.910137,
+      0.891387,
+      0.89254,
+      0.868857,
+      0.793968,
+      0.921386,
+      0.935529,
+      0.938033,
+      0.645723,
+      0.976275,
+      1.0,
+      0.898426,
+      0.932703,
+      0.827819,
+      0.937178,
+      0.920514,
+      0.880866,
+      0.761093,
+      0.871953,
+      0.957227,
+      0.923265,
+      0.888158,
+      0.953488,
+      1.0,
+      0.723604,
+      0.933845,
+      0.92412,
+      0.977842,
+      0.984471,
+      0.836376,
+      0.924163,
+      0.81831,
+      0.933348,
+      0.827243,
+      0.862365,
+      0.994302,
+      0.957936,
+      0.880734,
+      0.859992,
+      0.986121,
+      0.962911,
+      0.743985,
+      0.731456,
+      0.885192,
+      0.954399,
+      0.658301,
+      0.967575,
+      0.755327,
+      0.994222,
+      0.777262,
+      0.949794,
+      0.638741,
+      0.911622,
+      0.948911,
+      0.998492,
+      0.98671,
+      0.999032,
+      0.998782,
+      0.999062,
+      0.998305,
+      0.99432,
+      0.993743,
+      0.998151,
+      0.995755,
+      0.998393,
+      0.995486,
+      0.993389,
+      0.999036,
+      0.996569,
+      0.995771,
+      0.999432,
+      0.998145,
+      0.997494,
+      0.998364,
+      0.991498,
+      0.998077,
+      0.998561,
+      0.99913,
+      0.999288,
+      0.997875,
+      0.999409,
+      0.997243,
+      0.999059,
+      0.992359,
+      0.998596,
+      0.995334,
+      0.997951,
+      0.99622,
+      0.99722,
+      0.994039,
+      1.0,
+      0.984351,
+      0.996873,
+      1.0,
+      0.988432,
+      0.994867,
+      0.999381,
+      0.99689,
+      0.999908,
+      0.999226,
+      0.99389,
+      0.0,
+      0.998843,
+      0.999002,
+      0.98279,
+      0.999569,
+      0.999522,
+      0.996978,
+      0.998617,
+      0.999916,
+      0.985609,
+      0.999183,
+      0.996167,
+      0.997322,
+      0.99993,
+      0.997005,
+      0.999486,
+      0.986478,
+      0.996881,
+      0.997061,
+      0.998973,
+      0.967515,
+      0.998247,
+      0.993384,
+      0.99504,
+      0.99974,
+      0.934147,
+      0.641046,
+      0.86936,
+      0.985558
+    ]
+  },
+  "names": [
+    "rand-30-11",
+    "rand-30-16",
+    "rand-30-20",
+    "rand-30-23",
+    "rand-30-25",
+    "rand-30-26",
+    "rand-30-27",
+    "rand-30-28",
+    "rand-30-29",
+    "rand-30-5",
+    "rand-32-29",
+    "rand-34-12",
+    "rand-34-16",
+    "rand-34-28",
+    "rand-36-13",
+    "rand-36-22",
+    "rand-38-13",
+    "rand-38-19",
+    "rand-38-38",
+    "rand-38-7",
+    "rand-40-16",
+    "rand-40-19",
+    "rand-40-2",
+    "rand-40-20",
+    "rand-40-23",
+    "rand-40-4",
+    "rand-40-40",
+    "rand-40-5",
+    "rand-42-28",
+    "rand-42-32",
+    "rand-42-6",
+    "rand-42-9",
+    "rand-44-28",
+    "rand-44-29",
+    "rand-44-30",
+    "rand-46-27",
+    "rand-46-3",
+    "rand-46-33",
+    "rand-48-13",
+    "rand-48-31",
+    "rand-48-36",
+    "rand-48-37",
+    "rand-48-46",
+    "rand-48-9",
+    "rand-50-10",
+    "rand-50-11",
+    "rand-50-13",
+    "rand-50-19",
+    "rand-50-20",
+    "rand-50-26",
+    "rand-50-4",
+    "rand-50-41",
+    "rand-50-44",
+    "rand-50-47",
+    "rand-50-7",
+    "rand-50-8",
+    "rand-50-9",
+    "rand-52-21",
+    "rand-52-22",
+    "rand-52-33",
+    "rand-52-50",
+    "rand-52-7",
+    "rand-54-19",
+    "rand-54-27",
+    "rand-54-34",
+    "rand-54-36",
+    "rand-54-8",
+    "rand-56-15",
+    "rand-56-16",
+    "rand-56-18",
+    "rand-56-32",
+    "rand-56-55",
+    "rand-56-7",
+    "rand-56-8",
+    "rand-58-12",
+    "rand-58-15",
+    "rand-58-2",
+    "rand-58-21",
+    "rand-58-41",
+    "rand-58-57",
+    "rand-60-10",
+    "rand-60-11",
+    "rand-60-16",
+    "rand-60-19",
+    "rand-60-22",
+    "rand-60-24",
+    "rand-60-4",
+    "rand-60-54",
+    "rand-60-59",
+    "rand-60-6",
+    "rand-62-22",
+    "rand-62-44",
+    "rand-62-49",
+    "rand-62-58",
+    "rand-62-8",
+    "rand-64-24",
+    "rand-64-28",
+    "rand-64-30",
+    "rand-64-47",
+    "rand-64-54",
+    "rand-66-27",
+    "rand-66-29",
+    "rand-66-47",
+    "rand-66-51",
+    "rand-66-61",
+    "rand-68-18",
+    "rand-68-24",
+    "rand-68-29",
+    "rand-68-54",
+    "rand-68-57",
+    "rand-68-6",
+    "rand-68-62",
+    "rand-68-68",
+    "rand-68-7",
+    "rand-70-10",
+    "rand-70-22",
+    "rand-70-25",
+    "rand-70-35",
+    "rand-70-44",
+    "rand-70-50",
+    "rand-70-58",
+    "rand-70-65",
+    "rand-70-8",
+    "rand-70-9",
+    "rand-72-1",
+    "rand-72-10",
+    "rand-72-11",
+    "rand-72-27",
+    "rand-72-33",
+    "rand-72-43",
+    "rand-72-48",
+    "rand-72-60",
+    "rand-72-62",
+    "rand-72-65",
+    "rand-72-71",
+    "rand-74-18",
+    "rand-74-23",
+    "rand-74-24",
+    "rand-74-48",
+    "rand-76-13",
+    "rand-76-17",
+    "rand-76-25",
+    "rand-76-35",
+    "rand-76-37",
+    "rand-76-46",
+    "rand-76-58",
+    "rand-76-59",
+    "rand-76-72",
+    "rand-78-22",
+    "rand-78-28",
+    "rand-78-31",
+    "rand-78-40",
+    "rand-78-5",
+    "rand-78-51",
+    "rand-78-9",
+    "rand-8-6",
+    "rand-8-8",
+    "rand-80-1",
+    "rand-80-17",
+    "rand-80-2",
+    "rand-80-21",
+    "rand-80-26",
+    "rand-80-29",
+    "rand-80-31",
+    "rand-80-43",
+    "rand-80-45",
+    "rand-80-60",
+    "rand-80-71",
+    "rand-80-8",
+    "rand-82-1",
+    "rand-82-12",
+    "rand-82-13",
+    "rand-82-20",
+    "rand-82-22",
+    "rand-82-37",
+    "rand-82-41",
+    "rand-82-51",
+    "rand-82-70",
+    "rand-84-25",
+    "rand-84-27",
+    "rand-84-53",
+    "rand-84-63",
+    "rand-84-65",
+    "rand-84-75",
+    "rand-84-82",
+    "rand-84-83",
+    "rand-86-12",
+    "rand-86-2",
+    "rand-86-35",
+    "rand-86-43",
+    "rand-86-52",
+    "rand-88-15",
+    "rand-88-37",
+    "rand-88-42",
+    "rand-88-48",
+    "rand-88-61",
+    "rand-88-63",
+    "rand-88-80",
+    "rand-88-88",
+    "rand-90-12",
+    "rand-90-17",
+    "rand-90-19",
+    "rand-90-20",
+    "rand-90-29",
+    "rand-90-51",
+    "rand-90-52",
+    "rand-90-53",
+    "rand-90-54",
+    "rand-90-56",
+    "rand-90-57",
+    "rand-90-7",
+    "rand-90-75",
+    "rand-90-84",
+    "rand-90-86",
+    "rand-92-16",
+    "rand-92-32",
+    "rand-92-40",
+    "rand-92-48",
+    "rand-92-51",
+    "rand-92-62",
+    "rand-92-7",
+    "rand-92-85",
+    "rand-94-12",
+    "rand-94-15",
+    "rand-94-20",
+    "rand-94-23",
+    "rand-94-30",
+    "rand-94-54",
+    "rand-94-57",
+    "rand-94-92",
+    "rand-96-12",
+    "rand-96-13",
+    "rand-96-23",
+    "rand-96-32",
+    "rand-96-48",
+    "rand-96-59",
+    "rand-96-72",
+    "rand-96-92",
+    "rand-96-94",
+    "rand-98-11",
+    "rand-98-13",
+    "rand-98-15",
+    "rand-98-2",
+    "rand-98-38",
+    "rand-98-39",
+    "rand-98-47",
+    "rand-98-63",
+    "rand-98-67",
+    "rand-98-79",
+    "rand-98-95",
+    "rand-98-98",
+    "random-100-28",
+    "random-100-29",
+    "random-20-22",
+    "random-20-27",
+    "random-20-7",
+    "random-40-15",
+    "random-40-18",
+    "random-40-6",
+    "random-40-7",
+    "random-40-8",
+    "random-60-1",
+    "random-60-10",
+    "random-60-13",
+    "random-60-16",
+    "random-60-9",
+    "random-80-11",
+    "random-80-13",
+    "random-80-16",
+    "random-80-18",
+    "random-80-28",
+    "random-80-9",
+    "randsimple-100-1",
+    "randsimple-100-22",
+    "randsimple-100-29",
+    "randsimple-100-3",
+    "randsimple-20-16",
+    "randsimple-40-13",
+    "randsimple-40-19",
+    "randsimple-40-5",
+    "randsimple-40-8",
+    "randsimple-60-14",
+    "randsimple-60-5",
+    "randsimple-60-9",
+    "randsimple-80-12",
+    "randsimple-80-13",
+    "randvon-100-24",
+    "randvon-100-3",
+    "randvon-100-30",
+    "randvon-100-5",
+    "randvon-100-9",
+    "randvon-110-20",
+    "randvon-110-25",
+    "randvon-110-4",
+    "randvon-120-4",
+    "randvon-120-7",
+    "randvon-130-17",
+    "randvon-130-27",
+    "randvon-130-7",
+    "randvon-140-1",
+    "randvon-140-23",
+    "randvon-140-25",
+    "randvon-140-27",
+    "randvon-150-2",
+    "randvon-160-11",
+    "randvon-170-1",
+    "randvon-170-2",
+    "randvon-170-22",
+    "randvon-170-23",
+    "randvon-170-8",
+    "randvon-180-10",
+    "randvon-180-16",
+    "randvon-180-20",
+    "randvon-180-27",
+    "randvon-180-29",
+    "randvon-180-3",
+    "randvon-180-30",
+    "randvon-190-14",
+    "randvon-190-16",
+    "randvon-190-2",
+    "randvon-190-4",
+    "randvon-20-11",
+    "randvon-20-15",
+    "randvon-20-19",
+    "randvon-20-22",
+    "randvon-20-23",
+    "randvon-20-30",
+    "randvon-30-30",
+    "randvon-30-5",
+    "randvon-30-7",
+    "randvon-30-9",
+    "randvon-40-17",
+    "randvon-40-20",
+    "randvon-40-28",
+    "randvon-40-29",
+    "randvon-40-6",
+    "randvon-50-13",
+    "randvon-50-16",
+    "randvon-50-25",
+    "randvon-50-26",
+    "randvon-60-22",
+    "randvon-60-27",
+    "randvon-60-5",
+    "randvon-60-8",
+    "randvon-60-9",
+    "randvon-70-12",
+    "randvon-70-13",
+    "randvon-70-17",
+    "randvon-70-19",
+    "randvon-70-27",
+    "randvon-80-19",
+    "randvon-80-27",
+    "randvon-80-28",
+    "randvon-80-7",
+    "randvon-90-15",
+    "randvon-90-19",
+    "randvon-90-6",
+    "simple-100-5",
+    "simple-100-9",
+    "simple-50-1",
+    "simple-50-7",
+    "simple-50-8"
+  ],
+  "elapsed_sec": 523.8
+}
