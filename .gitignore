@@ -98,3 +98,10 @@ paper/gfx/setpred/*
 !results/*.json
 # build artifact of the Overleaf bundle, regenerated on demand
 paper/agnet_overleaf.zip
+
+# Peer-review correspondence: kept locally, never tracked. NOTE: these are still
+# present in this branch's earlier history (27 commits) and were pushed, so
+# untracking them here stops future exposure but does not undo the past one --
+# that needs a history rewrite plus a force-push.
+paper/reviews/
+paper/response_to_reviewers.md
