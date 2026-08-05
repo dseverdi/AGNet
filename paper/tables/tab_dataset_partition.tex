@@ -1,0 +1,12 @@
+% hand-curated dataset partition table
+\begin{tabular}{lrrr}
+  \toprule
+  Split & \# polygons & $n$ range & Use \\
+  \midrule
+  train     & 8{,}867 & 8--198       & Pointer + \SetPredictor{} training \\
+  dev       & 840     & 16--198      & \SetPredictor{} decision threshold $t$, start rule \\
+  test      & 362     & 8--192       & Held-out evaluation (in-distribution) \\
+  ood       & 2{,}081 & 8--1{,}000   & Out-of-distribution evaluation \\
+  ood-large & 285     & 600--2{,}250 & Extreme-OOD evaluation \\
+  \bottomrule
+\end{tabular}

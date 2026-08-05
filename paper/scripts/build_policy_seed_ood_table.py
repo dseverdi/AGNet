@@ -1,0 +1,191 @@
+"""Policy-seed replication: does the encoder contrast hold across independently
+trained PO/BT policies, in and out of distribution?
+
+TWO SEED AXES, KEPT SEPARATE. tab_headline / tab_ood / tab_large vary the *probe*
+seed with the policy fixed at 1234. This table varies the *policy* seed, with one
+full probe and one no-encoder probe trained per policy. The two must not be pooled
+-- they measure different things -- so they live in separate tables and the caption
+says which is which.
+
+The claim under test is a WITHIN-policy contrast: for each policy, does reading its
+frozen encoder beat the no-encoder ablation? A policy's absolute quality varying
+across seeds does not threaten that; the contrast disappearing would.
+
+READ THE TWO COLUMNS TOGETHER. In distribution at a fixed t = 0.20 the no-encoder
+arm shows the shorter tail while spending far more guards -- the same guard-budget
+confound as tab_ablation, resolved at matched budget in tab_ablation_thresholds.
+Out of distribution the confound lifts and the encoder arm wins on both axes at
+once, which is why the OOD rows carry the claim.
+
+|S|/n is used throughout rather than |S|/OPT because the vertex-guard optimum is
+unavailable for 79 of the ood-large polygons (n >= 800), so |S|/OPT would change
+population mid-column.
+
+Caveat in the caption: each policy's probes are trained on that policy's own LS
+targets, so rows differ in probe training data as well as in policy weights --
+which is inherent, since a probe is only meaningful relative to the encoder it reads.
+
+Sources
+  in-dist   results/policy_seeds/pseed{11,22,33}_{full,noenc}.json
+            paper/data/dist_dev_test{,_noenc}.json                  (policy 1234)
+  ood       results/policy_seeds_ood/pseed{S}_{arm}_test.json
+            paper/data/dist_test_OOD{,_noenc}.json                  (policy 1234)
+  ood-large results/policy_seeds_ood/pseed{S}_{arm}_large.json
+            paper/data/dist_ood_large{,_noenc}.json                 (policy 1234)
+
+Output: paper/tables/tab_policy_seeds.tex
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+PDATA = REPO / "paper" / "data"
+INDIST = REPO / "results" / "policy_seeds"
+OOD = REPO / "results" / "policy_seeds_ood"
+TABLE = REPO / "paper" / "tables" / "tab_policy_seeds.tex"
+
+PSEEDS = ["1234", "11", "22", "33"]
+GATE = 0.95
+CELL = "t=0.2|K=1"
+
+# split key -> (latex label, N, 1234 reference files, eval-json locator)
+SPLITS = [
+    ("dev_test", r"\texttt{test}", 362,
+     ("dist_dev_test.json", "dist_dev_test_noenc.json"),
+     lambda s, arm: INDIST / f"pseed{s}_{arm}.json"),
+    ("ood", r"\texttt{ood}", 2081,
+     ("dist_test_OOD.json", "dist_test_OOD_noenc.json"),
+     lambda s, arm: OOD / f"pseed{s}_{arm}_test.json"),
+    ("ood_large", r"\texttt{ood-large}", 285,
+     ("dist_ood_large.json", "dist_ood_large_noenc.json"),
+     lambda s, arm: OOD / f"pseed{s}_{arm}_large.json"),
+]
+
+
+def _mean(xs):
+    xs = list(xs)
+    return sum(xs) / len(xs) if xs else None
+
+
+def from_eval(path: Path, which: str):
+    """which in {policy, probe}. Reads an eval_set_predictor.py output."""
+    if not path.exists():
+        return None
+    d = json.loads(path.read_text())
+    src = d["seed"] if which == "policy" else d["cells"].get(CELL)
+    if src is None:
+        return None
+    return {"chv": src["chv"], "cov": src["cov"], "opt": src.get("opt"),
+            "gate": src["dist"]["n_cov_ge_095"], "n": src["dist"]["n_total"]}
+
+
+def from_per_polygon(fname: str, key: str):
+    """Policy-1234 reference row from a leak-free per-polygon dump."""
+    p = PDATA / fname
+    if not p.exists():
+        return None
+    recs = json.loads(p.read_text())["polygons"]
+    covs = [r[key]["cov"] for r in recs]
+    # |S|/OPT over the polygons that HAVE an optimum: all of test and ood, but
+    # only 206 of the 285 ood-large (79 have no vertex-guard optimum), which the
+    # caption flags -- the ood-large ratio is therefore over a subset.
+    ratios = [r[key]["S_size"] / r["OPT"] for r in recs if r.get("OPT")]
+    return {"chv": _mean(r[key]["S_size"] / r["n"] for r in recs),
+            "cov": _mean(covs), "opt": _mean(ratios) if ratios else None,
+            "gate": sum(1 for c in covs if c >= GATE), "n": len(recs)}
+
+
+def rows_for(split_key, ref_files, locate):
+    """(pseed, arm) -> row for arm in policy/full/noenc."""
+    out = {}
+    out[("1234", "policy")] = from_per_polygon(ref_files[0], "seed")
+    out[("1234", "full")] = from_per_polygon(ref_files[0], "probe_t020")
+    out[("1234", "noenc")] = from_per_polygon(ref_files[1], "probe_t020")
+    for s in PSEEDS[1:]:
+        out[(s, "policy")] = from_eval(locate(s, "full"), "policy")
+        out[(s, "full")] = from_eval(locate(s, "full"), "probe")
+        out[(s, "noenc")] = from_eval(locate(s, "noenc"), "probe")
+    return out
+
+
+def cell(r):
+    if r is None:
+        return ("---", "---", "---", "---")
+    opt = f"{r['opt']:.2f}" if r.get("opt") else "---"
+    return (f"{r['cov']:.3f}", f"{r['chv']:.3f}", opt, f"{r['gate']}/{r['n']}")
+
+
+def main() -> None:
+    data = {k: rows_for(k, ref, loc) for k, _, _, ref, loc in SPLITS}
+
+    L = ["% auto-generated by build_policy_seed_ood_table.py",
+         "% POLICY-seed variance: one full + one no-encoder probe per policy, t=0.20,",
+         "% exact CGAL. Distinct from tab_headline/tab_ood/tab_large, which vary the",
+         "% PROBE seed at policy 1234. |S|/OPT on ood-large covers only the 206 of",
+         "% 285 polygons that have a vertex-guard optimum (79 do not).",
+         r"\begin{tabular}{lrrrrrrrrrrrr}",
+         r"  \toprule",
+         r"  & \multicolumn{4}{c}{policy seed} & \multicolumn{4}{c}{$+$ full probe}"
+         r" & \multicolumn{4}{c}{$+$ no-encoder} \\",
+         r"  \cmidrule(lr){2-5} \cmidrule(lr){6-9} \cmidrule(lr){10-13}",
+         r"  Policy & cov & $|S|/n$ & $|S|/\OPT$ & gate & cov & $|S|/n$ & $|S|/\OPT$"
+         r" & gate & cov & $|S|/n$ & $|S|/\OPT$ & gate \\"]
+
+    for key, label, n, _, _ in SPLITS:
+        rs = data[key]
+        if all(v is None for v in rs.values()):
+            continue
+        L.append(r"  \midrule")
+        # ood-large is the ONLY split in the paper where an |S|/OPT column is
+        # averaged over a subset (206 of 285). The caption says so, but a reader
+        # scanning rows has no cue, so the block label carries a dagger pointing
+        # there -- a marker, matching tab_headline's, not a prose row inside the
+        # tabular.
+        mark = r"$^{\dagger}$" if key == "ood_large" else ""
+        L.append(rf"  \multicolumn{{13}}{{l}}{{\emph{{{label}}}{mark} (${n}$ polygons)}} \\")
+        # Policy 1234 is deliberately NOT tabulated here. With cov and |S|/OPT
+        # present its rows became verbatim copies of the seed/probe rows in
+        # tab_headline, tab_ood and tab_large; this table's job is policy-seed
+        # variance, so it reports only the three replication policies and the
+        # caption points at those tables for the released one.
+        for s in PSEEDS[1:]:
+            c = [cell(rs.get((s, a))) for a in ("policy", "full", "noenc")]
+            if all(x == ("---", "---", "---", "---") for x in c):
+                continue
+            L.append(f"  {s} & " + " & ".join(v for pair in c for v in pair)
+                     + r" \\")
+    L += [r"  \bottomrule", r"\end{tabular}", ""]
+    TABLE.write_text("\n".join(L))
+    print(f"wrote {TABLE.relative_to(REPO)}\n")
+    print("\n".join(L))
+
+    print("\n" + "=" * 74)
+    print("WITHIN-POLICY CONTRAST — full vs no-encoder, per policy")
+    print("=" * 74)
+    for key, label, n, _, _ in SPLITS:
+        rs = data[key]
+        print(f"\n  {label.replace(chr(92)+'texttt','').strip('{}')}:")
+        wt = wc = tot = 0
+        for s in PSEEDS:
+            f, ne, pol = rs.get((s, "full")), rs.get((s, "noenc")), rs.get((s, "policy"))
+            if not f or not ne:
+                print(f"    policy {s:>4}: incomplete")
+                continue
+            tot += 1
+            fb, nb = f["n"] - f["gate"], ne["n"] - ne["gate"]
+            wt += fb <= nb
+            wc += f["chv"] <= ne["chv"]
+            lift = f"{pol['n']-pol['gate']:>4} -> {fb:<4}" if pol else "n/a"
+            print(f"    policy {s:>4}: below-gate {lift} (probe)   "
+                  f"full {fb:>4} @ |S|/n {f['chv']:.3f}   "
+                  f"noenc {nb:>4} @ {ne['chv']:.3f}   "
+                  f"tail:{'full' if fb<=nb else 'NOENC':<5} cost:{'full' if f['chv']<=ne['chv'] else 'NOENC'}")
+        if tot:
+            print(f"    -> full wins tail on {wt}/{tot}, cost on {wc}/{tot} policies")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,71 @@
+{
+  "note": "classical visibility-based pipeline vs geo-free learned pipeline; greedy timed in-process up to n=0, beyond that only with --greedy-timeout-s (see module docstring)",
+  "classical": [
+    {
+      "bucket": 200,
+      "n_mean": 200.0,
+      "n_polys": 1,
+      "vis_ms_mean": 119.41550800111145,
+      "vis_ms_median": 119.41550800111145,
+      "greedy_ms_mean": 1338.3592159952968,
+      "greedy_n_timed": 1,
+      "greedy_status": [
+        "ok"
+      ],
+      "peak_rss_mb": 432.14453125
+    },
+    {
+      "bucket": 500,
+      "n_mean": 500.0,
+      "n_polys": 1,
+      "vis_ms_mean": 286.141199991107,
+      "vis_ms_median": 286.141199991107,
+      "greedy_ms_mean": 6598.703413037583,
+      "greedy_n_timed": 1,
+      "greedy_status": [
+        "ok"
+      ],
+      "peak_rss_mb": 432.14453125
+    },
+    {
+      "bucket": 1000,
+      "n_mean": 1000.0,
+      "n_polys": 1,
+      "vis_ms_mean": 620.2015259768814,
+      "vis_ms_median": 620.2015259768814,
+      "greedy_ms_mean": 21047.059639997315,
+      "greedy_n_timed": 1,
+      "greedy_status": [
+        "ok"
+      ],
+      "peak_rss_mb": 432.14453125
+    },
+    {
+      "bucket": 2000,
+      "n_mean": 2000.0,
+      "n_polys": 1,
+      "vis_ms_mean": 1608.67392498767,
+      "vis_ms_median": 1608.67392498767,
+      "greedy_ms_mean": 85242.8566350136,
+      "greedy_n_timed": 1,
+      "greedy_status": [
+        "ok"
+      ],
+      "peak_rss_mb": 432.14453125
+    }
+  ],
+  "learned_total_ms": {
+    "cpu": {
+      "200": 11.527,
+      "500": 33.377,
+      "1000": 89.012,
+      "2000": 264.424
+    },
+    "cuda": {
+      "200": 6.222,
+      "500": 13.065,
+      "1000": 25.316,
+      "2000": 56.578
+    }
+  }
+}

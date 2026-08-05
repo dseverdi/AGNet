@@ -119,6 +119,36 @@ python eval_set_predictor.py \
 
 ---
 
+## Paper source and claim verification
+
+`paper/` holds the LaTeX source, the generated tables and figures, and the scripts
+that produce them. The manuscript rebuilds as-is:
+
+```bash
+latexmk -pdf -cd paper/paper.tex        # 39 pages, no external data needed
+```
+
+Every numeric claim in the paper is registered in `tools/claims.py` and checked
+against the files under `results/` by a consistency gate:
+
+```bash
+python tools/verify_paper_consistency.py   # numerals, captions, populations, PDF text
+python tools/mutation_test_gate.py         # verifies the gate itself still catches errors
+```
+
+### What is and is not shipped here
+
+| shipped | not shipped |
+|---|---|
+| paper source, tables, the four figures it inputs | `data/ls_trajectories_*.pkl` (163 MB) |
+| `results/*.json` — the measurements behind every claim | `paper/data/*.json` (17 MB per-polygon dumps) |
+| all generators under `paper/scripts/` and `tools/` | model checkpoints |
+
+The large files are regenerable: trajectories via step 2 above, and
+`paper/data/*.json` from `results/` via `paper/scripts/build_paper_data.py`. Without
+them `verify_paper_consistency.py` stops at its source-readability check, since the
+registry cites the trajectory pickles; the paper build itself is unaffected.
+
 ## Reproducing paper results from scratch
 
 ### 1. Train the PO/BT policy
@@ -128,9 +158,10 @@ python po_agp.py configs/po_agp_lstm.json
 # Checkpoint saved to checkpoints/v3/po_agp/lstm_bt/po_agp_best_greedy.pt
 ```
 
-### 2. Build LS-editor training targets (optional — precomputed data included)
+### 2. Build LS-editor training targets
 
-The `data/ls_trajectories_*.pkl` files are already in the repo. To regenerate from scratch:
+The `data/ls_trajectories_*.pkl` targets (163 MB) are **not** tracked on this branch.
+Regenerate them from the trained policy:
 
 ```bash
 python tools/build_ls_trajectories.py \

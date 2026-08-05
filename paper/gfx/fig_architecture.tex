@@ -1,0 +1,94 @@
+% Full inference pipeline: frozen PO/BT pointer (encoder + decoder) feeding the
+% SetPredictor probe; geo-free boundary; training/eval visibility outside it.
+% Macros \EOS, \SetPredictor and tikz libraries (arrows.meta, positioning, fit,
+% backgrounds, calc) + xcolor are loaded in paper.tex.
+\definecolor{cfrozen}{HTML}{2a78d6}
+\definecolor{cprobe}{HTML}{eb6834}
+% minimal snowflake for the frozen encoder
+\newcommand{\frozenicon}{%
+  \tikz[scale=0.18, baseline=-0.3ex]{%
+    \foreach \a in {0,60,...,300}
+      \draw[line width=0.6pt, cfrozen!80!black, line cap=round] (0,0) -- (\a:1);
+  }%
+}
+\providecommand{\archboxfix}{2cm} % see the note before \end{tikzpicture}
+\begin{tikzpicture}[
+  font=\small,
+  >=Stealth,
+  node distance=7mm and 9mm,
+  every node/.style={align=center},
+  frozen/.style={draw=cfrozen, line width=0.7pt, fill=cfrozen!8, rounded corners=3pt,
+    minimum height=10mm, inner sep=2.5pt, text width=20mm},
+  probe/.style={draw=cprobe, line width=0.7pt, fill=cprobe!10, rounded corners=3pt,
+    minimum height=11mm, inner sep=2.5pt, text width=24mm},
+  dnode/.style={draw=gray!55, line width=0.5pt, fill=white, rounded corners=2pt,
+    minimum height=9mm, inner sep=2pt, text width=15mm},
+  offline/.style={draw=gray!55, dashed, rounded corners=3pt, fill=gray!7,
+    minimum height=10mm, inner sep=2.5pt, text width=28mm},
+  arr/.style={->, line width=0.8pt},
+  darr/.style={->, dashed, gray!55!black, line width=0.7pt},
+  lbl/.style={font=\footnotesize\itshape, gray!35!black, fill=none, inner sep=0.6pt},
+]
+
+% ---- row 1: frozen PO/BT policy ----
+\node[dnode] (input) {coords\\$x_1,\dots,x_n$};
+\node[frozen, right=of input] (enc) {\frozenicon\\encoder};
+\node[frozen, right=of enc] (dec) {decoder};
+\node[dnode, right=of dec] (seed) {seed\\$S(\pi_{\mathrm{seed}})$};
+
+% ---- row 2: probe chain under enc--dec ----
+\node[probe, below=2.48cm of $(enc)!0.5!(dec)$, minimum width=78pt] (sp) {\SetPredictor{}};
+\node[dnode, right=of sp, text width=11mm] (phat) {$\hat p_i$};
+\node[dnode, right=of phat, text width=12mm] (thresh) {$t$};
+\node[dnode, right=of thresh, text width=14mm] (out) {$S(t)$};
+
+\draw[arr] (input) -- (enc);
+\draw[arr] (enc) -- (dec);
+\draw[arr] (dec) -- (seed);
+\draw[arr] (sp) -- (phat);
+\draw[arr] (phat) -- (thresh);
+\draw[arr] (thresh) -- (out);
+
+% three probe inputs on disjoint lanes
+\draw[arr] (enc.south) -- ++(0,-0.83) -| node[lbl, near start, right, anchor=south] {$h_i$} (sp.north);
+\draw[arr] (input.south) -- ++(0,-1.54) -| node[lbl, left, near start, anchor=south] {$x_i$} (3.5,-2.49);
+\draw[arr] (seed.south) -- ++(0,-1.54) -| node[lbl, above, near start] {$\mathbf{1}_{\mathrm{seed}}$} (5,-2.49);
+
+% geo-free panel
+\begin{scope}[on background layer]
+  \node[draw=black, dashed, line width=0.9pt, rounded corners=5pt, fill=cfrozen!3,
+    fit=(input)(enc)(dec)(seed)(sp)(phat)(thresh)(out),
+    inner sep=4mm,
+    label={[font=\small\bfseries, anchor=south west]above left:Geo-free at inference}
+  ] (geofree) {};
+\end{scope}
+
+% ---- offline (outside geo-free) ----
+\node[offline, below=14mm of sp] (discvis)
+  {disc.\ visibility $B$\\{\footnotesize train: reward + BCE targets}};
+\node[offline, below=14mm of out] (cgal)
+  {exact CGAL\\{\footnotesize eval only}};
+
+\draw[darr] (discvis.north) -- (sp.south);
+\draw[darr] (discvis.west) -- (2.5,-5.6) -- (2.5,-2.5) -- (2.5,-0.5);
+\draw[darr] (out.south) -- (cgal.north);
+% eval scores the seed set as well as S(t)
+\draw[darr] (seed.east) to[out=0,in=0,looseness=1.6] (cgal.east);
+
+% Bounding-box correction. The dotted seed->CGAL curve above uses out=0/in=0, so
+% TikZ sizes the picture from its Bezier CONTROL points, which sit a third further
+% right than the curve's visible apex. The box was therefore wider than the ink on
+% the right only, and \centering pushed the diagram ~3% of the text width left of
+% centre. We TRIM that phantom strip off the right rather than padding the left:
+% padding would widen the box, and since adjustbox scales the box to \linewidth it
+% would render the whole diagram ~10% smaller. Trimming keeps the drawing untouched
+% and its size intact -- it also lets adjustbox scale the diagram up a little,
+% since the box it has to fit into \linewidth is now narrower. Note the reset:
+% \usebox{}/use as bounding box only suppresses LATER contributions, so without
+% \pgfresetboundingbox the already-grown box would not shrink.
+\coordinate (bbsw) at (current bounding box.south west);
+\coordinate (bbne) at ([xshift=-\archboxfix]current bounding box.north east);
+\pgfresetboundingbox
+\path[use as bounding box] (bbsw) rectangle (bbne);
+
+\end{tikzpicture}

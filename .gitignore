@@ -15,14 +15,12 @@ build/
 # Jupyter Notebooks
 .ipynb_checkpoints/
 
-# VS Code / IDE
+# VS Code
 .vscode/
-.idea/
 
 # Environment
 .env
 .env.*
-!.env.example
 
 # Results, logs, and outputs
 #results/
@@ -65,13 +63,8 @@ dataset/
 Thumbs.db
 DEADJOE
 
-# Public release: exclude paper source, archive, and dev artefacts
-paper/
-archive/
-.claude/
-.venv/
-plan.md
-paper.md
+# Ignore example env
+.env.example
 # Ignore Python cache folders
 __pycache__/
 checkpoints/
@@ -79,3 +72,29 @@ gfx/
 tsplib_cache/
 data/disc_vis_cache.pkl
 data/value_net_training_data.pkl
+# Disc-vis cache backups. The cache itself is ignored above, but ad-hoc copies
+# made before risky runs are not covered by that pattern, and a 919 MB blob was
+# swept into a commit that way (4a488b4). Match any variant.
+data/disc_vis_cache.pkl*
+
+# --- reproducibility carve-outs -------------------------------------------
+# The blanket *.json and gfx/ rules above keep the working tree small, but they
+# also leave a fresh clone unable to compile the paper or rebuild the claims
+# registry. Re-include exactly the inputs those need. The gfx directory is
+# un-ignored so git descends into it, then its contents are re-ignored and the
+# five files paper.tex actually \input are named one by one -- the rest of
+# paper/gfx/ is legacy artwork, and setpred/ also holds two generated figures the
+# current paper does not use. paper/data/*.json (17 MB of per-polygon dumps) stays
+# ignored on purpose: it is regenerable from results/ via build_paper_data.py.
+!paper/gfx/
+paper/gfx/*
+!paper/gfx/fig_architecture.tex
+!paper/gfx/setpred/
+paper/gfx/setpred/*
+!paper/gfx/setpred/fig_distributions.pdf
+!paper/gfx/setpred/fig_mechanism.pdf
+!paper/gfx/setpred/fig_operating_curve.pdf
+!paper/gfx/setpred/fig_worked_example.pdf
+!results/*.json
+# build artifact of the Overleaf bundle, regenerated on demand
+paper/agnet_overleaf.zip

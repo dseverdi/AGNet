@@ -1,0 +1,133 @@
+{
+ "note": "disc-vis greedy driven to its own ceiling (no gate stop). The estimate saturates at 1.0 once all M=500 sample points are covered; exact_at_ceiling is the true coverage there. Where clears_gate is false, no guard count reaches the 0.99 gate.",
+ "gate": 0.99,
+ "n_polygons": 15,
+ "rows": [
+  {
+   "name": "rand-8-6",
+   "n": 8,
+   "n_guards_at_ceiling": 2,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 1.0,
+   "clears_gate": true
+  },
+  {
+   "name": "rand-84-26",
+   "n": 84,
+   "n_guards_at_ceiling": 16,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.9902810610979702,
+   "clears_gate": true
+  },
+  {
+   "name": "rand-148-128",
+   "n": 148,
+   "n_guards_at_ceiling": 20,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.9931444228505906,
+   "clears_gate": true
+  },
+  {
+   "name": "rand-200-26",
+   "n": 200,
+   "n_guards_at_ceiling": 29,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.9782319932467154,
+   "clears_gate": false
+  },
+  {
+   "name": "rand-200-47",
+   "n": 200,
+   "n_guards_at_ceiling": 32,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.9870225996039569,
+   "clears_gate": false
+  },
+  {
+   "name": "rand-400-24",
+   "n": 400,
+   "n_guards_at_ceiling": 43,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.9540132732056781,
+   "clears_gate": false
+  },
+  {
+   "name": "randsimple-600-7",
+   "n": 600,
+   "n_guards_at_ceiling": 49,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.9517602373014095,
+   "clears_gate": false
+  },
+  {
+   "name": "random-600-26",
+   "n": 600,
+   "n_guards_at_ceiling": 67,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.9137551606366626,
+   "clears_gate": false
+  },
+  {
+   "name": "rand-800-2",
+   "n": 800,
+   "n_guards_at_ceiling": 83,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.9118335808145053,
+   "clears_gate": false
+  },
+  {
+   "name": "randsimple-1500-16",
+   "n": 1500,
+   "n_guards_at_ceiling": 113,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.8729265054641471,
+   "clears_gate": false
+  },
+  {
+   "name": "randsimple-1500-8",
+   "n": 1500,
+   "n_guards_at_ceiling": 109,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.8737752295240461,
+   "clears_gate": false
+  },
+  {
+   "name": "randsimple-1500-21",
+   "n": 1500,
+   "n_guards_at_ceiling": 102,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.8409014443238715,
+   "clears_gate": false
+  },
+  {
+   "name": "random-2000-8",
+   "n": 2000,
+   "n_guards_at_ceiling": 152,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.7958036407478843,
+   "clears_gate": false
+  },
+  {
+   "name": "random-2250-20",
+   "n": 2250,
+   "n_guards_at_ceiling": 148,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.7701960604659578,
+   "clears_gate": false
+  },
+  {
+   "name": "random-2250-15",
+   "n": 2250,
+   "n_guards_at_ceiling": 150,
+   "disc_vis_at_ceiling": 1.0,
+   "exact_at_ceiling": 0.8013859972090853,
+   "clears_gate": false
+  }
+ ],
+ "n_ge_800": {
+  "count": 7,
+  "n_clearing_gate": 0,
+  "exact_min": 0.7701960604659578,
+  "exact_max": 0.9118335808145053
+ }
+}
