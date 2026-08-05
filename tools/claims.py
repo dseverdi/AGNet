@@ -516,6 +516,13 @@ def _feature_baseline():
     # The geometry gain vs what ATTENTION buys: mlp -> full, not linear -> full.
     # The first draft compared it to linear -> full (+0.086) and the gate caught that
     # the claim was false by -0.056 before it reached the PDF.
+    _l = {r["name"]: r for r in json.loads((D / "probe_ladder.json").read_text())["rows"]}
+    _pr = ((_l["mlp"]["pr_auc_mean"] - _l["linear"]["pr_auc_mean"])
+           / (_l["full"]["pr_auc_mean"] - _l["linear"]["pr_auc_mean"])) * 100
+    add(id="ladder.mlp_share_pr", target="paper.tex",
+        sources=["paper/data/probe_ladder.json"], n=362, run="ladder",
+        group="ladder_share", value=_pr, interval=(77, 83),
+        phrase="the MLP recovers about $80\\%$ of the span")
     lad = json.loads((D / "probe_ladder.json").read_text())["rows"]
     r = {x["name"]: x["roc_auc_mean"] for x in lad}
     add(id="featbase.vs_attention_rungs", target="paper.tex", sources=src + [
@@ -523,6 +530,12 @@ def _feature_baseline():
         run="feature_baseline_cv5", group="feature_baseline",
         value=(both - e) / (r["full"] - r["mlp"]), interval=(2.0, 2.6),
         phrase="more than twice what the two attention rungs")
+    _e = d["arms"]["embedding"]["roc_auc_mean"]
+    add(id="featbase.angle_share", target="paper.tex", sources=src,
+        n=d["n_polygons"], run="feature_baseline_cv5", group="feature_baseline",
+        value=(d["arms"]["embedding+angle_only"]["roc_auc_mean"] - _e)
+              / (d["arms"]["embedding+geometry"]["roc_auc_mean"] - _e) * 100,
+        interval=(45, 60), phrase="recovers about half of that gain")
     # The Discussion attributes the rotation deficit to a missing interior-angle
     # readout. That needs the angle-ALONE-on-top arm, not the all-ten arm -- the
     # first draft cited the wrong one and the arm was run to back the sentence.
@@ -647,21 +660,27 @@ def _editor():
     # preserving it. See eval_editor.py --restrict-to-names.
     a = res("eval_editor_test362_t08.json")["summary"]
     b = res("eval_editor_test362_st0p9.json")["summary"]
-    add(id="editor.cut13", target="paper.tex",
+    add(id="editor.cut_best", target="paper.tex",
         sources=["results/eval_editor_test362_t08.json"],
         n=a["n_polygons"], run="editor_t08_test362", group="editor",
         value=(1 - a["ed_size_mean"] / a["seed_size_mean"]) * 100, interval=(15.0, 16.9),
         phrase="cuts $16\\%$ of the guards")
+    # WHAT recovery IS, because the prose once got it wrong: eval_editor.py sets
+    # recovery = (ed_r - seed_r) / (ls_r - seed_r) on the SCALAR reward
+    # cov - lam*k/n - tau_penalty*max(0, tau-cov), and leaves it undefined where LS
+    # did not improve the seed (291 of 362 polygons here). So >= 1.0 means "recovered
+    # LS's reward gain", NOT "matched LS on coverage and guard count separately" --
+    # only 54 of those 97 polygons do that. Do not restate this as a two-axis claim.
     add(id="editor.recovery", target="paper.tex",
         sources=["results/eval_editor_test362_t08.json"],
         n=a["n_polygons"], run="editor_t08_test362", group="editor",
         typeset=f"${a['frac_recovery_ge_1.0']:.2f}$")
-    add(id="editor.cut26", target="paper.tex",
+    add(id="editor.cut_aggr", target="paper.tex",
         sources=["results/eval_editor_test362_st0p9.json"], n=b["n_polygons"],
         run="editor_st0p9_test362", group="editor_aggressive",
         value=(1 - b["ed_size_mean"] / b["seed_size_mean"]) * 100, interval=(21.5, 22.9),
         phrase="up to $22\\%$")
-    add(id="editor.cov925", target="paper.tex",
+    add(id="editor.cov_aggr", target="paper.tex",
         sources=["results/eval_editor_test362_st0p9.json"], n=b["n_polygons"],
         run="editor_st0p9_test362", group="editor_aggressive",
         value=b["ed_cov_mean"], interval=(0.9325, 0.9345),
@@ -710,6 +729,23 @@ def _reward_estimator():
         sources=["results/reward_estimator_agreement.json"], n=s["n_polygons"],
         run="reward_agreement", group="reward_est",
         typeset=f"{s['pairwise_ordering_agreement']*100:.1f}\\%")
+    # These three sat on the exemption list, so they were never checked against the
+    # data at all -- the rollout count and, more importantly, the tau-gate asymmetry,
+    # which is the one real defect this item reports. Registering them.
+    add(id="rew.n_rollouts", target="paper.tex",
+        sources=["results/reward_estimator_agreement.json"], n=s["n_polygons"],
+        run="reward_agreement", group="reward_est_count",
+        typeset=f"{s['n_rollouts_scored']}")
+    TAU = s["reward"]["tau"]
+    rr = res("reward_estimator_agreement.json")["rows"]
+    for tag, cnt in (("tau_up", sum(1 for r in rr
+                                    if r["cov_disc"] >= TAU > r["cov_exact"])),
+                     ("tau_down", sum(1 for r in rr
+                                      if r["cov_exact"] >= TAU > r["cov_disc"]))):
+        add(id=f"rew.{tag}", target="paper.tex",
+            sources=["results/reward_estimator_agreement.json"],
+            n=s["n_rollouts_scored"], run="reward_agreement",
+            group="reward_est_gate", typeset=f"{cnt}")
 
 
 def _verbal():
@@ -967,16 +1003,11 @@ def _remaining():
     # exempting them from the numeral audit would be wrong -- they are not in the
     # text to audit.
     inv = json.loads((D / "invariance_test.json").read_text())["summary"]
-    covs = [v["mean_cov"] for k, v in inv.items() if k != "identity"]
-    add(id="inv.identity_cov", target="paper.tex",
+    # The identity worst-polygon coverage was exempt, so the "0.857 -> 0.382"
+    # contrast had only its right-hand side checked. Both ends now registered.
+    add(id="inv.identity_worst", target="paper.tex",
         sources=["paper/data/invariance_test.json"], n=362, run="policy1234",
-        group="invariance_cov", typeset=f"{inv['identity']['mean_cov']:.4f}")
-    add(id="inv.cov_lo", target="paper.tex",
-        sources=["paper/data/invariance_test.json"], n=362, run="policy1234",
-        group="invariance_cov", typeset=f"{min(covs):.3f}")
-    add(id="inv.cov_hi", target="paper.tex",
-        sources=["paper/data/invariance_test.json"], n=362, run="policy1234",
-        group="invariance_cov", typeset=f"{max(covs):.3f}")
+        group="invariance_worst", typeset=f"{inv['identity']['min_cov']:.3f}")
     add(id="inv.worst_min", target="paper.tex",
         sources=["paper/data/invariance_test.json"], n=362, run="policy1234",
         group="invariance_cov",
@@ -1002,17 +1033,41 @@ def _remaining():
         exact_total = round(r["vis_ms_mean"]) + round(
             (r["greedy_ms_mean"] - r["vis_ms_mean"]) / 1000, 1) * 1000
         ratios.append(exact_total / round(pt[k]["total_ms"]))
-    add(id="runtime.exact_gpu_max", target="paper.tex",
-        sources=["results/classical_timing_lazy.json", "results/probe_timing.json"],
-        n=None, run="timing", group="runtime_ratio",
-        typeset=f"{max(ratios):.0f}")
+    # Was the point value 1495x. The prose now says "two to three orders of
+    # magnitude", so bound the whole measured range inside [100, 10000) rather than
+    # pinning one endpoint -- see prose.precompute_order for the same reasoning.
+    for tag, v in (("lo", min(ratios)), ("hi", max(ratios))):
+        add(id=f"runtime.exact_gpu_order_{tag}", target="paper.tex",
+            sources=["results/classical_timing_lazy.json", "results/probe_timing.json"],
+            n=None, run="timing", group="runtime_ratio",
+            value=v, interval=(100.0, 10000.0),
+            phrase="exact greedy runs two to three orders of magnitude above the learned pass")
+    # The prose no longer quotes the n>198 rates (they duplicated the whole-split
+    # ones two sentences earlier); it claims they are UNCHANGED. So verify that
+    # relation directly: the largest gap between the subset rate and the
+    # whole-split rate, over both the policy and the probe, must stay under a
+    # percentage point. A bare numeral could not have caught the claim drifting.
     big = [r for r in ood if r["n"] > 198]
+    gaps = []
+    for which in ("seed", "probe_t020"):
+        sub = mean(sum(1 for r in poly(f) if r["n"] > 198 and r[which]["cov"] >= 0.95)
+                   / len(big) for f in OOD)
+        allp = mean(sum(1 for r in poly(f) if r[which]["cov"] >= 0.95)
+                    / len(poly(f)) for f in OOD)
+        gaps.append(abs(sub - allp) * 100)
+    add(id="ood.n198_gap", target="paper.tex",
+        sources=[f"paper/data/{f}" for f in OOD], n=len(big),
+        run="probe_seeds_1234_11_22_33", group="ood_subset",
+        value=max(gaps), interval=(0.0, 1.0),
+        phrase="both rates are essentially unchanged")
+    # The subset rate itself now appears only once, in the C2 contribution
+    # statement; sec:res-ood states the relation instead (ood.n198_gap above).
     add(id="ood.n198_probe_pct", target="paper.tex",
-        sources=[f"paper/data/{f}" for f in OOD], n=885,
+        sources=[f"paper/data/{f}" for f in OOD], n=len(big),
         run="probe_seeds_1234_11_22_33", group="ood_subset",
         typeset=f"{mean(sum(1 for r in poly(f) if r['n']>198 and r['probe_t020']['cov']>=0.95)/len(big) for f in OOD)*100:.1f}")
     a = res("eval_editor_test362_t08.json")["summary"]
-    add(id="editor.cov972", target="paper.tex",
+    add(id="editor.cov_best", target="paper.tex",
         sources=["results/eval_editor_test362_t08.json"],
         n=a["n_polygons"], run="editor_t08_test362", group="editor_cov",
         typeset=fmt(a["ed_cov_mean"], 3))
@@ -1081,10 +1136,15 @@ def _po_training():
     add(id="potrain.s22_gr_from_e2", target="paper.tex", sources=src, n=50,
         run="policy_seed22_log_trainprefix", group="po_training_s22",
         value=min(gr[ep.index(2):]), interval=(0.92, 1.0),
-        phrase="above $0.92$ from the second epoch onwards")
+        phrase="above $0.92$ from the second epoch")
     add(id="potrain.s22_last_epoch", target="paper.tex", sources=src, n=50,
         run="policy_seed22_log_trainprefix", group="po_training_s22",
         typeset=f"epoch ${ep[-1]}$")
+    # The estimated coverage seed 22 collapses onto was exempt, so the sentence's
+    # subject ("reaches an estimated coverage of 1.000") went unchecked.
+    add(id="potrain.s22_maxcov", target="paper.tex", sources=src, n=50,
+        run="policy_seed22_log_trainprefix", group="po_training_s22",
+        typeset=f"{max(cov):.3f}")
     # Reward at each run's endpoint under Eq.(reward): min(cov,tau) - lambda*|S|/n
     # - rho*max(0, tau-cov), with tau=0.99, lambda=1.0, rho=3.0.
     def _u(c, g):
@@ -1109,23 +1169,79 @@ def _c4_drift():
     d = json.loads((D / "setpred_iter_sweep.json").read_text())["cells"]
     src = ["paper/data/setpred_iter_sweep.json"]
     g = lambda t, k, f: d[f"t={t}|K={k}"][f]  # noqa: E731
-    for t, kk, f, nd, tag in ((0.5, 2, "opt", 4, "t05_opt_k12"),
-                              (0.65, 2, "opt", 3, "t065_opt_k12"),
-                              (0.8, 2, "opt", 3, "t08_opt_k12")):
+    # t=0.5's stationarity was quoted three times over (span, opt K1->K2, cov
+    # K1->K5) for one fact; the prose now keeps only the span, so the two
+    # per-step numerals are no longer typeset. c4.t05_span below still anchors it.
+    # All drift figures are now quoted K=1 -> K=5, at the two ENDS of the swept
+    # range. The 2026-08-05 extension to t in [0.2, 0.8] showed the drift is not
+    # monotone in t: it is minimised near t=0.5 and reverses sign below it, so the
+    # headline threshold has to be measured, not extrapolated from the high end.
+    for t, f, nd, tag in ((0.2, "opt", 3, "t02_opt_k15"),
+                          (0.8, "opt", 3, "t08_opt_k15")):
         add(id=f"c4.{tag}", target="paper.tex", sources=src, n=362,
             run="iter_sweep_policy1234", group="c4_drift",
-            typeset=f"${fmt(abs(g(t,kk,f)-g(t,1,f)), nd)}$")
-    add(id="c4.t05_cov_k15", target="paper.tex", sources=src, n=362,
+            typeset=f"${fmt(abs(g(t,5,f)-g(t,1,f)), nd)}$")
+    add(id="c4.t02_cov_k15", target="paper.tex", sources=src, n=362,
         run="iter_sweep_policy1234", group="c4_drift",
-        typeset=f"${fmt(g(0.5,1,'cov')-g(0.5,5,'cov'), 4)}$")
+        typeset=f"${fmt(abs(g(0.2,5,'cov')-g(0.2,1,'cov')), 4)}$")
     add(id="c4.t08_cov_k15", target="paper.tex", sources=src, n=362,
         run="iter_sweep_policy1234", group="c4_drift",
         typeset=f"${fmt(g(0.8,1,'cov')-g(0.8,5,'cov'), 4)}$")
+    # The sign reversal itself, as a relation rather than a numeral: below t=0.5
+    # extra passes ADD guards, above it they SHED them. This is what replaced the
+    # withdrawn "at every threshold tested, five passes end with fewer guards".
+    lo = min(g(t, 5, "opt") - g(t, 1, "opt") for t in (0.2, 0.25, 0.3))
+    hi = max(g(t, 5, "opt") - g(t, 1, "opt") for t in (0.6, 0.65, 0.75, 0.8))
+    add(id="c4.sign_reversal", target="paper.tex", sources=src, n=362,
+        run="iter_sweep_policy1234", group="c4_drift",
+        value=min(lo, -hi), interval=(0.0, 1.0),
+        phrase="the extra passes end with slightly \\emph{more} guards")
+    # No threshold Pareto-improves under iteration. This is the affirmative case
+    # for the single pass: not just that drift is small, but that spending more
+    # passes never buys coverage and cost together. Counts the violations, so the
+    # claim fails the moment one appears.
+    ALLT = sorted({float(k.split("|")[0].split("=")[1]) for k in d if "|K=" in k})
+    pareto = sum(1 for t in ALLT
+                 if g(t, 5, "cov") >= g(t, 1, "cov") - 1e-12
+                 and g(t, 5, "opt") <= g(t, 1, "opt") + 1e-12)
+    add(id="c4.no_pareto_gain", target="paper.tex", sources=src, n=362,
+        run="iter_sweep_policy1234", group="c4_drift",
+        value=float(pareto), interval=(0.0, 0.0),
+        phrase="At no threshold does iterating improve both axes at once")
     span = max(g(0.5, k, "opt") for k in (1, 2, 3, 5)) - min(
         g(0.5, k, "opt") for k in (1, 2, 3, 5))
     add(id="c4.t05_span", target="paper.tex", sources=src, n=362,
         run="iter_sweep_policy1234", group="c4_drift",
         typeset=f"${fmt(span, 3)}$")
+
+
+def _discvis_ceiling():
+    """The hard ceiling: disc-vis greedy's estimate saturates at 1.0 once all M=500
+    sample points are covered, so past that no guard count can help. Measured by
+    tools/analyze_discvis_ceiling.py. This is the CONSEQUENCE claim -- the earlier
+    correlation work established only that the gap tracks rounds, which left open
+    whether a few more guards would close it. They cannot."""
+    d = res("discvis_ceiling.json")
+    rows, big = d["rows"], d["n_ge_800"]
+    src = ["results/discvis_ceiling.json"]
+    # Every polygon at n >= 200 fails the gate at its own ceiling.
+    ge200 = [r for r in rows if r["n"] >= 200]
+    add(id="dvceil.n200_up_all_fail", target="paper.tex", sources=src, n=len(ge200),
+        run="discvis_ceiling", group="discvis_ceiling_n200",
+        value=float(sum(1 for r in ge200 if r["clears_gate"])), interval=(0.0, 0.0),
+        phrase="every polygon we tried from $n = 200$ upward falls short of the "
+               "$0.99$ gate on exact coverage")
+    # The stated 0.77--0.91 band at n >= 800, and that the estimate reads exactly 1.
+    add(id="dvceil.exact_lo", target="paper.tex", sources=src, n=big["count"],
+        run="discvis_ceiling", group="discvis_ceiling_ge800",
+        typeset=f"{big['exact_min']:.2f}")
+    add(id="dvceil.exact_hi", target="paper.tex", sources=src, n=big["count"],
+        run="discvis_ceiling", group="discvis_ceiling_ge800",
+        typeset=f"{big['exact_max']:.2f}")
+    add(id="dvceil.est_saturates", target="paper.tex", sources=src, n=len(rows),
+        run="discvis_ceiling", group="discvis_ceiling_all",
+        value=min(r["disc_vis_at_ceiling"] for r in rows), interval=(1.0, 1.0),
+        phrase="the search halts and reports coverage of exactly $1$")
 
 
 def _discvis_correlations():
@@ -1148,6 +1264,27 @@ def _discvis_correlations():
                    ("partial_n", partial(gp, nn, k))):
         add(id=f"dvcorr.{tag}", target="paper.tex", sources=src, n=len(rows),
             run="discvis_gap", group="discvis_corr", typeset=f"${v:.2f}$")
+    # The load-bearing fact for the SELECTION-effect reading, which the Spearman
+    # correlations alone cannot establish: _sample_points_in_polygon draws uniformly
+    # inside the polygon, so for a FIXED guard set the point-fraction estimate is an
+    # unbiased estimator of the area fraction and its error should be two-sided.
+    # Every measured gap being positive is therefore not explicable by finite sample
+    # resolution; it requires that the set (and the stopping time) were chosen using
+    # those same points. Registered as a count so one negative gap would fail it.
+    npos = sum(1 for r in rows if r["gap"] > 0)
+    add(id="dvcorr.all_gaps_positive", target="paper.tex", sources=src, n=len(rows),
+        run="discvis_gap", group="discvis_gap_sign",
+        value=float(len(rows) - npos), interval=(0.0, 0.0),
+        phrase="the gap is positive on every polygon we measured")
+    # The two same-n polygons the footnote contrasts. These were never actually
+    # checked: the completeness pass had been absorbing "+0.004" as a prefix of an
+    # unrelated C4 numeral ("0.0045"), so the pair only surfaced once that numeral
+    # was cut. Registering them by (n, guard count) pins them to the right rows.
+    for tag, nv, kv in (("gap_lo", 500, 3), ("gap_hi", 500, 56)):
+        r = next(r for r in rows if r["n"] == nv and r["n_guards"] == kv)
+        add(id=f"dvcorr.{tag}", target="paper.tex", sources=src, n=len(rows),
+            run="discvis_gap", group="discvis_gap_pair",
+            typeset=f"$+{r['gap']:.3f}$")
 
 
 def _wilson_uppers():
@@ -1273,17 +1410,24 @@ def _final_gaps():
     Sr = ["results/classical_timing_lazy.json", "results/probe_timing.json",
           "results/discvis_greedy_timing.json"]
     dv = {b["bucket"]: b for b in res("discvis_greedy_timing.json")["buckets"]}
+    # sec:res-runtime used to quote every one of these ratios as a point range
+    # (20--28x, 56--74x, 220--1495x, 16--28x, 57--75x). The section is a cost-profile
+    # comparison, not a benchmark, so the prose now states orders of magnitude and
+    # the table carries the times. Bound the ORDER instead of the value, so the
+    # verbal claim is still checked: "one to two orders" means the whole measured
+    # range stays inside [10, 100), and so on. A regression that moved a ratio
+    # across a decade boundary would fail here rather than pass silently.
     ex = [r["vis_ms_mean"] / pt[("cuda", r["bucket"])]["total_ms"] for r in cl_]
-    add(id="prose.pre_exact_lo", target="paper.tex", sources=Sr, n=None, run="timing",
-        group="precompute_ratio", typeset=f"${min(ex):.0f}$")
-    add(id="prose.pre_exact_hi", target="paper.tex", sources=Sr, n=None, run="timing",
-        group="precompute_ratio", typeset=f"${max(ex):.0f}$")
     dvr = [dv[b]["disc_vis_s_mean"] * 1000 / pt[("cuda", b)]["total_ms"]
            for b in dv if ("cuda", b) in pt]
-    add(id="prose.pre_disc_lo", target="paper.tex", sources=Sr, n=None, run="timing",
-        group="precompute_ratio", typeset=f"${min(dvr):.0f}$")
-    add(id="prose.pre_disc_hi", target="paper.tex", sources=Sr, n=None, run="timing",
-        group="precompute_ratio", typeset=f"${max(dvr):.0f}$")
+    add(id="prose.precompute_order", target="paper.tex", sources=Sr, n=None,
+        run="timing", group="precompute_ratio",
+        value=min(ex + dvr), interval=(10.0, 100.0),
+        phrase="one to two orders of magnitude more than the entire learned pass")
+    add(id="prose.precompute_order_hi", target="paper.tex", sources=Sr, n=None,
+        run="timing", group="precompute_ratio",
+        value=max(ex + dvr), interval=(10.0, 100.0),
+        phrase="one to two orders of magnitude more than the entire learned pass")
 
 
 def _approximations():
@@ -1338,10 +1482,9 @@ def _approximations():
         sources=["paper/data/probe_ladder.json"], n=None, run="architecture",
         group="params", value=(lad["full"]["n_params"] + 364162) / 1e6,
         interval=(0.82, 0.84), phrase="${\\approx}\\,0.83$M parameters")
-    add(id="approx.params_mb", target="paper.tex",
-        sources=["paper/data/probe_ladder.json"], n=None, run="architecture",
-        group="params", value=(lad["full"]["n_params"] + 364162) * 4 / 1e6,
-        interval=(3.25, 3.35), phrase="${\\approx}\\,3.3$~MB at single precision")
+    # The single-precision footprint (3.3 MB) is no longer restated: it is a
+    # mechanical 4x of the parameter count above, and sec:res-runtime is a cost
+    # comparison rather than a hardware spec.
     # rounded ROC-AUC and the t=0.70 coverage
     lp = json.loads((D / "encoder_linear_probe.json").read_text())
     add(id="approx.roc084", target="paper.tex",
@@ -1366,7 +1509,7 @@ def build() -> list[Claim]:
                _probe_ladder, _feature_baseline, _decode_search, _runtime,
                _ablation_2x2, _policy_seeds_indist, _discvis_quality,
                _runtime_classical, _minor_cells, _remaining,
-               _c4_drift, _po_training, _pos_weight, _discvis_correlations, _wilson_uppers, _final_gaps, _approximations,
+               _c4_drift, _po_training, _pos_weight, _discvis_ceiling, _discvis_correlations, _wilson_uppers, _final_gaps, _approximations,
                _significance, _invariance, _canonical, _editor, _supervised,
                _linear_probe, _reward_estimator, _verbal):
         fn()

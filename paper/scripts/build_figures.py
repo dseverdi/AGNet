@@ -6,7 +6,7 @@ Output: paper/gfx/setpred/fig_*.pdf
 Figures in the current paper layout (5):
 - fig_worked_example.pdf : two polygons, seed vs probe vs optimum
 - fig_distributions.pdf  : 3x3 grid, {test, ood, ood-large} x {coverage CCDF, |S|/n, |S|/OPT}
-- fig_mechanism.pdf      : K-invariance fixed point (1x3 panels)
+- fig_mechanism.pdf      : K-invariance fixed point (2x2; legend in the 4th cell)
 - fig_embedding.pdf      : single panel, guard-score distribution (linear rule on
                            frozen encoder features); class separation = the ROC-AUC
 
@@ -517,12 +517,10 @@ def fig_distributions() -> None:
         # with tab_large and the eval protocol (paper Section 5.3).
         ax = axrow[2]
         if "ood-large" in title:
+            # Cell (3,3) is empty of data and is spent on the legend instead (see
+            # the end of this function). The note that used to sit here duplicated
+            # the caption, which already states the omission and its reason.
             ax.axis("off")
-            ax.text(0.5, 0.5,
-                    "$|S|/\\mathrm{OPT}$ omitted\n"
-                    "(OPT unavailable for\n79/285 polygons, $n\\geq800$)",
-                    ha="center", va="center", transform=ax.transAxes,
-                    color="0.4")
         else:
             data = [ratio_arr(polys, mkey, "OPT") for mkey, _, _ in methods]
             bp = ax.boxplot(data, patch_artist=True, showmeans=True, showfliers=True,
@@ -602,7 +600,17 @@ def fig_distributions() -> None:
         ax.set_ylabel("$|S|/\\mathrm{OPT}$ (mean, 206/285)")
         ax.grid(alpha=0.3, linewidth=0.5, axis="y")
 
-    axes[0][0].legend(loc="lower left", frameon=False)
+    # Legend in the freed (3,3) cell rather than inside the first panel: that cell
+    # carries no data (OPT is unavailable for the 79 largest ood-large polygons), so
+    # it is better spent on the key, and the first panel gets its lower-left corner
+    # back. Falls back to the old placement whenever (3,3) does hold data -- the
+    # two-row figure, or the aggregate fallback row.
+    if n_rows == 3 and d_large_poly is not None:
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        axes[2][2].legend(handles, labels, loc="center", frameon=False,
+                          title="Method")
+    else:
+        axes[0][0].legend(loc="lower left", frameon=False)
     plt.tight_layout()
     save(fig, "fig_distributions.pdf")
 
@@ -678,7 +686,8 @@ def fig_operating_curve() -> None:
 
 
 def fig_mechanism() -> None:
-    """1x3: K-invariance fixed point across coverage, |S|/n, and |S|/OPT.
+    """2x2: K-invariance fixed point across coverage, |S|/n, and |S|/OPT,
+    with the legend occupying the fourth cell.
 
     Reads paper/data/setpred_iter_sweep.json.
     """
@@ -690,14 +699,20 @@ def fig_mechanism() -> None:
     import numpy as np
     cells = d_iter["cells"]
     Ks = [1, 2, 3, 5]
-    # Derive the thresholds from the data rather than hardcoding them. A hardcoded
-    # list containing t=0.7, which this sweep does not cover, plotted an all-None
-    # series -- invisible, but it still produced a legend entry for a curve that
-    # was not there. Deriving them keeps the legend and the plot in agreement.
-    thresholds = sorted(
-        {k.split("|")[0].split("=")[1] for k in cells if "|K=" in k},
-        key=float,
-    )
+    # The sweep now covers eight thresholds, from the headline operating point to
+    # the decision boundary. Plotting all eight is unreadable, so show a
+    # representative ladder that spans BOTH drift regimes: t <= 0.3 gains guards
+    # with more passes, t >= 0.6 sheds them, and t = 0.5 is the near-stationary
+    # turning point between them. Any subset that omitted t <= 0.3 would hide the
+    # sign reversal, which is the point of the panel.
+    WANT = ["0.2", "0.3", "0.5", "0.65", "0.8"]
+    have = {k.split("|")[0].split("=")[1] for k in cells if "|K=" in k}
+    missing = [t for t in WANT if t not in have]
+    if missing:
+        # Never plot a threshold the sweep lacks: an all-None series is invisible
+        # but still claims a legend entry for a curve that is not there.
+        print(f"  fig_mechanism: sweep lacks t={missing}, dropping from the plot")
+    thresholds = [t for t in WANT if t in have]
     palette = ["#577590", "#43aa8b", "#90be6d", "#f9c74f", "#f8961e", "#f3722c"]
     metrics = [
         ("cov",  "Mean coverage $\\mathrm{Cov}$"),
@@ -705,13 +720,21 @@ def fig_mechanism() -> None:
         ("opt",  "Mean $|S|/\\mathrm{OPT}$"),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11, 3.6))
-    for ax, (mkey, ylabel) in zip(axes, metrics):
-        for t, col in zip(thresholds, palette):
+    # 2x2 with the legend in the fourth cell, NOT 1x3. The figure is included at
+    # width=\linewidth, and \textwidth here is only 4.77in (elsarticle preprint),
+    # so a 1x3 at figsize 11in was scaled by 0.43 on the page: 9pt axis labels
+    # rendered at 3.9pt and the 7pt legend at 3.0pt. Drawing near the final width
+    # instead keeps type at its nominal size, and the freed cell takes the legend
+    # out of the data area. Same fix as fig_distributions.
+    markers = ["o", "s", "^", "D", "v", "P"]
+    fig, axes = plt.subplots(2, 2, figsize=(4.9, 4.6))
+    flat = axes.ravel()
+    for ax, (mkey, ylabel) in zip(flat, metrics):
+        for t, col, mk in zip(thresholds, palette, markers):
             vals = [cells[f"t={t}|K={K}"][mkey] if f"t={t}|K={K}" in cells else None
                     for K in Ks]
-            ax.plot(Ks, vals, "o-", color=col, label=f"$t={t}$",
-                    linewidth=1.5, markersize=5)
+            ax.plot(Ks, vals, marker=mk, linestyle="-", color=col, label=f"$t={t}$",
+                    linewidth=1.3, markersize=4)
         ax.set_xlabel("Inference passes $K$")
         ax.set_ylabel(ylabel)
         ax.set_xticks(Ks)
@@ -723,11 +746,15 @@ def fig_mechanism() -> None:
             pad = max(span * 0.15, 1e-4)
             ax.set_ylim(min(all_vals) - pad, max(all_vals) + pad)
 
-    # Not "is a fixed point": the corrected data shows near-stationarity at the
-    # operating thresholds and a measurable contraction as t approaches the
-    # decision boundary, so the title must not assert an exact fixed point.
-    axes[1].set_title("Iterative inference is near-stationary, contracting at high $t$")
-    axes[0].legend(loc="best", frameon=False, ncol=2, title="Threshold", fontsize=7)
+    # Fourth cell: legend only. The former middle-panel title said what the caption
+    # already says ("near-stationary ... contracting at high t"), so it is dropped
+    # rather than moved -- and a title must never assert an exact fixed point, which
+    # the data does not show.
+    legend_ax = flat[3]
+    handles, labels = flat[0].get_legend_handles_labels()
+    legend_ax.legend(handles, labels, loc="center", frameon=False,
+                     title="Threshold $t$", ncol=1, handlelength=1.8)
+    legend_ax.axis("off")
     plt.tight_layout()
     save(fig, "fig_mechanism.pdf")
 

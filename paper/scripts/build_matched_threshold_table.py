@@ -199,7 +199,11 @@ def main() -> None:
     print(f"wrote {TABLE}\n")
     print("\n".join(L))
 
-    print("\n--- panel (c): encoder cost multiple by policy ---")
+    # The former panel (c). It is no longer typeset, but the numbers still back
+    # the per-policy sentence in sec:res-headline-ablation, so keep computing and
+    # printing them -- claims.py calls encoder_cost_multiple() for the same range.
+    mult = encoder_cost_multiple()
+    print("\n--- encoder cost multiple by policy (was panel (c); prose only) ---")
     allv = []
     for p in ["1234"] + PSEEDS:
         vs = [mult[p][t] for t in TAILS if mult[p][t] is not None]
