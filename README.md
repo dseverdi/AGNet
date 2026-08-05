@@ -142,12 +142,14 @@ python tools/mutation_test_gate.py         # verifies the gate itself still catc
 |---|---|
 | paper source, tables, the four figures it inputs | `data/ls_trajectories_*.pkl` (163 MB) |
 | `results/*.json` — the measurements behind every claim | `paper/data/*.json` (17 MB per-polygon dumps) |
-| all generators under `paper/scripts/` and `tools/` | model checkpoints |
+| all generators under `paper/scripts/` and `tools/` | model checkpoints (see Releases, above) |
 
-The large files are regenerable: trajectories via step 2 above, and
-`paper/data/*.json` from `results/` via `paper/scripts/build_paper_data.py`. Without
-them `verify_paper_consistency.py` stops at its source-readability check, since the
-registry cites the trajectory pickles; the paper build itself is unaffected.
+Everything not shipped is obtainable: the two checkpoints from the Releases page
+linked above, the trajectory pickles from those checkpoints via step 2 below, and
+`paper/data/*.json` from `results/` via `paper/scripts/build_paper_data.py`. Until the
+trajectory pickles are present `verify_paper_consistency.py` stops at its
+source-readability check, since the registry cites them; the paper build itself needs
+none of it.
 
 ## Reproducing paper results from scratch
 
