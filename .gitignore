@@ -96,8 +96,10 @@ paper/gfx/setpred/*
 !paper/gfx/setpred/fig_operating_curve.pdf
 !paper/gfx/setpred/fig_worked_example.pdf
 !results/*.json
-# build artifact of the Overleaf bundle, regenerated on demand
+# build artifacts of the submission bundles, regenerated on demand
 paper/agnet_overleaf.zip
+paper/agnet_arxiv.zip
+paper/paper-arxiv.pdf
 
 # Peer-review correspondence: kept locally, never tracked. NOTE: these are still
 # present in this branch's earlier history (27 commits) and were pushed, so

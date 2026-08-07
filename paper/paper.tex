@@ -1,4 +1,22 @@
-\documentclass[preprint,10pt]{elsarticle}
+% ---------------------------------------------------------------------------
+% TWO BUILD TARGETS, ONE SOURCE.
+%   journal (default) : latexmk -pdf paper.tex
+%   arXiv preprint    : latexmk -pdf -jobname=paper-arxiv "\def\arxiv{}\input{paper}"
+% One source on purpose: tools/verify_paper_consistency.py checks 507 registered
+% claims against THIS file, so a forked arXiv copy would need its own registry and
+% the two would drift apart.
+% ---------------------------------------------------------------------------
+\ifdefined\arxiv
+  \documentclass[11pt]{article}
+\else
+  \documentclass[preprint,10pt]{elsarticle}
+\fi
+% arXiv target only: 1in margins and microtype. Not applied to the journal
+% build, whose measure and line breaking are already settled.
+\ifdefined\arxiv
+  \usepackage[margin=1in]{geometry}
+  \usepackage{microtype}
+\fi
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
 \usepackage{graphicx}
@@ -28,11 +46,35 @@
 
 \begin{document}
 
-\begin{frontmatter}
-
-\title{Probing Reinforcement-Learned Representations\\
+% Metadata defined once, consumed by whichever frontmatter the target needs.
+\newcommand{\PaperTitle}{Probing Reinforcement-Learned Representations\\
 for Geo-Free Guard Placement in the\\
 Vertex-Guard Art Gallery Problem}
+\newcommand{\PaperAffil}{School of Applied Mathematics and Informatics,
+  University J.~J.~Strossmayer of Osijek, Croatia}
+\newcommand{\PaperAbstract}{%
+Reinforcement learning can train models to solve hard combinatorial problems from raw inputs, but what such a model has learned, as opposed to what it outputs, is hard to establish. We study this on the vertex-guard Art Gallery Problem under a constraint we call \emph{geo-free} inference: at test time the model sees only vertex coordinates, never a visibility computation, though training and evaluation use visibility freely. A pointer-network policy trained by a coverage-aware reward places guards economically but leaves a tail of under-covered polygons that grows beyond the training sizes. Freezing its encoder and reading the embeddings with a small classifier removes most of that tail at a cost in guards, cutting under-covered polygons several-fold in distribution and about ten-fold on instances five times the training size. Compared at equal guard count, the encoder rather than the classifier's own capacity accounts for the gain, and this holds on four independently trained policies; hand-designed geometric features recover much of the encoder's advantage, yet the frozen features still carry guard-relevant structure those features miss, and vice versa. We conclude that the reinforcement-trained encoder holds much of the guard-placement structure its decoder failed to express, tied to the conventions of the instances it was trained on. The method measures what such a model has learned; it is not a competitive Art Gallery solver.}
+\newcommand{\PaperKeywordsArxiv}{Art Gallery Problem, neural combinatorial optimization, reinforcement learning, pointer networks, representation probing}
+
+\ifdefined\arxiv
+  \title{\PaperTitle}
+  \author{%
+    Domagoj Ševerdija\thanks{Corresponding author: \texttt{dseverdi@mathos.hr}} \and
+    Jurica Maltar \and
+    Nathan Chappel \and
+    Domagoj Matijević\\[0.5em]
+    \normalsize \PaperAffil}
+  \date{}
+  \maketitle
+  \begin{abstract}
+  \PaperAbstract
+  \end{abstract}
+  \noindent\textbf{Keywords:} \PaperKeywordsArxiv
+  \vspace{1em}
+\else
+\begin{frontmatter}
+
+\title{\PaperTitle}
 
 \author[osijek]{Domagoj Ševerdija\corref{cor1}}
 \ead{dseverdi@mathos.hr}
@@ -44,18 +86,19 @@ Vertex-Guard Art Gallery Problem}
 \ead{domagoj@mathos.hr}
 
 \cortext[cor1]{Corresponding author}
-\address[osijek]{School of Applied Mathematics and Informatics,
-  University J.~J.~Strossmayer of Osijek, Croatia}
+
+\address[osijek]{\PaperAffil}
 
 \begin{abstract}
-Reinforcement learning can train models to solve hard combinatorial problems from raw inputs, but what such a model has learned, as opposed to what it outputs, is hard to establish. We study this on the vertex-guard Art Gallery Problem under a constraint we call \emph{geo-free} inference: at test time the model sees only vertex coordinates, never a visibility computation, though training and evaluation use visibility freely. A pointer-network policy trained by a coverage-aware reward places guards economically but leaves a tail of under-covered polygons that grows beyond the training sizes. Freezing its encoder and reading the embeddings with a small classifier removes most of that tail at a cost in guards, cutting under-covered polygons several-fold in distribution and about ten-fold on instances five times the training size. Compared at equal guard count, the encoder rather than the classifier's own capacity accounts for the gain, and this holds on four independently trained policies; hand-designed geometric features recover much of the encoder's advantage, yet the frozen features still carry guard-relevant structure those features miss, and vice versa. We conclude that the reinforcement-trained encoder holds much of the guard-placement structure its decoder failed to express, tied to the conventions of the instances it was trained on. The method measures what such a model has learned; it is not a competitive Art Gallery solver.
+\PaperAbstract
 \end{abstract}
 
 \begin{keyword}
-Art Gallery Problem \sep neural combinatorial optimization \sep reinforcement learning \sep pointer networks \sep representation probing 
+Art Gallery Problem \sep neural combinatorial optimization \sep reinforcement learning \sep pointer networks \sep representation probing
 \end{keyword}
 
 \end{frontmatter}
+\fi
 
 
 \section{Introduction}
@@ -296,7 +339,7 @@ The geo-free policy on its own (Table~\ref{tab:headline}, \emph{seed} row) place
 
 \begin{figure}[!ht]
   \centering
-  \includegraphics[width=\linewidth]{gfx/setpred/fig_worked_example.pdf}
+  \adjustbox{max width=\linewidth}{\includegraphics{gfx/setpred/fig_worked_example.pdf}}
   \caption{Two polygons drawn with the policy's seed (left), the policy plus the \SetPredictor{} probe at $t = 0.20$ (middle), and the optimum (right); guard vertices are marked, with $|S|$ and coverage printed per panel. Both are cases where the seed falls below the $0.95$ gate and the probe lifts it above. Neither is a best case: both are typical examples, picked by size from the polygons the probe rescues. Row 1 is in-distribution ($n = 70$), row 2 out-of-distribution ($n = 350$, about $1.8\times$ the largest training polygon).}
   \label{fig:worked_example}
 \end{figure}
@@ -363,14 +406,14 @@ Two conditions deserve comment. The no-encoder ablation keeps the policy's seed 
 
 \begin{figure}[!ht]
   \centering
-  \includegraphics[width=\linewidth]{gfx/setpred/fig_operating_curve.pdf}
+  \adjustbox{max width=\linewidth}{\includegraphics{gfx/setpred/fig_operating_curve.pdf}}
   \caption{The probe's coverage--cost operating curve over the threshold $t$, single pass, on \texttt{test} ($362$ polygons). Top row outcome, bottom row cost; lines are the four-seed mean with $\pm1$ std bands, the dashed line the $t$-independent policy seed, the dotted vertical the headline $t = 0.20$. The two cost panels are one curve at two scales ($|S|/n$ and $|S|/\OPT$ agree to within $2.3\%$). The bands widen with $t$: the cheap end is the less stable one.}
   \label{fig:operating_curve}
 \end{figure}
 
 \begin{figure}[!ht]
   \centering
-  \includegraphics[width=\linewidth]{gfx/setpred/fig_distributions.pdf}
+  \adjustbox{max width=\linewidth}{\includegraphics{gfx/setpred/fig_distributions.pdf}}
   \caption{Distributional view across \texttt{test} (top, $362$ polygons), \texttt{ood} (middle, $2081$) and \texttt{ood-large} (bottom, $285$). \emph{Left:} per-polygon coverage as a complementary CDF, dashed line at the $0.95$ gate. \emph{Centre:} $|S|/n$ for the policy seed and three probe thresholds. \emph{Right:} $|S|/\OPT$, omitted for \texttt{ood-large} where $\OPT$ is unavailable for the larger polygons. Displayed seed $1234$.}
   \label{fig:distributions}
 \end{figure}
@@ -440,7 +483,7 @@ Re-running the probe with its own output as the updated seed indicator leaves th
 
 \begin{figure}[!ht]
   \centering
-  \includegraphics[width=\linewidth]{gfx/setpred/fig_mechanism.pdf}
+  \adjustbox{max width=\linewidth}{\includegraphics{gfx/setpred/fig_mechanism.pdf}}
   \caption{Iterative inference is near-stationary in coverage at the thresholds the probe is operated at, and contracts in guard count only at the highest ones, on the held-out \texttt{test} split ($362$ polygons). Panels show mean coverage (\emph{top left}), $|S|/n$ (\emph{top right}), and $|S|/\OPT$ (\emph{bottom left}) versus inference passes $K \in \{1,2,3,5\}$ (legend, \emph{bottom right}) for a representative ladder drawn from the eight swept thresholds, spanning the headline operating point to the decision boundary. Drift is smallest near $t = 0.5$ and grows on both sides of it, changing sign: extra passes add guards below it and shed them above (bounds in Section~\ref{sec:res-iteration}).}
   \label{fig:mechanism}
 \end{figure}
