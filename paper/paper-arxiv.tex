@@ -1,0 +1,16 @@
+% arXiv toplevel file.
+%
+% Sets the \arxiv switch and hands off to the shared source, so the preprint and
+% the journal submission are built from one file and cannot drift apart. See the
+% header of paper.tex for what the switch changes (documentclass, margins,
+% microtype, and the frontmatter block).
+%
+% This wrapper exists because arXiv runs its own LaTeX and cannot be given
+% latexmk's -usepretex flag. paper.tex also carries a \documentclass, so
+% 00README.XXX names this file as the toplevel to remove the ambiguity.
+%
+% Build locally with either:
+%   latexmk -pdf paper-arxiv.tex
+%   latexmk -pdf -usepretex='\def\arxiv{}' -jobname=paper-arxiv paper.tex
+\def\arxiv{}
+\input{paper}

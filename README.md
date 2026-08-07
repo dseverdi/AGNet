@@ -125,8 +125,12 @@ python eval_set_predictor.py \
 that produce them. The manuscript rebuilds as-is:
 
 ```bash
-latexmk -pdf -cd paper/paper.tex        # 39 pages, no external data needed
+latexmk -pdf -cd paper/paper.tex         # journal version, elsarticle, 39 pp
+latexmk -pdf -cd paper/paper-arxiv.tex   # arXiv preprint, article class, 34 pp
 ```
+
+Both targets come from the same `paper.tex`; `paper-arxiv.tex` is a two-line wrapper
+that flips a switch in its preamble. Neither needs any data outside the repository.
 
 Every numeric claim in the paper is registered in `tools/claims.py` and checked
 against the files under `results/` by a consistency gate:
