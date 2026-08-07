@@ -100,6 +100,7 @@ paper/gfx/setpred/*
 paper/agnet_overleaf.zip
 paper/agnet_arxiv.zip
 paper/paper-arxiv.pdf
+paper/paper-arxiv.bbl
 
 # Peer-review correspondence: kept locally, never tracked. NOTE: these are still
 # present in this branch's earlier history (27 commits) and were pushed, so
